@@ -25,7 +25,7 @@ The series id must exist in `resources/series/catalog.json` (`siege` and `ghouls
 }
 ```
 
-Only flat `mods/*.jar` entries are accepted. The downloader allows HTTPS URLs hosted on GitHub or `raw.githubusercontent.com`, limits a mod to 512 MiB and a pack to 4 GiB, and checks declared byte sizes, SHA-256, and the presence of `META-INF/mods.toml` before changing the instance.
+Only flat `mods/*.jar` entries are accepted. The downloader allows HTTPS URLs hosted on GitHub or `raw.githubusercontent.com`, limits a mod to 512 MiB and a pack to 4 GiB, and checks declared byte sizes and SHA-256, and requires each archive to contain either `META-INF/mods.toml` or a Forge manifest (`META-INF/MANIFEST.MF`) marked `FMLModType: LIBRARY` before changing the instance. This includes Forge runtime libraries such as Kotlin for Forge while still rejecting arbitrary JARs.
 
 The launcher records the names and hashes it installed in its per-instance `.eternalcraft/<series>-official-pack.json` state file. On a later version, it updates and removes only those tracked official files. User-owned files in `mods/personales/` and untracked files in `mods/` are kept. If a filename collides with a personal or untracked mod, the sync stops before modifying the instance.
 

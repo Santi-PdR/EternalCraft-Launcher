@@ -478,7 +478,7 @@ fn read_log_tail(path: &Path, max_bytes: u64) -> Result<Option<String>, String> 
         .map_err(|error| format!("No se pudo leer el registro de Minecraft: {error}"))?;
     let text = String::from_utf8_lossy(&bytes);
     let text = if start > 0 {
-        text.find('\\n')
+        text.find('\n')
             .map(|offset| &text[offset + 1..])
             .unwrap_or("")
     } else {
@@ -501,8 +501,8 @@ mod log_tests {
                 .unwrap()
                 .as_nanos()
         ));
-        fs::write(&path, b"123456\\nabcdef\\n").unwrap();
-        assert_eq!(read_log_tail(&path, 8).unwrap().as_deref(), Some("abcdef\\n"));
+        fs::write(&path, b"123456\nabcdef\n").unwrap();
+        assert_eq!(read_log_tail(&path, 8).unwrap().as_deref(), Some("abcdef\n"));
         fs::remove_file(path).unwrap();
     }
 }
@@ -1462,7 +1462,7 @@ fn get_launcher_logs(app: AppHandle, series_id: String) -> Result<String, String
         return Ok(launcher_log);
     };
     Ok(format!(
-        "=== EternalCraft Launcher ===\\n{launcher_log}\\n=== Minecraft · {} ===\\n{}",
+        "=== EternalCraft Launcher ===\n{launcher_log}\n=== Minecraft · {} ===\n{}",
         series_id, game_log
     ))
 }

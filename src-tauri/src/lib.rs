@@ -2303,6 +2303,54 @@ mod tests {
         assert_eq!(memory_bounds(16 * 1024), (1024, 12 * 1024));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn minecraft_exit_status_records_success_and_failure_without_starting_game() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let success = minecraft_exit_status("siege", 1234, std::process::ExitStatus::from_raw(0));
+        assert!(!success.running);
+        assert_eq!(success.series_id.as_deref(), Some("siege"));
+        assert_eq!(success.pid, Some(1234));
+        assert_eq!(success.exit_code, Some(0));
+        assert_eq!(success.exit_success, Some(true));
+
+        let failure = minecraft_exit_status(
+            "ghouls-outbreak",
+            5678,
+            std::process::ExitStatus::from_raw(7 << 8),
+        );
+        assert!(!failure.running);
+        assert_eq!(failure.series_id.as_deref(), Some("ghouls-outbreak"));
+        assert_eq!(failure.pid, Some(5678));
+        assert_eq!(failure.exit_code, Some(7));
+        assert_eq!(failure.exit_success, Some(false));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn minecraft_exit_status_records_success_and_failure_without_starting_game() {
+        use std::os::windows::process::ExitStatusExt;
+
+        let success = minecraft_exit_status("siege", 1234, std::process::ExitStatus::from_raw(0));
+        assert!(!success.running);
+        assert_eq!(success.series_id.as_deref(), Some("siege"));
+        assert_eq!(success.pid, Some(1234));
+        assert_eq!(success.exit_code, Some(0));
+        assert_eq!(success.exit_success, Some(true));
+
+        let failure = minecraft_exit_status(
+            "ghouls-outbreak",
+            5678,
+            std::process::ExitStatus::from_raw(7),
+        );
+        assert!(!failure.running);
+        assert_eq!(failure.series_id.as_deref(), Some("ghouls-outbreak"));
+        assert_eq!(failure.pid, Some(5678));
+        assert_eq!(failure.exit_code, Some(7));
+        assert_eq!(failure.exit_success, Some(false));
+    }
+
     #[test]
     fn memory_arguments_replace_only_jvm_heap_flags_before_main_class() {
         let mut args = vec![

@@ -16,4 +16,13 @@ export interface Bootstrap {
   gameDirectories: Record<string, string>;
   suggestedDirectories: Record<string, string>;
   configDirectory: string;
+  java: JavaStatus;
+}
+
+export interface JavaStatus {
+  executable: string | null;
+  version: string | null;
+  major: number | null;
+  compatible: boolean;
+  detail: string;
 }

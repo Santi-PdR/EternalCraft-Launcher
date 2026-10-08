@@ -13,6 +13,8 @@ npm run tauri dev
 
 The initial shell is data-driven and contains SIEGE and Ghouls Outbreak series entries. Pack distribution is intentionally marked unpublished until real manifests and release assets are added to this repository; it does not fabricate a playable pack.
 
+The settings page currently detects Java installations and reports whether Java 17 is available for the bundled Minecraft 1.20.1 / Forge profile. It does not install Java or launch Minecraft yet.
+
 ## Design constraints
 
 - No Electron; Tauri owns the native window and Rust owns filesystem/process operations.

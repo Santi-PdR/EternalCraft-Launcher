@@ -2039,7 +2039,7 @@ mod tests {
             )
             .unwrap();
         archive
-            .write_all(b"Manifest-Version: 1.0\\r\\nFMLModType: LIBRARY\\r\\n\\r\\n")
+            .write_all(b"Manifest-Version: 1.0\r\nFMLModType: LIBRARY\r\n\r\n")
             .unwrap();
         archive.finish().unwrap();
         validate_forge_mod_archive(&library).unwrap();
@@ -2049,7 +2049,7 @@ mod tests {
         archive
             .start_file("META-INF/MANIFEST.MF", zip::write::SimpleFileOptions::default())
             .unwrap();
-        archive.write_all(b"Manifest-Version: 1.0\\r\\n\\r\\n").unwrap();
+        archive.write_all(b"Manifest-Version: 1.0\r\n\r\n").unwrap();
         archive.finish().unwrap();
         assert!(validate_forge_mod_archive(&arbitrary).is_err());
 

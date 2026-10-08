@@ -736,7 +736,7 @@ mod tests {
         let stage1 = game.join("stage1");
         fs::create_dir(&stage1).unwrap();
         fs::write(stage1.join("old.jar"), old).unwrap();
-        fs::write(stage1.join("kept.jar"), same).unwrap();
+        fs::write(stage1.join("kept.jar"), &same).unwrap();
         reconcile_staged(&game, &first, &stage1).unwrap();
         fs::remove_dir_all(&stage1).unwrap();
         assert!(files_to_download(&game, &first).unwrap().is_empty());

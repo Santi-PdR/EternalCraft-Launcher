@@ -470,6 +470,16 @@ fn read_log_tail(path: &Path, max_bytes: u64) -> Result<Option<String>, String> 
     let mut file = fs::File::open(path)
         .map_err(|error| format!("No se pudo abrir el registro de Minecraft: {error}"))?;
     let start = metadata.len().saturating_sub(max_bytes);
+    let starts_at_line_boundary = if start == 0 {
+        true
+    } else {
+        file.seek(SeekFrom::Start(start - 1))
+            .map_err(|error| format!("No se pudo buscar el final del registro: {error}"))?;
+        let mut previous_byte = [0_u8; 1];
+        file.read_exact(&mut previous_byte)
+            .map_err(|error| format!("No se pudo leer el registro de Minecraft: {error}"))?;
+        previous_byte[0] == b'\n'
+    };
     file.seek(SeekFrom::Start(start))
         .map_err(|error| format!("No se pudo buscar el final del registro: {error}"))?;
     let mut bytes = Vec::with_capacity(metadata.len().saturating_sub(start) as usize);
@@ -477,7 +487,7 @@ fn read_log_tail(path: &Path, max_bytes: u64) -> Result<Option<String>, String> 
         .read_to_end(&mut bytes)
         .map_err(|error| format!("No se pudo leer el registro de Minecraft: {error}"))?;
     let text = String::from_utf8_lossy(&bytes);
-    let text = if start > 0 {
+    let text = if start > 0 && !starts_at_line_boundary {
         text.find('\n')
             .map(|offset| &text[offset + 1..])
             .unwrap_or("")
@@ -502,6 +512,7 @@ mod log_tests {
                 .as_nanos()
         ));
         fs::write(&path, b"123456\nabcdef\n").unwrap();
+        assert_eq!(read_log_tail(&path, 7).unwrap().as_deref(), Some("abcdef\n"));
         assert_eq!(read_log_tail(&path, 8).unwrap().as_deref(), Some("abcdef\n"));
         fs::remove_file(path).unwrap();
     }

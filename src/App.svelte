@@ -1,3 +1,5 @@
+/home/Santipdr/.bashrc: line 47: /tmp/eternalcraft-cargo/env: No such file or directory
+/home/Santipdr/.bash_profile: line 18: /tmp/eternalcraft-cargo/env: No such file or directory
 <script lang="ts">
   import { convertFileSrc, invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
@@ -15,6 +17,7 @@
   let error = $state('');
   let notice = $state('');
   let javaRefreshing = $state(false);
+  let memoryDraft = $state(0);
   let modInventory = $state<ModInventory | null>(null);
   let modsLoading = $state(false);
   let modsBusy = $state(false);
@@ -113,6 +116,7 @@
     try {
       bootstrap = await invoke<Bootstrap>('get_bootstrap');
       clientIdDraft = bootstrap.microsoftClientId ?? '';
+      memoryDraft = bootstrap.memory.selectedMb;
       await loadMods(bootstrap.activeSeriesId);
     } catch (reason) {
       error = String(reason);
@@ -214,6 +218,35 @@
       bootstrap = await invoke<Bootstrap>('link_detected_directory', { seriesId: selected.id });
       await loadMods(selected.id);
       notice = 'Instancia detectada vinculada al launcher';
+    } catch (reason) {
+      error = String(reason);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function saveMemoryLimit() {
+    if (!bootstrap) return;
+    busy = true;
+    error = '';
+    try {
+      bootstrap = await invoke<Bootstrap>('set_memory_limit', { memoryMb: memoryDraft });
+      memoryDraft = bootstrap.memory.selectedMb;
+      notice = `Memoria JVM guardada: ${bootstrap.memory.selectedMb} MiB`;
+    } catch (reason) {
+      error = String(reason);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function resetMemoryLimit() {
+    busy = true;
+    error = '';
+    try {
+      bootstrap = await invoke<Bootstrap>('reset_memory_limit');
+      memoryDraft = bootstrap.memory.selectedMb;
+      notice = 'Memoria JVM ajustada automáticamente';
     } catch (reason) {
       error = String(reason);
     } finally {
@@ -443,7 +476,7 @@
         <section class="page narrow-page"><div class="page-heading"><div><span class="eyebrow">CONFIGURACIÓN LOCAL</span><h1>Ajustes</h1><p>Preferencias guardadas en este equipo.</p></div></div><div class="settings-card">
           <div class="setting-row"><div><span class="eyebrow">CUENTA DE MINECRAFT</span><h2>{bootstrap.microsoftProfile?.username ?? 'Sin sesión iniciada'}</h2><p>{bootstrap.microsoftProfile ? `UUID ${bootstrap.microsoftProfile.uuid}` : 'Inicia sesión con Microsoft para jugar cuando el pack de una serie esté publicado.'}</p></div><div class="play-actions">{#if bootstrap.microsoftProfile}<button class="button secondary" onclick={logoutMicrosoft} disabled={busy}>Cerrar sesión</button>{:else}<button class="button primary" onclick={loginMicrosoft} disabled={busy || !bootstrap.microsoftClientId}>{busy ? 'Esperando navegador…' : 'Conectar cuenta Microsoft'}</button>{/if}</div></div>
           <div class="setting-row microsoft-registration-row"><div><span class="eyebrow">REGISTRO DE APLICACIÓN · MICROSOFT</span><h2>Client ID público</h2><p>Es el identificador público de EternalCraft en Microsoft Entra; no es una contraseña. Para conseguirlo:</p><ol class="setup-steps"><li>Abre <a href="https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank" rel="noreferrer">App registrations ↗</a> y crea un registro llamado <strong>EternalCraft Launcher</strong>.</li><li>En tipos de cuenta, permite <strong>cuentas personales de Microsoft</strong>.</li><li>En <strong>Authentication → Add a platform → Mobile and desktop applications</strong>, agrega <code>http://localhost</code> y habilita el flujo de cliente público.</li><li>En <strong>Overview</strong>, copia <strong>Application (client) ID</strong> y pégalo aquí. No crees ni compartas un client secret.</li></ol><p>El inicio de sesión usa el navegador del sistema y PKCE; el callback local puede usar un puerto dinámico.</p><a class="text-link" href="https://learn.microsoft.com/en-us/entra/identity-platform/scenario-desktop-overview" target="_blank" rel="noreferrer">Guía oficial de Microsoft para aplicaciones de escritorio ↗</a><input class="text-input" type="text" autocomplete="off" spellcheck="false" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" bind:value={clientIdDraft} /></div><button class="button secondary" onclick={saveMicrosoftClientId} disabled={busy || clientIdDraft.trim() === (bootstrap.microsoftClientId ?? '')}>Guardar ID</button></div>
-          <div class="setting-row appearance-row"><div><span class="eyebrow">APARIENCIA</span><h2>Identidad visual</h2><p>Elige un acento inspirado en tus series y un fondo local opcional.</p><div class="theme-options"><button class:theme-selected={bootstrap.themeId === 'series'} class="button secondary" onclick={() => saveTheme('series')}>Color de la serie</button><button class:theme-selected={bootstrap.themeId === 'siege'} class="button secondary" onclick={() => saveTheme('siege')}>SIEGE</button><button class:theme-selected={bootstrap.themeId === 'ghouls'} class="button secondary" onclick={() => saveTheme('ghouls')}>Ghouls</button></div></div><div class="play-actions"><button class="button secondary" onclick={chooseBackground}>Elegir fondo</button>{#if bootstrap.backgroundPath}<button class="button secondary" onclick={clearBackground}>Quitar fondo</button>{/if}</div></div><div class="setting-row"><div><span class="eyebrow">JAVA · MINECRAFT 1.20.1</span><h2>{bootstrap.java.compatible ? `Java ${bootstrap.java.version}` : 'Java 17 no está listo'}</h2><p>{bootstrap.java.detail}{#if bootstrap.java.executable}<br/><code>{bootstrap.java.executable}</code>{/if}</p></div><div class="play-actions"><span class:saved-chip={bootstrap.java.compatible} class:warning-chip={!bootstrap.java.compatible}>{bootstrap.java.compatible ? 'COMPATIBLE' : 'REVISAR'}</span><button class="button secondary" onclick={selectJava} disabled={busy}>Elegir Java 17</button>{#if bootstrap.javaManuallySelected}<button class="button secondary" onclick={resetJava} disabled={busy}>Automático</button>{/if}<button class="button secondary" onclick={refreshJava} disabled={javaRefreshing}>{javaRefreshing ? 'Comprobando…' : 'Volver a comprobar'}</button></div></div><div class="setting-row"><div><span class="eyebrow">INSTANCIA · {selected.name}</span><h2>Directorio del juego</h2><p>{pathFor(selected) || 'Todavía no has vinculado una carpeta.'}</p></div><div class="play-actions">{#if isDetected(selected)}<button class="button secondary" onclick={linkDetectedDirectory} disabled={busy}>Vincular detectada</button>{/if}<button class="button secondary" onclick={selectDirectory} disabled={busy}>{isLinked(selected) ? 'Cambiar carpeta' : 'Elegir carpeta'}</button></div></div><div class="setting-row"><div><span class="eyebrow">CONFIGURACIÓN</span><h2>Archivo de preferencias</h2><p>{bootstrap.configDirectory}</p></div><span class="saved-chip">GUARDADO LOCAL</span></div><div class="setting-row"><div><span class="eyebrow">DIAGNÓSTICO</span><h2>Registros de instalación</h2><p>{bootstrap.logFile}</p></div><button class="button secondary" onclick={openSupport}>Ver registro</button></div></div><p class="privacy-note">Las carpetas detectadas se sugieren sin alterarlas; solo se vinculan después de que lo confirmes.</p></section>
+          <div class="setting-row appearance-row"><div><span class="eyebrow">APARIENCIA</span><h2>Identidad visual</h2><p>Elige un acento inspirado en tus series y un fondo local opcional.</p><div class="theme-options"><button class:theme-selected={bootstrap.themeId === 'series'} class="button secondary" onclick={() => saveTheme('series')}>Color de la serie</button><button class:theme-selected={bootstrap.themeId === 'siege'} class="button secondary" onclick={() => saveTheme('siege')}>SIEGE</button><button class:theme-selected={bootstrap.themeId === 'ghouls'} class="button secondary" onclick={() => saveTheme('ghouls')}>Ghouls</button></div></div><div class="play-actions"><button class="button secondary" onclick={chooseBackground}>Elegir fondo</button>{#if bootstrap.backgroundPath}<button class="button secondary" onclick={clearBackground}>Quitar fondo</button>{/if}</div></div><div class="setting-row memory-setting"><div><span class="eyebrow">MEMORIA JVM · MINECRAFT</span><h2>{(memoryDraft / 1024).toFixed(1)} GiB asignados</h2><p>RAM detectada: {(bootstrap.memory.totalMb / 1024).toFixed(1)} GiB · límite recomendado: {(bootstrap.memory.maxMb / 1024).toFixed(1)} GiB. Se aplica al próximo inicio.</p><input class="memory-slider" type="range" min={bootstrap.memory.minMb} max={bootstrap.memory.maxMb} step="512" aria-label="Memoria RAM asignada a Minecraft" value={memoryDraft} oninput={(event) => (memoryDraft = Number(event.currentTarget.value))} /></div><div class="play-actions"><button class="button secondary" onclick={saveMemoryLimit} disabled={busy || memoryDraft === bootstrap.memory.selectedMb}>Guardar</button>{#if bootstrap.memory.manuallySelected}<button class="button secondary" onclick={resetMemoryLimit} disabled={busy}>Automático</button>{/if}</div></div><div class="setting-row"><div><span class="eyebrow">JAVA · MINECRAFT 1.20.1</span><h2>{bootstrap.java.compatible ? `Java ${bootstrap.java.version}` : 'Java 17 no está listo'}</h2><p>{bootstrap.java.detail}{#if bootstrap.java.executable}<br/><code>{bootstrap.java.executable}</code>{/if}</p></div><div class="play-actions"><span class:saved-chip={bootstrap.java.compatible} class:warning-chip={!bootstrap.java.compatible}>{bootstrap.java.compatible ? 'COMPATIBLE' : 'REVISAR'}</span><button class="button secondary" onclick={selectJava} disabled={busy}>Elegir Java 17</button>{#if bootstrap.javaManuallySelected}<button class="button secondary" onclick={resetJava} disabled={busy}>Automático</button>{/if}<button class="button secondary" onclick={refreshJava} disabled={javaRefreshing}>{javaRefreshing ? 'Comprobando…' : 'Volver a comprobar'}</button></div></div><div class="setting-row"><div><span class="eyebrow">INSTANCIA · {selected.name}</span><h2>Directorio del juego</h2><p>{pathFor(selected) || 'Todavía no has vinculado una carpeta.'}</p></div><div class="play-actions">{#if isDetected(selected)}<button class="button secondary" onclick={linkDetectedDirectory} disabled={busy}>Vincular detectada</button>{/if}<button class="button secondary" onclick={selectDirectory} disabled={busy}>{isLinked(selected) ? 'Cambiar carpeta' : 'Elegir carpeta'}</button></div></div><div class="setting-row"><div><span class="eyebrow">CONFIGURACIÓN</span><h2>Archivo de preferencias</h2><p>{bootstrap.configDirectory}</p></div><span class="saved-chip">GUARDADO LOCAL</span></div><div class="setting-row"><div><span class="eyebrow">DIAGNÓSTICO</span><h2>Registros de instalación</h2><p>{bootstrap.logFile}</p></div><button class="button secondary" onclick={openSupport}>Ver registro</button></div></div><p class="privacy-note">Las carpetas detectadas se sugieren sin alterarlas; solo se vinculan después de que lo confirmes.</p></section>
       {/if}
     {/if}
   </main>

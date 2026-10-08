@@ -1,3 +1,5 @@
+/home/Santipdr/.bashrc: line 47: /tmp/eternalcraft-cargo/env: No such file or directory
+/home/Santipdr/.bash_profile: line 18: /tmp/eternalcraft-cargo/env: No such file or directory
 export interface Series {
   id: string;
   name: string;
@@ -25,6 +27,15 @@ export interface Bootstrap {
   installedProfiles: Record<string, string>;
   microsoftClientId: string | null;
   microsoftProfile: { username: string; uuid: string } | null;
+  memory: MemoryStatus;
+}
+
+export interface MemoryStatus {
+  totalMb: number;
+  minMb: number;
+  maxMb: number;
+  selectedMb: number;
+  manuallySelected: boolean;
 }
 
 export interface JavaStatus {

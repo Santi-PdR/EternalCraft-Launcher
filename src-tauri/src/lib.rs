@@ -1,3 +1,5 @@
+/home/Santipdr/.bashrc: line 47: /tmp/eternalcraft-cargo/env: No such file or directory
+/home/Santipdr/.bash_profile: line 18: /tmp/eternalcraft-cargo/env: No such file or directory
 use atomic_write_file::AtomicWriteFile;
 use mc_launcher_core::{
     account::Account,
@@ -23,6 +25,7 @@ use mc_launcher_core::{
     types::CallbackDict,
 };
 use serde::{Deserialize, Serialize};
+use sysinfo::System;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
@@ -83,6 +86,8 @@ struct Settings {
     background_file: Option<String>,
     #[serde(default)]
     microsoft_client_id: Option<String>,
+    #[serde(default)]
+    memory_limit_mb: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -119,6 +124,17 @@ struct Bootstrap {
     installed_profiles: BTreeMap<String, String>,
     microsoft_client_id: Option<String>,
     microsoft_profile: Option<MicrosoftProfile>,
+    memory: MemoryStatus,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MemoryStatus {
+    total_mb: u32,
+    min_mb: u32,
+    max_mb: u32,
+    selected_mb: u32,
+    manually_selected: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1224,6 +1240,59 @@ fn java_for_forge_install(
     Ok(None)
 }
 
+fn memory_bounds(total_mb: u32) -> (u32, u32) {
+    let min_mb = if total_mb < 1024 {
+        (total_mb / 256 * 256).max(512)
+    } else {
+        1024
+    };
+    let max_mb = ((total_mb.saturating_mul(3) / 4) / 512 * 512)
+        .min(12 * 1024)
+        .max(min_mb);
+    (min_mb, max_mb)
+}
+
+fn memory_status(settings: &Settings) -> MemoryStatus {
+    static TOTAL_MEMORY_MB: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    let total_mb = *TOTAL_MEMORY_MB.get_or_init(|| {
+        let mut system = System::new();
+        system.refresh_memory();
+        (system.total_memory() / (1024 * 1024)).min(u32::MAX as u64) as u32
+    });
+    let (min_mb, max_mb) = memory_bounds(total_mb);
+    let default_mb = (6 * 1024).min(max_mb) / 512 * 512;
+    let selected_mb = settings.memory_limit_mb.unwrap_or(default_mb).clamp(min_mb, max_mb);
+    MemoryStatus {
+        total_mb,
+        min_mb,
+        max_mb,
+        selected_mb,
+        manually_selected: settings.memory_limit_mb.is_some(),
+    }
+}
+
+fn with_memory_arguments(
+    args: &mut Vec<String>,
+    main_class: &str,
+    memory_mb: u32,
+) -> Result<(), String> {
+    let main_index = args
+        .iter()
+        .position(|argument| argument == main_class)
+        .ok_or_else(|| {
+            "No se encontró el límite entre argumentos JVM y argumentos de Minecraft".to_string()
+        })?;
+    args[..main_index].retain(|argument| !argument.starts_with("-Xms") && !argument.starts_with("-Xmx"));
+    let main_index = args
+        .iter()
+        .position(|argument| argument == main_class)
+        .ok_or_else(|| {
+            "Se perdió la clase principal de Minecraft al preparar la memoria".to_string()
+        })?;
+    args.splice(main_index..main_index, ["-Xms1024M".to_string(), format!("-Xmx{memory_mb}M")]);
+    Ok(())
+}
+
 fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
     let catalog = parse_catalog()?;
     let settings = read_settings(app)?;
@@ -1261,6 +1330,7 @@ fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
         .join("launcher.log")
         .to_string_lossy()
         .into_owned();
+    let memory = memory_status(&settings);
     let microsoft_profile = app
         .state::<AuthSession>()
         .0
@@ -1321,6 +1391,7 @@ fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
         installed_profiles,
         microsoft_client_id: settings.microsoft_client_id,
         microsoft_profile,
+        memory,
     })
 }
 
@@ -1720,6 +1791,29 @@ fn logout_microsoft(app: AppHandle) -> Result<Bootstrap, String> {
 }
 
 #[tauri::command]
+fn set_memory_limit(app: AppHandle, memory_mb: u32) -> Result<Bootstrap, String> {
+    let mut settings = read_settings(&app)?;
+    let limits = memory_status(&settings);
+    if memory_mb < limits.min_mb || memory_mb > limits.max_mb || memory_mb % 512 != 0 {
+        return Err(format!(
+            "El valor debe estar entre {} y {} MiB en pasos de 512 MiB",
+            limits.min_mb, limits.max_mb
+        ));
+    }
+    settings.memory_limit_mb = Some(memory_mb);
+    write_settings(&app, &settings)?;
+    make_bootstrap(&app)
+}
+
+#[tauri::command]
+fn reset_memory_limit(app: AppHandle) -> Result<Bootstrap, String> {
+    let mut settings = read_settings(&app)?;
+    settings.memory_limit_mb = None;
+    write_settings(&app, &settings)?;
+    make_bootstrap(&app)
+}
+
+#[tauri::command]
 fn launch_minecraft(app: AppHandle, series_id: String) -> Result<(), String> {
     let series = parse_catalog()?
         .series
@@ -1786,7 +1880,7 @@ fn launch_minecraft(app: AppHandle, series_id: String) -> Result<(), String> {
     let version = launcher
         .load_version(&profile_id)
         .map_err(|error| format!("No se pudo cargar el perfil Forge instalado: {error}"))?;
-    let command = launcher
+    let mut command = launcher
         .build_launch_command_from_version(
             &version,
             LaunchOptions {
@@ -1803,6 +1897,7 @@ fn launch_minecraft(app: AppHandle, series_id: String) -> Result<(), String> {
             },
         )
         .map_err(|error| format!("No se pudieron preparar los argumentos de Minecraft: {error}"))?;
+    with_memory_arguments(&mut command.args, &version.main_class, memory_status(&settings).selected_mb)?;
     Command::new(&command.executable)
         .args(&command.args)
         .current_dir(&command.working_dir)
@@ -2068,6 +2163,8 @@ pub fn run() {
             set_microsoft_client_id,
             login_microsoft,
             logout_microsoft,
+            set_memory_limit,
+            reset_memory_limit,
             launch_minecraft
         ])
         .run(tauri::generate_context!())
@@ -2077,6 +2174,40 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_limits_reserve_system_memory_and_cap_large_allocations() {
+        assert_eq!(memory_bounds(512), (512, 512));
+        assert_eq!(memory_bounds(4096), (1024, 3072));
+        assert_eq!(memory_bounds(16 * 1024), (1024, 12 * 1024));
+    }
+
+    #[test]
+    fn memory_arguments_replace_only_jvm_heap_flags_before_main_class() {
+        let mut args = vec![
+            "-Xms512M".into(),
+            "-cp".into(),
+            "classpath".into(),
+            "-Xmx2G".into(),
+            "net.minecraft.client.main.Main".into(),
+            "--username".into(),
+            "-Xmxnot-a-jvm-flag".into(),
+        ];
+        with_memory_arguments(&mut args, "net.minecraft.client.main.Main", 4096).unwrap();
+        assert_eq!(args.iter().filter(|arg| arg.starts_with("-Xms")).count(), 1);
+        assert_eq!(args.iter().filter(|arg| arg.starts_with("-Xmx")).count(), 2);
+        assert_eq!(args[0], "-cp");
+        assert_eq!(args[2], "-Xms1024M");
+        assert_eq!(args[3], "-Xmx4096M");
+        assert_eq!(args[4], "net.minecraft.client.main.Main");
+        assert_eq!(args[6], "-Xmxnot-a-jvm-flag");
+    }
+
+    #[test]
+    fn memory_arguments_fail_without_a_main_class_boundary() {
+        let mut args = vec!["-cp".into(), "libraries".into()];
+        assert!(with_memory_arguments(&mut args, "missing.Main", 4096).is_err());
+    }
 
     #[test]
     fn microsoft_client_id_requires_a_uuid() {
@@ -2283,6 +2414,7 @@ mod tests {
             theme_id: Some("ghouls".into()),
             background_file: Some("background-123.webp".into()),
             microsoft_client_id: Some("12345678-1234-4234-8234-123456789abc".into()),
+            memory_limit_mb: Some(4096),
         };
         let encoded = serde_json::to_vec(&settings).expect("settings serialize");
         let decoded: Settings = serde_json::from_slice(&encoded).expect("settings deserialize");
@@ -2296,6 +2428,7 @@ mod tests {
             Some("background-123.webp")
         );
         assert_eq!(decoded.microsoft_client_id, settings.microsoft_client_id);
+        assert_eq!(decoded.memory_limit_mb, Some(4096));
     }
 
     #[test]

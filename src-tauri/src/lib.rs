@@ -1242,7 +1242,7 @@ fn java_for_forge_install(
 
 fn memory_bounds(total_mb: u32) -> (u32, u32) {
     let min_mb = if total_mb < 1024 {
-        (total_mb / 256 * 256).max(512)
+        (total_mb / 512 * 512).max(512)
     } else {
         1024
     };
@@ -1289,7 +1289,11 @@ fn with_memory_arguments(
         .ok_or_else(|| {
             "Se perdió la clase principal de Minecraft al preparar la memoria".to_string()
         })?;
-    args.splice(main_index..main_index, ["-Xms1024M".to_string(), format!("-Xmx{memory_mb}M")]);
+    let initial_heap_mb = memory_mb.min(1024);
+    args.splice(
+        main_index..main_index,
+        [format!("-Xms{initial_heap_mb}M"), format!("-Xmx{memory_mb}M")],
+    );
     Ok(())
 }
 
@@ -2178,6 +2182,7 @@ mod tests {
     #[test]
     fn memory_limits_reserve_system_memory_and_cap_large_allocations() {
         assert_eq!(memory_bounds(512), (512, 512));
+        assert_eq!(memory_bounds(768), (512, 512));
         assert_eq!(memory_bounds(4096), (1024, 3072));
         assert_eq!(memory_bounds(16 * 1024), (1024, 12 * 1024));
     }

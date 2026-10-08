@@ -2128,6 +2128,7 @@ mod tests {
             managed_installs: BTreeMap::from([("siege".into(), "1.20.1-forge-47.4.10".into())]),
             theme_id: Some("ghouls".into()),
             background_file: Some("background-123.webp".into()),
+            microsoft_client_id: Some("12345678-1234-4234-8234-123456789abc".into()),
         };
         let encoded = serde_json::to_vec(&settings).expect("settings serialize");
         let decoded: Settings = serde_json::from_slice(&encoded).expect("settings deserialize");
@@ -2140,6 +2141,7 @@ mod tests {
             decoded.background_file.as_deref(),
             Some("background-123.webp")
         );
+        assert_eq!(decoded.microsoft_client_id, settings.microsoft_client_id);
     }
 
     #[test]

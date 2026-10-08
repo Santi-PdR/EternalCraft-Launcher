@@ -13,7 +13,15 @@ npm run tauri dev
 
 The initial shell is data-driven and contains SIEGE and Ghouls Outbreak series entries. Pack distribution is intentionally marked unpublished until real manifests and release assets are added to this repository; it does not fabricate a playable pack.
 
-The settings page detects Java installations, prefers Java 17, and lets the user select a Java 17 executable explicitly. The selection is persisted locally. It does not install Java or launch Minecraft yet.
+The settings page detects Java installations, prefers Java 17, and lets the user select a Java 17 executable explicitly. The selection is persisted locally. If Java 17 is unavailable, installing the base provisions Mojang's Java 17 runtime inside the app-managed instance.
+
+Appearance preferences persist per installation: use the active series accent, a SIEGE theme, or a Ghouls theme. A user-selected PNG, JPEG, WebP, or GIF background is copied to app configuration storage (8 MiB maximum); no artwork is bundled or fetched.
+
+The home page can install the Minecraft 1.20.1 + Forge base into an app-managed instance directory. It verifies the Forge installer SHA-1, runs the installer with a validated Java 17 runtime, then validates the generated profile and checks the required game files. This base install is separate from any linked SKLauncher folder; it does not add EternalCraft mods, authenticate an account, or launch the game. An ignored integration smoke test can exercise the official download/Forge installer flow in a temporary directory and never launches Minecraft.
+
+The mods page can import, activate and remove personal Forge JARs. Imported mods are stored in `mods/personales/` and linked or copied into Forge's directly scanned `mods/` root; it refuses non-mod JARs, name collisions, and unsafe filenames. Official pack reconciliation and publishing are not implemented yet.
+
+Forge installation progress and installer output are kept in a rotating local log under the app data directory and can be read from Support. Linux release builds use verified `.deb` and `.rpm` bundles; the Windows workflow builds an NSIS installer.
 
 ## Design constraints
 

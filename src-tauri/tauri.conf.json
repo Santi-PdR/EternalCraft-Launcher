@@ -15,7 +15,7 @@
         "title": "EternalCraft Launcher",
         "width": 1360,
         "height": 900,
-        "minWidth": 960,
+        "minWidth": 560,
         "minHeight": 680,
         "center": true,
         "decorations": true,
@@ -23,6 +23,10 @@
       }
     ],
     "security": {
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPCONFIG/appearance/**"]
+      },
       "csp": "default-src 'self'; img-src 'self' asset: data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src ipc: http://ipc.localhost"
     }
   },

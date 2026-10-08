@@ -1,13 +1,15 @@
 <script lang="ts">
-  import { invoke } from '@tauri-apps/api/core';
-  import type { Bootstrap, ModInventory, Series } from './lib/types';
+  import { convertFileSrc, invoke } from '@tauri-apps/api/core';
+  import { listen } from '@tauri-apps/api/event';
+  import { onMount } from 'svelte';
+  import type { Bootstrap, InstallProgress, ModInventory, Series } from './lib/types';
 
   let bootstrap = $state<Bootstrap | null>(null);
   let selected = $derived.by(() => {
     const current = bootstrap;
     return current?.series.find((series) => series.id === current.activeSeriesId);
   });
-  let activePage = $state<'home' | 'mods' | 'settings'>('home');
+  let activePage = $state<'home' | 'mods' | 'settings' | 'support'>('home');
   let loading = $state(true);
   let busy = $state(false);
   let error = $state('');
@@ -15,7 +17,22 @@
   let javaRefreshing = $state(false);
   let modInventory = $state<ModInventory | null>(null);
   let modsLoading = $state(false);
+  let modsBusy = $state(false);
   let modsError = $state('');
+  let installingSeries = $state<string | null>(null);
+  let installMessage = $state('');
+  let launcherLogs = $state('Todavía no hay registros de instalación.');
+  let logsLoading = $state(false);
+  let backgroundUrl = $derived(bootstrap?.backgroundPath ? convertFileSrc(bootstrap.backgroundPath) : '');
+  let themeAccent = $derived(bootstrap?.themeId === 'ghouls' ? '#bf624d' : bootstrap?.themeId === 'siege' ? '#d1a35b' : selected?.accent ?? '#d1a35b');
+
+  onMount(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<InstallProgress>('forge-install-progress', ({ payload }) => {
+      if (payload.seriesId === installingSeries) installMessage = payload.message;
+    }).then((stop) => (unlisten = stop));
+    return () => unlisten?.();
+  });
 
   async function loadMods(seriesId: string | undefined) {
     if (!seriesId) return;
@@ -29,6 +46,49 @@
     } finally {
       modsLoading = false;
     }
+  }
+
+  async function addPersonalMod() {
+    if (!selected) return;
+    modsBusy = true;
+    modsError = '';
+    try {
+      modInventory = await invoke<ModInventory>('add_personal_mod_to_series', { seriesId: selected.id });
+    } catch (reason) {
+      modsError = String(reason);
+    } finally {
+      modsBusy = false;
+    }
+  }
+
+  async function removePersonalMod(fileName: string) {
+    if (!selected || !window.confirm(`¿Quitar ${fileName} de los mods personales de esta instancia?`)) return;
+    modsBusy = true;
+    modsError = '';
+    try {
+      modInventory = await invoke<ModInventory>('remove_personal_mod_from_series', { seriesId: selected.id, fileName });
+    } catch (reason) {
+      modsError = String(reason);
+    } finally {
+      modsBusy = false;
+    }
+  }
+
+  async function activatePersonalMod(fileName: string) {
+    if (!selected) return;
+    modsBusy = true;
+    modsError = '';
+    try {
+      modInventory = await invoke<ModInventory>('activate_personal_mod_for_series', { seriesId: selected.id, fileName });
+    } catch (reason) {
+      modsError = String(reason);
+    } finally {
+      modsBusy = false;
+    }
+  }
+
+  function personalModLoaded(fileName: string) {
+    return Boolean(modInventory?.loadedFromModsRoot.some((file) => file.name.toLowerCase() === fileName.toLowerCase()));
   }
 
   async function refresh() {
@@ -128,6 +188,38 @@
     }
   }
 
+  async function saveTheme(themeId: string) {
+    try { bootstrap = await invoke<Bootstrap>('set_theme', { themeId }); notice = 'Tema guardado'; }
+    catch (reason) { error = String(reason); }
+  }
+
+  async function chooseBackground() {
+    try { bootstrap = await invoke<Bootstrap>('select_background'); notice = bootstrap.backgroundPath ? 'Fondo guardado en este equipo' : ''; }
+    catch (reason) { error = String(reason); }
+  }
+
+  async function clearBackground() {
+    try { bootstrap = await invoke<Bootstrap>('clear_background'); notice = 'Se restauró el fondo predeterminado'; }
+    catch (reason) { error = String(reason); }
+  }
+
+  async function installBase() {
+    if (!selected) return;
+    const seriesId = selected.id;
+    installingSeries = seriesId;
+    installMessage = 'Iniciando la instalación verificada de Forge…';
+    error = '';
+    try {
+      bootstrap = await invoke<Bootstrap>('install_forge_base', { seriesId });
+      await loadMods(seriesId);
+      notice = 'La base de Minecraft y Forge quedó instalada y verificada. El pack todavía no está publicado.';
+    } catch (reason) {
+      error = String(reason);
+    } finally {
+      installingSeries = null;
+    }
+  }
+
   function pathFor(series: Series) {
     return bootstrap?.gameDirectories[series.id] || bootstrap?.suggestedDirectories[series.id] || '';
   }
@@ -145,6 +237,19 @@
     void loadMods(bootstrap?.activeSeriesId);
   }
 
+  async function openSupport() {
+    activePage = 'support';
+    logsLoading = true;
+    error = '';
+    try {
+      launcherLogs = await invoke<string>('get_launcher_logs');
+    } catch (reason) {
+      error = String(reason);
+    } finally {
+      logsLoading = false;
+    }
+  }
+
   function formatBytes(bytes: number) {
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -158,7 +263,7 @@
   <meta name="description" content="Launcher oficial de las series EternalCraft" />
 </svelte:head>
 
-<div class="shell" style:--accent={selected?.accent ?? '#d1a35b'}>
+<div class="shell" data-theme={bootstrap?.themeId ?? 'series'} style:--accent={themeAccent}>
   <aside class="sidebar">
     <a class="brand" href="#inicio" onclick={() => (activePage = 'home')} aria-label="EternalCraft inicio">
       <span class="brand-mark">EC</span>
@@ -170,7 +275,7 @@
         <span class="eyebrow">SERIE ACTIVA</span>
         <div class="series-list">
           {#each bootstrap.series as series (series.id)}
-            <button class:active={series.id === bootstrap?.activeSeriesId} class="series-choice" onclick={() => chooseSeries(series.id)} disabled={busy}>
+            <button class:active={series.id === bootstrap?.activeSeriesId} class="series-choice" onclick={() => chooseSeries(series.id)} disabled={busy || installingSeries !== null || modsBusy}>
               <span class="series-dot" style:--series-accent={series.accent}></span>
               <span>{series.name}</span>
               {#if series.id === bootstrap?.activeSeriesId}<span class="check">✓</span>{/if}
@@ -186,6 +291,7 @@
       <button class:current={activePage === 'mods'} onclick={openMods}><span>▦</span> Mods</button>
       <span class="eyebrow nav-caption">PREFERENCIAS</span>
       <button class:current={activePage === 'settings'} onclick={() => (activePage = 'settings')}><span>⚙</span> Ajustes</button>
+      <button class:current={activePage === 'support'} onclick={openSupport}><span>?</span> Soporte</button>
     </nav>
 
     <div class="sidebar-footer"><span class="status-light"></span> APLICACIÓN NATIVA <small>v0.1.0 · PREVIEW</small></div>
@@ -193,7 +299,7 @@
 
   <main>
     <header class="topbar">
-      <div class="breadcrumbs">ETERNALCRAFT <span>/</span> {activePage === 'home' ? 'INICIO' : activePage === 'mods' ? 'BIBLIOTECA' : 'AJUSTES'}</div>
+      <div class="breadcrumbs">ETERNALCRAFT <span>/</span> {activePage === 'home' ? 'INICIO' : activePage === 'mods' ? 'BIBLIOTECA' : activePage === 'support' ? 'SOPORTE' : 'AJUSTES'}</div>
       <div class="topbar-right"><span class="online-indicator"></span> INSTALACIÓN LOCAL</div>
     </header>
 
@@ -209,7 +315,7 @@
         <section class="page home-page">
           <div class="page-heading"><div><span class="eyebrow">TU PRÓXIMA AVENTURA</span><h1>Elige tu mundo.</h1><p>Una biblioteca, distintas historias de EternalCraft.</p></div><span class="connection-pill"><i></i> Catálogo local</span></div>
 
-          <div class="hero-card" style:--hero-accent={selected.accent}>
+          <div class="hero-card" style:--hero-accent={themeAccent} style:--hero-background={backgroundUrl ? `url("${backgroundUrl}")` : 'none'}>
             <div class="hero-noise"></div><div class="hero-content">
               <span class="eyebrow">ETERNALCRAFT ORIGINAL SERIES</span>
               <h2>{selected.name}</h2><p class="hero-subtitle">{selected.subtitle}</p>
@@ -222,24 +328,28 @@
           <div class="section-heading"><div><span class="eyebrow">UNIVERSOS</span><h2>Explora las series</h2></div><span class="quiet-count">{bootstrap.series.length} SERIES</span></div>
           <div class="series-grid">
             {#each bootstrap.series as series (series.id)}
-              <button class:selected-card={series.id === bootstrap.activeSeriesId} class="series-card" style:--card-accent={series.accent} onclick={() => chooseSeries(series.id)} disabled={busy}>
+              <button class:selected-card={series.id === bootstrap.activeSeriesId} class="series-card" style:--card-accent={series.accent} onclick={() => chooseSeries(series.id)} disabled={busy || installingSeries !== null || modsBusy}>
                 <span class="card-orbit"></span><span class="card-kicker">ETERNALCRAFT</span><strong>{series.name}</strong><span class="card-subtitle">{series.subtitle}</span><span class="card-bottom">{series.minecraftVersion} <b>·</b> {series.loader} <span>↗</span></span>
               </button>
             {/each}
           </div>
 
-          <div class="play-panel"><div class="play-copy"><span class="eyebrow">CARPETA DE JUEGO</span><h3>{isLinked(selected) ? 'Instancia vinculada' : isDetected(selected) ? 'Instancia detectada' : 'Conecta tu instancia'}</h3><p>{pathFor(selected) || 'Selecciona la carpeta de juego de esta serie para guardarla en el launcher.'}</p></div><div class="play-actions">{#if isDetected(selected)}<button class="button secondary" onclick={linkDetectedDirectory} disabled={busy}>Usar carpeta detectada</button>{/if}<button class="button secondary" onclick={selectDirectory} disabled={busy}>{isLinked(selected) ? 'Cambiar carpeta' : 'Seleccionar carpeta'}</button><button class="button primary" disabled title="Esta serie todavía no tiene una versión oficial publicada">Próximamente</button></div></div>
+          <div class="play-panel"><div class="play-copy"><span class="eyebrow">CARPETA DE JUEGO</span><h3>{isLinked(selected) ? 'Instancia vinculada' : bootstrap.installedProfiles[selected.id] ? 'Instancia de EternalCraft' : isDetected(selected) ? 'Instancia detectada' : 'Conecta tu instancia'}</h3><p>{bootstrap.installedProfiles[selected.id] && !isLinked(selected) ? bootstrap.managedGameDirectories[selected.id] : pathFor(selected) || 'Selecciona la carpeta de juego de esta serie para guardarla en el launcher.'}</p></div><div class="play-actions">{#if isDetected(selected)}<button class="button secondary" onclick={linkDetectedDirectory} disabled={busy}>Usar carpeta detectada</button>{/if}<button class="button secondary" onclick={selectDirectory} disabled={busy}>{isLinked(selected) ? 'Cambiar carpeta' : 'Seleccionar carpeta'}</button>{#if bootstrap.installedProfiles[selected.id]}<span class="saved-chip">FORGE INSTALADO</span>{:else}<button class="button secondary" onclick={installBase} disabled={installingSeries !== null} title="Instala una instancia aislada y descarga Java 17 de Mojang si hace falta">Instalar base de Forge y Java 17</button>{/if}<button class="button primary" disabled title="El modpack de esta serie todavía no tiene archivos oficiales publicados">Pack no publicado</button></div></div>
+          {#if bootstrap.installedProfiles[selected.id]}<div class="managed-location"><span class="eyebrow">INSTANCIA ADMINISTRADA POR ETERNALCRAFT</span><code>{bootstrap.managedGameDirectories[selected.id]}</code></div>{/if}
+          {#if installingSeries === selected.id}<div class="install-progress" role="status" aria-live="polite"><span class="spinner"></span><div><strong>{installMessage || 'Instalando Minecraft y Forge…'}</strong><p>Preparando el perfil del juego; Minecraft no se iniciará.</p></div></div>{/if}
           <p class="release-note">Las versiones estarán disponibles cuando se publiquen manifiestos y archivos oficiales en este repositorio.</p>
         </section>
       {:else if activePage === 'mods'}
-        <section class="page narrow-page"><div class="page-heading"><div><span class="eyebrow">CONTENIDO DEL JUEGO · {selected.name}</span><h1>Biblioteca de mods</h1><p>Inventario local de JARs. No se modifican archivos desde esta vista.</p></div><button class="button secondary" onclick={() => loadMods(selected.id)} disabled={modsLoading}>{modsLoading ? 'Leyendo…' : 'Actualizar inventario'}</button></div>
+        <section class="page narrow-page"><div class="page-heading"><div><span class="eyebrow">CONTENIDO DEL JUEGO · {selected.name}</span><h1>Biblioteca de mods</h1><p>Los mods personales se guardan aparte y se enlazan a la raíz que Forge carga.</p></div><div class="play-actions"><button class="button secondary" onclick={addPersonalMod} disabled={modsBusy || modsLoading || !modInventory?.gameDirectory}>{modsBusy ? 'Guardando…' : 'Agregar mod personal'}</button><button class="button secondary" onclick={() => loadMods(selected.id)} disabled={modsLoading || modsBusy}>{modsLoading ? 'Leyendo…' : 'Actualizar inventario'}</button></div></div>
           {#if modsError}<div class="toast error-toast" role="alert">{modsError}</div>{/if}
-          {#if !isLinked(selected)}<div class="empty-card"><div class="empty-icon">▦</div><h2>Vincula una carpeta de juego</h2><p>Elige una instancia en Inicio para revisar sus mods. La lectura del inventario es solo de consulta.</p><button class="button secondary" onclick={() => (activePage = 'home')}>Ir a Inicio</button></div>
+          {#if !modInventory?.gameDirectory}<div class="empty-card"><div class="empty-icon">▦</div><h2>Vincula una carpeta de juego</h2><p>Elige una instancia en Inicio para revisar sus mods. La lectura del inventario es solo de consulta.</p><button class="button secondary" onclick={() => (activePage = 'home')}>Ir a Inicio</button></div>
           {:else if modsLoading}<div class="center-state"><span class="spinner"></span><p>Leyendo inventario de mods…</p></div>
-          {:else if modInventory}<div class="settings-card inventory-card"><div class="inventory-path"><span class="eyebrow">CARPETA REVISADA</span><code>{modInventory.modsDirectory}</code></div><div class="inventory-stats"><article><strong>{modInventory.loadedFromModsRoot.length}</strong><span>JAR en <code>mods/</code></span></article><article><strong>{modInventory.officialStore.length}</strong><span>Guardados en <code>mods/Oficiales/</code></span></article><article><strong>{modInventory.personalStore.length}</strong><span>Guardados en <code>mods/personales/</code></span></article></div><div class="inventory-warning"><b>Compatibilidad Forge:</b> Forge 1.20.1 escanea los archivos JAR directamente dentro de <code>mods/</code>. Los JAR dentro de subcarpetas se muestran aparte y no se cuentan como cargados.</div><div class="inventory-list"><h2>JAR que Forge encuentra en la raíz</h2>{#if modInventory.loadedFromModsRoot.length}<ul>{#each modInventory.loadedFromModsRoot as file (file.name)}<li><span>{file.name}</span><small>{formatBytes(file.sizeBytes)}</small></li>{/each}</ul>{:else}<p>No hay JAR directamente dentro de <code>mods/</code>.</p>{/if}</div><div class="inventory-list storage-list"><h2>Almacenamiento organizado</h2><div class="storage-columns"><div><h3>Oficiales</h3>{#if modInventory.officialStore.length}<ul>{#each modInventory.officialStore as file (file.name)}<li><span>{file.name}</span><small>{formatBytes(file.sizeBytes)}</small></li>{/each}</ul>{:else}<p>Sin JAR guardados aquí.</p>{/if}</div><div><h3>Personales</h3>{#if modInventory.personalStore.length}<ul>{#each modInventory.personalStore as file (file.name)}<li><span>{file.name}</span><small>{formatBytes(file.sizeBytes)}</small></li>{/each}</ul>{:else}<p>Sin JAR guardados aquí.</p>{/if}</div></div></div></div>
+          {:else if modInventory}<div class="settings-card inventory-card"><div class="inventory-path"><span class="eyebrow">CARPETA REVISADA</span><code>{modInventory.modsDirectory}</code></div><div class="inventory-stats"><article><strong>{modInventory.loadedFromModsRoot.length}</strong><span>JAR cargables en <code>mods/</code></span></article><article><strong>{modInventory.officialStore.length}</strong><span>Guardados en <code>mods/Oficiales/</code></span></article><article><strong>{modInventory.personalStore.length}</strong><span>Guardados en <code>mods/personales/</code></span></article></div><div class="inventory-warning"><b>Compatibilidad Forge:</b> Forge carga los JAR directamente desde <code>mods/</code>. Los archivos personales que agregues aquí se guardan en <code>mods/personales/</code> y el launcher los refleja en la raíz mediante enlace o copia.</div><div class="inventory-list"><h2>JAR que Forge encuentra en la raíz</h2>{#if modInventory.loadedFromModsRoot.length}<ul>{#each modInventory.loadedFromModsRoot as file (file.name)}<li><span>{file.name}</span><small>{formatBytes(file.sizeBytes)}</small></li>{/each}</ul>{:else}<p>No hay JAR directamente dentro de <code>mods/</code>.</p>{/if}</div><div class="inventory-list storage-list"><h2>Almacenamiento organizado</h2><div class="storage-columns"><div><h3>Oficiales</h3>{#if modInventory.officialStore.length}<ul>{#each modInventory.officialStore as file (file.name)}<li><span>{file.name}</span><small>{formatBytes(file.sizeBytes)}</small></li>{/each}</ul>{:else}<p>Sin JAR guardados aquí.</p>{/if}</div><div><h3>Personales</h3>{#if modInventory.personalStore.length}<ul>{#each modInventory.personalStore as file (file.name)}<li><span>{file.name}</span><small>{formatBytes(file.sizeBytes)}</small><button class="remove-mod" onclick={() => personalModLoaded(file.name) ? removePersonalMod(file.name) : activatePersonalMod(file.name)} disabled={modsBusy}>{personalModLoaded(file.name) ? 'Quitar' : 'Activar'}</button></li>{/each}</ul>{:else}<p>Sin JAR personales agregados desde este launcher.</p>{/if}</div></div></div></div>
           {/if}</section>
+      {:else if activePage === 'support'}
+        <section class="page narrow-page"><div class="page-heading"><div><span class="eyebrow">DIAGNÓSTICO LOCAL</span><h1>Soporte</h1><p>Registro de instalación de Minecraft y Forge.</p></div><button class="button secondary" onclick={openSupport} disabled={logsLoading}>{logsLoading ? 'Leyendo…' : 'Actualizar registro'}</button></div><div class="settings-card log-card"><div class="inventory-path"><span class="eyebrow">ARCHIVO LOCAL</span><code>{bootstrap.logFile}</code></div><pre class="log-viewer" aria-live="polite">{launcherLogs}</pre></div><p class="privacy-note">Se guarda el último megabyte de eventos y una rotación previa. No se registran contraseñas ni tokens de cuenta.</p></section>
       {:else}
-        <section class="page narrow-page"><div class="page-heading"><div><span class="eyebrow">CONFIGURACIÓN LOCAL</span><h1>Ajustes</h1><p>Preferencias guardadas en este equipo.</p></div></div><div class="settings-card"><div class="setting-row"><div><span class="eyebrow">JAVA · MINECRAFT 1.20.1</span><h2>{bootstrap.java.compatible ? `Java ${bootstrap.java.version}` : 'Java 17 no está listo'}</h2><p>{bootstrap.java.detail}{#if bootstrap.java.executable}<br/><code>{bootstrap.java.executable}</code>{/if}</p></div><div class="play-actions"><span class:saved-chip={bootstrap.java.compatible} class:warning-chip={!bootstrap.java.compatible}>{bootstrap.java.compatible ? 'COMPATIBLE' : 'REVISAR'}</span><button class="button secondary" onclick={selectJava} disabled={busy}>Elegir Java 17</button>{#if bootstrap.javaManuallySelected}<button class="button secondary" onclick={resetJava} disabled={busy}>Automático</button>{/if}<button class="button secondary" onclick={refreshJava} disabled={javaRefreshing}>{javaRefreshing ? 'Comprobando…' : 'Volver a comprobar'}</button></div></div><div class="setting-row"><div><span class="eyebrow">INSTANCIA · {selected.name}</span><h2>Directorio del juego</h2><p>{pathFor(selected) || 'Todavía no has vinculado una carpeta.'}</p></div><div class="play-actions">{#if isDetected(selected)}<button class="button secondary" onclick={linkDetectedDirectory} disabled={busy}>Vincular detectada</button>{/if}<button class="button secondary" onclick={selectDirectory} disabled={busy}>{isLinked(selected) ? 'Cambiar carpeta' : 'Elegir carpeta'}</button></div></div><div class="setting-row"><div><span class="eyebrow">CONFIGURACIÓN</span><h2>Archivo de preferencias</h2><p>{bootstrap.configDirectory}</p></div><span class="saved-chip">GUARDADO LOCAL</span></div></div><p class="privacy-note">Las carpetas detectadas se sugieren sin alterarlas; solo se vinculan después de que lo confirmes.</p></section>
+        <section class="page narrow-page"><div class="page-heading"><div><span class="eyebrow">CONFIGURACIÓN LOCAL</span><h1>Ajustes</h1><p>Preferencias guardadas en este equipo.</p></div></div><div class="settings-card"><div class="setting-row appearance-row"><div><span class="eyebrow">APARIENCIA</span><h2>Identidad visual</h2><p>Elige un acento inspirado en tus series y un fondo local opcional.</p><div class="theme-options"><button class:theme-selected={bootstrap.themeId === 'series'} class="button secondary" onclick={() => saveTheme('series')}>Color de la serie</button><button class:theme-selected={bootstrap.themeId === 'siege'} class="button secondary" onclick={() => saveTheme('siege')}>SIEGE</button><button class:theme-selected={bootstrap.themeId === 'ghouls'} class="button secondary" onclick={() => saveTheme('ghouls')}>Ghouls</button></div></div><div class="play-actions"><button class="button secondary" onclick={chooseBackground}>Elegir fondo</button>{#if bootstrap.backgroundPath}<button class="button secondary" onclick={clearBackground}>Quitar fondo</button>{/if}</div></div><div class="setting-row"><div><span class="eyebrow">JAVA · MINECRAFT 1.20.1</span><h2>{bootstrap.java.compatible ? `Java ${bootstrap.java.version}` : 'Java 17 no está listo'}</h2><p>{bootstrap.java.detail}{#if bootstrap.java.executable}<br/><code>{bootstrap.java.executable}</code>{/if}</p></div><div class="play-actions"><span class:saved-chip={bootstrap.java.compatible} class:warning-chip={!bootstrap.java.compatible}>{bootstrap.java.compatible ? 'COMPATIBLE' : 'REVISAR'}</span><button class="button secondary" onclick={selectJava} disabled={busy}>Elegir Java 17</button>{#if bootstrap.javaManuallySelected}<button class="button secondary" onclick={resetJava} disabled={busy}>Automático</button>{/if}<button class="button secondary" onclick={refreshJava} disabled={javaRefreshing}>{javaRefreshing ? 'Comprobando…' : 'Volver a comprobar'}</button></div></div><div class="setting-row"><div><span class="eyebrow">INSTANCIA · {selected.name}</span><h2>Directorio del juego</h2><p>{pathFor(selected) || 'Todavía no has vinculado una carpeta.'}</p></div><div class="play-actions">{#if isDetected(selected)}<button class="button secondary" onclick={linkDetectedDirectory} disabled={busy}>Vincular detectada</button>{/if}<button class="button secondary" onclick={selectDirectory} disabled={busy}>{isLinked(selected) ? 'Cambiar carpeta' : 'Elegir carpeta'}</button></div></div><div class="setting-row"><div><span class="eyebrow">CONFIGURACIÓN</span><h2>Archivo de preferencias</h2><p>{bootstrap.configDirectory}</p></div><span class="saved-chip">GUARDADO LOCAL</span></div><div class="setting-row"><div><span class="eyebrow">DIAGNÓSTICO</span><h2>Registros de instalación</h2><p>{bootstrap.logFile}</p></div><button class="button secondary" onclick={openSupport}>Ver registro</button></div></div><p class="privacy-note">Las carpetas detectadas se sugieren sin alterarlas; solo se vinculan después de que lo confirmes.</p></section>
       {/if}
     {/if}
   </main>

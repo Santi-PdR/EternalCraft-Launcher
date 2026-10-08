@@ -16,8 +16,13 @@ export interface Bootstrap {
   gameDirectories: Record<string, string>;
   suggestedDirectories: Record<string, string>;
   configDirectory: string;
+  logFile: string;
+  themeId: string;
+  backgroundPath: string | null;
   java: JavaStatus;
   javaManuallySelected: boolean;
+  managedGameDirectories: Record<string, string>;
+  installedProfiles: Record<string, string>;
 }
 
 export interface JavaStatus {
@@ -39,4 +44,11 @@ export interface ModInventory {
   loadedFromModsRoot: ModFileEntry[];
   officialStore: ModFileEntry[];
   personalStore: ModFileEntry[];
+}
+
+export interface InstallProgress {
+  seriesId: string;
+  stage: string;
+  message: string;
+  completedFiles: number;
 }

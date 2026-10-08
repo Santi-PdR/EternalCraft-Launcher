@@ -3,3 +3,26 @@
 @media(max-width:1100px){.shell{grid-template-columns:210px minmax(0,1fr)}.page{padding:32px 27px}.topbar{padding:0 27px}.hero-content h2{font-size:32px}.hero-meta{gap:25px}.hero-side{padding:0 5px}}
 .warning-chip{font:9px ui-monospace,SFMono-Regular,monospace;letter-spacing:1.05px;color:#e1ad73;font-size:8px;border:1px solid #594632;border-radius:20px;padding:8px 10px;white-space:nowrap}
 .inventory-card{padding:0 23px 20px}.inventory-path{padding:20px 0;border-bottom:1px solid #303a35;display:grid;gap:8px}.inventory-path code{color:#bac4bd;font-size:11px;overflow-wrap:anywhere}.inventory-stats{display:grid;grid-template-columns:repeat(3,1fr);border-bottom:1px solid #303a35}.inventory-stats article{display:grid;gap:7px;padding:20px 15px;border-right:1px solid #303a35}.inventory-stats article:first-child{padding-left:0}.inventory-stats article:last-child{border:0}.inventory-stats strong{font-size:23px}.inventory-stats span{font-size:10px;color:#929d96}.inventory-warning{margin:17px 0;padding:13px 15px;border:1px solid #594632;border-radius:8px;background:#28241e;color:#d5c4a5;font-size:10px;line-height:1.7}.inventory-list{padding:7px 0 17px}.inventory-list h2{font-size:13px;margin:10px 0}.inventory-list h3{font-size:11px;color:#c4cdc6}.inventory-list p{font-size:10px;color:#929d96}.inventory-list ul{list-style:none;padding:0;margin:0;max-height:300px;overflow:auto}.inventory-list li{display:flex;justify-content:space-between;gap:14px;padding:9px 2px;border-bottom:1px solid #29312d;font-size:10px}.inventory-list li span{overflow-wrap:anywhere}.inventory-list li small{color:#829087;white-space:nowrap}.storage-list{border-top:1px solid #303a35}.storage-columns{display:grid;grid-template-columns:1fr 1fr;gap:22px}.storage-columns>div+div{border-left:1px solid #303a35;padding-left:22px}
+.install-progress{display:flex;align-items:center;gap:15px;margin-top:12px;padding:17px 20px;border:1px solid #3b4a40;border-radius:10px;background:#19211d;color:#d4ddd5}.install-progress .spinner{flex:none}.install-progress strong{font-size:11px}.install-progress p{margin:5px 0 0;color:#89968e;font-size:10px}
+.managed-location{display:grid;gap:8px;padding:12px 3px;color:#849189}.managed-location code{font-size:10px;color:#b4beb7;overflow-wrap:anywhere}
+.play-actions{flex-wrap:wrap;justify-content:flex-end}
+.appearance-row { align-items: flex-start; padding: 19px 0; }
+.theme-options { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
+.theme-selected { border-color: var(--accent) !important; color: var(--accent) !important; }
+.hero-card { background-image: linear-gradient(90deg,#111615e8,#1116159c),var(--hero-background),linear-gradient(107deg,#1d2422,#1a211f 53%,color-mix(in srgb,var(--hero-accent),#151a19 87%)); background-position: center; background-size: cover; }
+.shell { --app-bg: #111615; --sidebar-bg: #151b1a; --surface: #191f1d; --surface-raised: #202725; --line: #303a35; --muted: #929d96; --primary-text: #e9ebe6; color: var(--primary-text); background: var(--app-bg); }
+.shell[data-theme="siege"] { --app-bg: #121516; --sidebar-bg: #191d1e; --surface: #1d2222; --surface-raised: #292d2b; --line: #484337; --muted: #aaa392; --primary-text: #eee9dd; }
+.shell[data-theme="ghouls"] { --app-bg: #121713; --sidebar-bg: #181f19; --surface: #1c241e; --surface-raised: #273027; --line: #424b3e; --muted: #a1ab9d; --primary-text: #e6ebe1; }
+.shell .sidebar { background: var(--sidebar-bg); border-color: var(--line); }
+.shell main { background: radial-gradient(ellipse at 80% 8%,color-mix(in srgb,var(--accent),transparent 93%),transparent 34%),var(--app-bg); }
+.shell .topbar { border-color: var(--line); }
+.shell .series-choice.active, .shell nav button:hover, .shell nav button.current { background: var(--surface-raised); border-color: var(--line); }
+.shell .brand-mark { background: linear-gradient(145deg,var(--surface-raised),var(--sidebar-bg)); border-color: var(--line); color: var(--accent); }
+.shell .series-card, .shell .series-card.selected-card, .shell .play-panel, .shell .settings-card, .shell .empty-card { background-color: var(--surface); border-color: var(--line); }
+.shell .series-card { background-image: linear-gradient(125deg,var(--surface),color-mix(in srgb,var(--surface),var(--app-bg) 25%)); }
+.shell .series-card.selected-card { background-image: linear-gradient(125deg,color-mix(in srgb,var(--accent),var(--surface) 91%),var(--surface)); }
+.shell .play-panel, .shell .settings-card, .shell .empty-card { color: var(--primary-text); }
+.shell .button.secondary { background: var(--surface-raised); border-color: var(--line); }
+.shell .connection-pill { border-color: var(--line); }
+.shell .series-choice, .shell nav button { color: var(--muted); }
+.shell .hero-card { border-color: color-mix(in srgb,var(--accent),var(--line) 62%); }

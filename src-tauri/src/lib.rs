@@ -1,5 +1,9 @@
 use atomic_write_file::AtomicWriteFile;
 use mc_launcher_core::{
+    account::Account,
+    auth::microsoft_account::{complete_login, complete_refresh, get_secure_login_data, parse_auth_code_url},
+    command::builder::LaunchOptions,
+    launcher::Launcher,
     install::{
         client::{
             fetch_vanilla_version, install_version_files, load_version_json, write_version_json,
@@ -77,7 +81,26 @@ struct Settings {
     theme_id: Option<String>,
     #[serde(default)]
     background_file: Option<String>,
+    #[serde(default)]
+    microsoft_client_id: Option<String>,
 }
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MicrosoftProfile {
+    username: String,
+    uuid: String,
+}
+
+#[derive(Clone, Debug)]
+struct AuthenticatedAccount {
+    profile: MicrosoftProfile,
+    access_token: String,
+    refresh_token: String,
+}
+
+#[derive(Default)]
+struct AuthSession(std::sync::Mutex<Option<AuthenticatedAccount>>);
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -94,6 +117,8 @@ struct Bootstrap {
     java_manually_selected: bool,
     managed_game_directories: BTreeMap<String, String>,
     installed_profiles: BTreeMap<String, String>,
+    microsoft_client_id: Option<String>,
+    microsoft_profile: Option<MicrosoftProfile>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1132,6 +1157,13 @@ fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
         .join("launcher.log")
         .to_string_lossy()
         .into_owned();
+    let microsoft_profile = app
+        .state::<AuthSession>()
+        .0
+        .lock()
+        .map_err(|_| "La sesión Microsoft quedó bloqueada".to_string())?
+        .as_ref()
+        .map(|session| session.profile.clone());
     let java_manually_selected = settings.java_executable.is_some();
     let java = if let Some(path) = settings.java_executable.as_deref() {
         inspect_java(Path::new(path))
@@ -1183,6 +1215,8 @@ fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
         java_manually_selected,
         managed_game_directories,
         installed_profiles,
+        microsoft_client_id: settings.microsoft_client_id,
+        microsoft_profile,
     })
 }
 
@@ -1432,6 +1466,237 @@ fn resolve_series_game_directory(
     Ok(None)
 }
 
+#[cfg(target_os = "windows")]
+fn open_system_browser(url: &str) -> io::Result<()> {
+    Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", url])
+        .spawn()
+        .map(|_| ())
+}
+
+#[cfg(target_os = "linux")]
+fn open_system_browser(url: &str) -> io::Result<()> {
+    Command::new("xdg-open")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+}
+
+#[cfg(target_os = "macos")]
+fn open_system_browser(url: &str) -> io::Result<()> {
+    Command::new("open").arg(url).spawn().map(|_| ())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+fn open_system_browser(_url: &str) -> io::Result<()> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "plataforma no compatible"))
+}
+
+fn is_valid_microsoft_client_id(id: &str) -> bool {
+    id.len() == 36
+        && id.bytes().enumerate().all(|(index, byte)| {
+            if [8, 13, 18, 23].contains(&index) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+}
+
+#[tauri::command]
+fn set_microsoft_client_id(app: AppHandle, client_id: String) -> Result<Bootstrap, String> {
+    let id = client_id.trim();
+    if !is_valid_microsoft_client_id(id) {
+        return Err("El Client ID debe ser el identificador UUID de una aplicación de escritorio registrada en Microsoft.".into());
+    }
+    let mut settings = read_settings(&app)?;
+    settings.microsoft_client_id = Some(id.to_ascii_lowercase());
+    write_settings(&app, &settings)?;
+    make_bootstrap(&app)
+}
+
+#[tauri::command]
+fn login_microsoft(app: AppHandle) -> Result<Bootstrap, String> {
+    let settings = read_settings(&app)?;
+    let client_id = settings
+        .microsoft_client_id
+        .as_deref()
+        .ok_or_else(|| "Configura primero el Client ID público de Microsoft en Ajustes.".to_string())?
+        .to_string();
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|error| format!("No se pudo abrir el callback local de inicio de sesión: {error}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| format!("No se pudo preparar el callback local: {error}"))?;
+    let port = listener.local_addr().map_err(|error| error.to_string())?.port();
+    let redirect_uri = format!("http://localhost:{port}");
+    let (login_url, expected_state, verifier) =
+        get_secure_login_data(&client_id, &redirect_uri, None);
+    open_system_browser(&login_url)
+        .map_err(|error| format!("No se pudo abrir el navegador para iniciar sesión: {error}"))?;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    let auth_code = loop {
+        if std::time::Instant::now() >= deadline {
+            return Err("Se agotó el tiempo esperando el regreso del navegador. Intenta iniciar sesión otra vez.".into());
+        }
+        match listener.accept() {
+            Ok((mut stream, peer)) => {
+                if !peer.ip().is_loopback() {
+                    continue;
+                }
+                let mut request = [0_u8; 8192];
+                let read = stream
+                    .read(&mut request)
+                    .map_err(|error| format!("No se pudo leer el callback de Microsoft: {error}"))?;
+                let request = String::from_utf8_lossy(&request[..read]);
+                let first_line = request.lines().next().unwrap_or_default();
+                let mut parts = first_line.split_ascii_whitespace();
+                if parts.next() != Some("GET") {
+                    let _ = stream.write_all(b"HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\n\r\n");
+                    continue;
+                }
+                let Some(target) = parts.next().filter(|target| target.starts_with('/')) else {
+                    let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+                    continue;
+                };
+                let callback = format!("{redirect_uri}{target}");
+                let code = match parse_auth_code_url(&callback, Some(expected_state.clone())) {
+                    Ok(code) => code,
+                    Err(_) => {
+                        let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nNo se pudo validar el inicio de sesion.");
+                        return Err("Microsoft devolvió un callback sin código válido o el estado de seguridad no coincide.".into());
+                    }
+                };
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\nInicio de sesion recibido. Puedes volver a EternalCraft Launcher.");
+                break code;
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(error) => return Err(format!("Falló el callback local de Microsoft: {error}")),
+        }
+    };
+
+    let account = complete_login(&client_id, None, &redirect_uri, &auth_code, Some(&verifier));
+    let account = account.map_err(|error| format!("No se pudo validar la cuenta de Minecraft: {error}"))?;
+    let session = AuthenticatedAccount {
+        profile: MicrosoftProfile {
+            username: account.name,
+            uuid: account.id,
+        },
+        access_token: account.access_token,
+        refresh_token: account.refresh_token,
+    };
+    *app.state::<AuthSession>()
+        .0
+        .lock()
+        .map_err(|_| "La sesión Microsoft quedó bloqueada".to_string())? = Some(session);
+    make_bootstrap(&app)
+}
+
+#[tauri::command]
+fn logout_microsoft(app: AppHandle) -> Result<Bootstrap, String> {
+    *app.state::<AuthSession>()
+        .0
+        .lock()
+        .map_err(|_| "La sesión Microsoft quedó bloqueada".to_string())? = None;
+    make_bootstrap(&app)
+}
+
+#[tauri::command]
+fn launch_minecraft(app: AppHandle, series_id: String) -> Result<(), String> {
+    let series = parse_catalog()?
+        .series
+        .into_iter()
+        .find(|series| series.id == series_id)
+        .ok_or_else(|| "La serie solicitada no existe en el catálogo".to_string())?;
+    if series.pack_status != PackStatus::Available {
+        return Err("Esta serie todavía no tiene un pack oficial publicado y no se puede iniciar como serie jugable.".into());
+    }
+    let settings = read_settings(&app)?;
+    let mut session = app
+        .state::<AuthSession>()
+        .0
+        .lock()
+        .map_err(|_| "La sesión Microsoft quedó bloqueada".to_string())?
+        .clone()
+        .ok_or_else(|| "Inicia sesión con una cuenta Microsoft propietaria de Minecraft antes de jugar.".to_string())?;
+    let client_id = settings
+        .microsoft_client_id
+        .as_deref()
+        .ok_or_else(|| "Falta el Client ID público de Microsoft.".to_string())?;
+    let account = complete_refresh(client_id, None, &session.refresh_token)
+        .map_err(|error| format!("La sesión Microsoft necesita renovarse. Vuelve a iniciar sesión: {error}"))?;
+    session.profile = MicrosoftProfile {
+        username: account.name.clone(),
+        uuid: account.id.clone(),
+    };
+    session.access_token = account.access_token.clone();
+    session.refresh_token = account.refresh_token.clone();
+    *app.state::<AuthSession>()
+        .0
+        .lock()
+        .map_err(|_| "La sesión Microsoft quedó bloqueada".to_string())? = Some(session);
+    let game_dir = resolve_series_game_directory(&app, &series_id)?
+        .ok_or_else(|| "Selecciona o instala la carpeta de juego de esta serie primero.".to_string())?;
+    verify_forge_profile(&game_dir, &series)?;
+    pack::verify_installed_pack(&game_dir, &series_id)?;
+    let profile_id = expected_profile_id(&series).ok_or_else(|| "No se pudo determinar el perfil del juego".to_string())?;
+    let mut java = if let Some(path) = settings.java_executable.as_deref() {
+        inspect_java(Path::new(path))
+    } else {
+        detect_java()
+    };
+    if !java.compatible && settings.java_executable.is_none() {
+        let app_data = app.path().app_data_dir().map_err(|error| error.to_string())?;
+        let runtime_root = if settings.managed_installs.get(&series_id).map(String::as_str)
+            == expected_profile_id(&series).as_deref()
+        {
+            app_data.join("instances").join(&series_id)
+        } else {
+            game_dir.clone()
+        };
+        java = get_installed_jvm_runtimes(&runtime_root)
+            .into_iter()
+            .filter_map(|component| get_executable_path(&component, &runtime_root))
+            .map(|path| inspect_java(&path))
+            .find(|status| status.compatible)
+            .unwrap_or(java);
+    }
+    if !java.compatible {
+        return Err(format!("Se necesita Java 17 para esta versión de Minecraft. {}", java.detail));
+    }
+    let launcher = Launcher::new(&game_dir);
+    let version = launcher
+        .load_version(&profile_id)
+        .map_err(|error| format!("No se pudo cargar el perfil Forge instalado: {error}"))?;
+    let command = launcher
+        .build_launch_command_from_version(
+            &version,
+            LaunchOptions {
+                account: Account::Microsoft {
+                    username: account.name,
+                    uuid: account.id,
+                    access_token: account.access_token,
+                },
+                java_executable: Some(java.executable.ok_or_else(|| "No se encontró el ejecutable de Java 17".to_string())?.into()),
+                game_directory: Some(game_dir.clone()),
+                launcher_name: "EternalCraft".into(),
+                launcher_version: env!("CARGO_PKG_VERSION").into(),
+                ..Default::default()
+            },
+        )
+        .map_err(|error| format!("No se pudieron preparar los argumentos de Minecraft: {error}"))?;
+    Command::new(&command.executable)
+        .args(&command.args)
+        .current_dir(&command.working_dir)
+        .spawn()
+        .map_err(|error| format!("No se pudo iniciar Minecraft: {error}"))?;
+    append_install_log(&app, &series_id, "Juego", "Se inició el proceso Java de Minecraft.")?;
+    Ok(())
+}
+
 fn mod_inventory_for_path(path: Option<PathBuf>) -> Result<ModInventory, String> {
     let Some(game_directory) = path else {
         return Ok(ModInventory {
@@ -1665,6 +1930,7 @@ fn link_detected_directory(app: AppHandle, series_id: String) -> Result<Bootstra
 
 pub fn run() {
     tauri::Builder::default()
+        .manage(AuthSession::default())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             get_bootstrap,
@@ -1683,7 +1949,11 @@ pub fn run() {
             reset_java_selection,
             set_active_series,
             select_game_directory,
-            link_detected_directory
+            link_detected_directory,
+            set_microsoft_client_id,
+            login_microsoft,
+            logout_microsoft,
+            launch_minecraft
         ])
         .run(tauri::generate_context!())
         .expect("error while running EternalCraft Launcher");
@@ -1692,6 +1962,32 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn microsoft_client_id_requires_a_uuid() {
+        assert!(is_valid_microsoft_client_id(
+            "12345678-1234-4234-8234-123456789abc"
+        ));
+        assert!(!is_valid_microsoft_client_id("not-a-client-id"));
+        assert!(!is_valid_microsoft_client_id(
+            "12345678-1234-1234-1234-123456789abc"
+        ));
+    }
+
+    #[test]
+    fn microsoft_callback_requires_matching_state_and_an_auth_code() {
+        let url = "http://localhost:49152/?code=one-time-code&state=expected";
+        assert_eq!(
+            parse_auth_code_url(url, Some("expected".to_string())).unwrap(),
+            "one-time-code"
+        );
+        assert!(parse_auth_code_url(url, Some("attacker".to_string())).is_err());
+        assert!(parse_auth_code_url(
+            "http://localhost:49152/?error=access_denied&state=expected",
+            Some("expected".to_string())
+        )
+        .is_err());
+    }
 
     #[test]
     fn bundled_catalog_is_valid_and_includes_the_initial_series() {

@@ -25,6 +25,7 @@
   let installMessage = $state('');
   let launcherLogs = $state('Todavía no hay registros de instalación.');
   let logsLoading = $state(false);
+  let clientIdDraft = $state('');
   let backgroundUrl = $derived(bootstrap?.backgroundPath ? convertFileSrc(bootstrap.backgroundPath) : '');
   let themeAccent = $derived(bootstrap?.themeId === 'ghouls' ? '#bf624d' : bootstrap?.themeId === 'siege' ? '#d1a35b' : selected?.accent ?? '#d1a35b');
 
@@ -111,11 +112,67 @@
     error = '';
     try {
       bootstrap = await invoke<Bootstrap>('get_bootstrap');
+      clientIdDraft = bootstrap.microsoftClientId ?? '';
       await loadMods(bootstrap.activeSeriesId);
     } catch (reason) {
       error = String(reason);
     } finally {
       loading = false;
+    }
+  }
+
+  async function saveMicrosoftClientId() {
+    busy = true;
+    error = '';
+    try {
+      bootstrap = await invoke<Bootstrap>('set_microsoft_client_id', { clientId: clientIdDraft });
+      notice = 'Configuración pública de Microsoft guardada';
+    } catch (reason) {
+      error = String(reason);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function loginMicrosoft() {
+    busy = true;
+    error = '';
+    notice = 'Completa el inicio de sesión en el navegador que se abrió…';
+    try {
+      bootstrap = await invoke<Bootstrap>('login_microsoft');
+      notice = `Sesión iniciada como ${bootstrap.microsoftProfile?.username ?? 'Minecraft'}`;
+    } catch (reason) {
+      error = String(reason);
+      notice = '';
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function logoutMicrosoft() {
+    busy = true;
+    error = '';
+    try {
+      bootstrap = await invoke<Bootstrap>('logout_microsoft');
+      notice = 'Se quitó la cuenta y su credencial del llavero del sistema';
+    } catch (reason) {
+      error = String(reason);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function launchMinecraft() {
+    if (!selected) return;
+    busy = true;
+    error = '';
+    try {
+      await invoke('launch_minecraft', { seriesId: selected.id });
+      notice = 'Minecraft se inició. El launcher seguirá disponible para ver sus registros.';
+    } catch (reason) {
+      error = String(reason);
+    } finally {
+      busy = false;
     }
   }
 
@@ -366,7 +423,7 @@
             {/each}
           </div>
 
-          <div class="play-panel"><div class="play-copy"><span class="eyebrow">CARPETA DE JUEGO</span><h3>{isLinked(selected) ? 'Instancia vinculada' : bootstrap.installedProfiles[selected.id] ? 'Instancia de EternalCraft' : isDetected(selected) ? 'Instancia detectada' : 'Conecta tu instancia'}</h3><p>{bootstrap.installedProfiles[selected.id] && !isLinked(selected) ? bootstrap.managedGameDirectories[selected.id] : pathFor(selected) || 'Selecciona la carpeta de juego de esta serie para guardarla en el launcher.'}</p></div><div class="play-actions">{#if isDetected(selected)}<button class="button secondary" onclick={linkDetectedDirectory} disabled={busy || syncingPack}>Usar carpeta detectada</button>{/if}<button class="button secondary" onclick={selectDirectory} disabled={busy || syncingPack}>{isLinked(selected) ? 'Cambiar carpeta' : 'Seleccionar carpeta'}</button>{#if bootstrap.installedProfiles[selected.id]}<span class="saved-chip">FORGE INSTALADO</span>{:else}<button class="button secondary" onclick={installBase} disabled={installingSeries !== null || syncingPack} title="Instala una instancia aislada y descarga Java 17 de Mojang si hace falta">Instalar base de Forge y Java 17</button>{/if}{#if selected.packStatus === 'available'}<button class="button primary" onclick={syncOfficialPack} disabled={syncingPack || !bootstrap.installedProfiles[selected.id] && !isLinked(selected)}>{syncingPack ? 'Actualizando mods…' : 'Instalar / actualizar pack'}</button>{:else}<button class="button primary" disabled title="El modpack de esta serie todavía no tiene archivos oficiales publicados">Pack no publicado</button>{/if}</div></div>
+          <div class="play-panel"><div class="play-copy"><span class="eyebrow">CARPETA DE JUEGO</span><h3>{isLinked(selected) ? 'Instancia vinculada' : bootstrap.installedProfiles[selected.id] ? 'Instancia de EternalCraft' : isDetected(selected) ? 'Instancia detectada' : 'Conecta tu instancia'}</h3><p>{bootstrap.installedProfiles[selected.id] && !isLinked(selected) ? bootstrap.managedGameDirectories[selected.id] : pathFor(selected) || 'Selecciona la carpeta de juego de esta serie para guardarla en el launcher.'}</p></div><div class="play-actions">{#if isDetected(selected)}<button class="button secondary" onclick={linkDetectedDirectory} disabled={busy || syncingPack}>Usar carpeta detectada</button>{/if}<button class="button secondary" onclick={selectDirectory} disabled={busy || syncingPack}>{isLinked(selected) ? 'Cambiar carpeta' : 'Seleccionar carpeta'}</button>{#if bootstrap.installedProfiles[selected.id]}<span class="saved-chip">FORGE INSTALADO</span>{:else}<button class="button secondary" onclick={installBase} disabled={installingSeries !== null || syncingPack} title="Instala una instancia aislada y descarga Java 17 de Mojang si hace falta">Instalar base de Forge y Java 17</button>{/if}{#if selected.packStatus === 'available'}<button class="button secondary" onclick={syncOfficialPack} disabled={syncingPack || !bootstrap.installedProfiles[selected.id] && !isLinked(selected)}>{syncingPack ? 'Actualizando mods…' : 'Instalar / actualizar pack'}</button>{#if bootstrap.microsoftProfile}<button class="button primary" onclick={launchMinecraft} disabled={busy || syncingPack || !bootstrap.installedProfiles[selected.id] && !isLinked(selected)}>{busy ? 'Preparando…' : 'Jugar'}</button>{/if}{:else}<button class="button primary" disabled title="El modpack de esta serie todavía no tiene archivos oficiales publicados">Pack no publicado</button>{/if}</div></div>
           {#if bootstrap.installedProfiles[selected.id]}<div class="managed-location"><span class="eyebrow">INSTANCIA ADMINISTRADA POR ETERNALCRAFT</span><code>{bootstrap.managedGameDirectories[selected.id]}</code></div>{/if}
           {#if installingSeries === selected.id}<div class="install-progress" role="status" aria-live="polite"><span class="spinner"></span><div><strong>{installMessage || 'Instalando Minecraft y Forge…'}</strong><p>Preparando el perfil del juego; Minecraft no se iniciará.</p></div></div>{/if}
           {#if syncingPack}<div class="install-progress" role="status" aria-live="polite"><span class="spinner"></span><div><strong>{packSyncMessage || 'Actualizando mods oficiales…'}</strong><p>El proceso verifica cada descarga antes de sustituir archivos administrados.</p></div></div>{/if}
@@ -382,7 +439,10 @@
       {:else if activePage === 'support'}
         <section class="page narrow-page"><div class="page-heading"><div><span class="eyebrow">DIAGNÓSTICO LOCAL</span><h1>Soporte</h1><p>Registro de instalación de Minecraft y Forge.</p></div><button class="button secondary" onclick={openSupport} disabled={logsLoading}>{logsLoading ? 'Leyendo…' : 'Actualizar registro'}</button></div><div class="settings-card log-card"><div class="inventory-path"><span class="eyebrow">ARCHIVO LOCAL</span><code>{bootstrap.logFile}</code></div><pre class="log-viewer" aria-live="polite">{launcherLogs}</pre></div><p class="privacy-note">Se guarda el último megabyte de eventos y una rotación previa. No se registran contraseñas ni tokens de cuenta.</p></section>
       {:else}
-        <section class="page narrow-page"><div class="page-heading"><div><span class="eyebrow">CONFIGURACIÓN LOCAL</span><h1>Ajustes</h1><p>Preferencias guardadas en este equipo.</p></div></div><div class="settings-card"><div class="setting-row appearance-row"><div><span class="eyebrow">APARIENCIA</span><h2>Identidad visual</h2><p>Elige un acento inspirado en tus series y un fondo local opcional.</p><div class="theme-options"><button class:theme-selected={bootstrap.themeId === 'series'} class="button secondary" onclick={() => saveTheme('series')}>Color de la serie</button><button class:theme-selected={bootstrap.themeId === 'siege'} class="button secondary" onclick={() => saveTheme('siege')}>SIEGE</button><button class:theme-selected={bootstrap.themeId === 'ghouls'} class="button secondary" onclick={() => saveTheme('ghouls')}>Ghouls</button></div></div><div class="play-actions"><button class="button secondary" onclick={chooseBackground}>Elegir fondo</button>{#if bootstrap.backgroundPath}<button class="button secondary" onclick={clearBackground}>Quitar fondo</button>{/if}</div></div><div class="setting-row"><div><span class="eyebrow">JAVA · MINECRAFT 1.20.1</span><h2>{bootstrap.java.compatible ? `Java ${bootstrap.java.version}` : 'Java 17 no está listo'}</h2><p>{bootstrap.java.detail}{#if bootstrap.java.executable}<br/><code>{bootstrap.java.executable}</code>{/if}</p></div><div class="play-actions"><span class:saved-chip={bootstrap.java.compatible} class:warning-chip={!bootstrap.java.compatible}>{bootstrap.java.compatible ? 'COMPATIBLE' : 'REVISAR'}</span><button class="button secondary" onclick={selectJava} disabled={busy}>Elegir Java 17</button>{#if bootstrap.javaManuallySelected}<button class="button secondary" onclick={resetJava} disabled={busy}>Automático</button>{/if}<button class="button secondary" onclick={refreshJava} disabled={javaRefreshing}>{javaRefreshing ? 'Comprobando…' : 'Volver a comprobar'}</button></div></div><div class="setting-row"><div><span class="eyebrow">INSTANCIA · {selected.name}</span><h2>Directorio del juego</h2><p>{pathFor(selected) || 'Todavía no has vinculado una carpeta.'}</p></div><div class="play-actions">{#if isDetected(selected)}<button class="button secondary" onclick={linkDetectedDirectory} disabled={busy}>Vincular detectada</button>{/if}<button class="button secondary" onclick={selectDirectory} disabled={busy}>{isLinked(selected) ? 'Cambiar carpeta' : 'Elegir carpeta'}</button></div></div><div class="setting-row"><div><span class="eyebrow">CONFIGURACIÓN</span><h2>Archivo de preferencias</h2><p>{bootstrap.configDirectory}</p></div><span class="saved-chip">GUARDADO LOCAL</span></div><div class="setting-row"><div><span class="eyebrow">DIAGNÓSTICO</span><h2>Registros de instalación</h2><p>{bootstrap.logFile}</p></div><button class="button secondary" onclick={openSupport}>Ver registro</button></div></div><p class="privacy-note">Las carpetas detectadas se sugieren sin alterarlas; solo se vinculan después de que lo confirmes.</p></section>
+        <section class="page narrow-page"><div class="page-heading"><div><span class="eyebrow">CONFIGURACIÓN LOCAL</span><h1>Ajustes</h1><p>Preferencias guardadas en este equipo.</p></div></div><div class="settings-card">
+          <div class="setting-row"><div><span class="eyebrow">CUENTA DE MINECRAFT</span><h2>{bootstrap.microsoftProfile?.username ?? 'Sin sesión iniciada'}</h2><p>{bootstrap.microsoftProfile ? `UUID ${bootstrap.microsoftProfile.uuid}` : 'Inicia sesión con Microsoft para jugar cuando el pack de una serie esté publicado.'}</p></div><div class="play-actions">{#if bootstrap.microsoftProfile}<button class="button secondary" onclick={logoutMicrosoft} disabled={busy}>Cerrar sesión</button>{:else}<button class="button primary" onclick={loginMicrosoft} disabled={busy || !bootstrap.microsoftClientId}>{busy ? 'Esperando navegador…' : 'Conectar cuenta Microsoft'}</button>{/if}</div></div>
+          <div class="setting-row"><div><span class="eyebrow">REGISTRO DE APLICACIÓN · MICROSOFT</span><h2>Client ID público</h2><p>Es el identificador público de EternalCraft en el portal de Microsoft; no es una contraseña. Se registra como aplicación de escritorio, con cuenta personal de Microsoft y redirección <code>http://localhost</code>. El login usa PKCE y no lleva secreto de aplicación.</p><a class="text-link" href="https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank" rel="noreferrer">Abrir el portal de aplicaciones de Microsoft ↗</a><input class="text-input" type="text" autocomplete="off" spellcheck="false" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" bind:value={clientIdDraft} /></div><button class="button secondary" onclick={saveMicrosoftClientId} disabled={busy || clientIdDraft.trim() === (bootstrap.microsoftClientId ?? '')}>Guardar ID</button></div>
+          <div class="setting-row appearance-row"><div><span class="eyebrow">APARIENCIA</span><h2>Identidad visual</h2><p>Elige un acento inspirado en tus series y un fondo local opcional.</p><div class="theme-options"><button class:theme-selected={bootstrap.themeId === 'series'} class="button secondary" onclick={() => saveTheme('series')}>Color de la serie</button><button class:theme-selected={bootstrap.themeId === 'siege'} class="button secondary" onclick={() => saveTheme('siege')}>SIEGE</button><button class:theme-selected={bootstrap.themeId === 'ghouls'} class="button secondary" onclick={() => saveTheme('ghouls')}>Ghouls</button></div></div><div class="play-actions"><button class="button secondary" onclick={chooseBackground}>Elegir fondo</button>{#if bootstrap.backgroundPath}<button class="button secondary" onclick={clearBackground}>Quitar fondo</button>{/if}</div></div><div class="setting-row"><div><span class="eyebrow">JAVA · MINECRAFT 1.20.1</span><h2>{bootstrap.java.compatible ? `Java ${bootstrap.java.version}` : 'Java 17 no está listo'}</h2><p>{bootstrap.java.detail}{#if bootstrap.java.executable}<br/><code>{bootstrap.java.executable}</code>{/if}</p></div><div class="play-actions"><span class:saved-chip={bootstrap.java.compatible} class:warning-chip={!bootstrap.java.compatible}>{bootstrap.java.compatible ? 'COMPATIBLE' : 'REVISAR'}</span><button class="button secondary" onclick={selectJava} disabled={busy}>Elegir Java 17</button>{#if bootstrap.javaManuallySelected}<button class="button secondary" onclick={resetJava} disabled={busy}>Automático</button>{/if}<button class="button secondary" onclick={refreshJava} disabled={javaRefreshing}>{javaRefreshing ? 'Comprobando…' : 'Volver a comprobar'}</button></div></div><div class="setting-row"><div><span class="eyebrow">INSTANCIA · {selected.name}</span><h2>Directorio del juego</h2><p>{pathFor(selected) || 'Todavía no has vinculado una carpeta.'}</p></div><div class="play-actions">{#if isDetected(selected)}<button class="button secondary" onclick={linkDetectedDirectory} disabled={busy}>Vincular detectada</button>{/if}<button class="button secondary" onclick={selectDirectory} disabled={busy}>{isLinked(selected) ? 'Cambiar carpeta' : 'Elegir carpeta'}</button></div></div><div class="setting-row"><div><span class="eyebrow">CONFIGURACIÓN</span><h2>Archivo de preferencias</h2><p>{bootstrap.configDirectory}</p></div><span class="saved-chip">GUARDADO LOCAL</span></div><div class="setting-row"><div><span class="eyebrow">DIAGNÓSTICO</span><h2>Registros de instalación</h2><p>{bootstrap.logFile}</p></div><button class="button secondary" onclick={openSupport}>Ver registro</button></div></div><p class="privacy-note">Las carpetas detectadas se sugieren sin alterarlas; solo se vinculan después de que lo confirmes.</p></section>
       {/if}
     {/if}
   </main>

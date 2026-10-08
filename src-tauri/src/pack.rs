@@ -236,6 +236,50 @@ fn load_previous_state(path: &Path, series_id: &str) -> Result<Option<PackState>
     }
 }
 
+pub(super) fn verify_installed_pack(game_dir: &Path, series_id: &str) -> Result<(), String> {
+    let _guard = PACK_SYNC_LOCK
+        .lock()
+        .map_err(|_| "El bloqueo de actualización del pack falló".to_string())?;
+    let mods = game_dir.join("mods");
+    let officials = mods.join("Oficiales");
+    let metadata_dir = game_dir.join(".eternalcraft");
+    let state_file = state_path(game_dir, series_id);
+    check_normal_directory(&mods)?;
+    check_normal_directory(&officials)?;
+    check_normal_directory(&metadata_dir)?;
+    check_normal_file_if_present(&state_file)?;
+    let state = load_previous_state(&state_file, series_id)?
+        .ok_or_else(|| "Primero instala o actualiza los archivos oficiales de esta serie.".to_string())?;
+    if state.files.is_empty() {
+        return Err("El manifiesto oficial no contiene mods verificables; no se iniciará una serie vacía.".into());
+    }
+    let expected: BTreeSet<&str> = state.files.keys().map(String::as_str).collect();
+    let actual: BTreeSet<String> = match fs::read_dir(&officials) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                name.to_ascii_lowercase().ends_with(".jar").then_some(name)
+            })
+            .collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
+        Err(error) => return Err(format!("No se pudo revisar el pack oficial instalado: {error}")),
+    };
+    if actual.iter().map(String::as_str).collect::<BTreeSet<_>>() != expected {
+        return Err("Los mods oficiales instalados no coinciden con el registro de la serie. Actualiza el pack antes de jugar.".into());
+    }
+    for (name, expected_hash) in &state.files {
+        let official_file = officials.join(name);
+        let loaded_file = mods.join(name);
+        check_normal_file_if_present(&official_file)?;
+        check_normal_file_if_present(&loaded_file)?;
+        if digest_file(&official_file)? != *expected_hash || digest_file(&loaded_file)? != *expected_hash {
+            return Err(format!("El mod oficial {name} cambió o está dañado. Actualiza el pack antes de jugar."));
+        }
+    }
+    Ok(())
+}
+
 fn state_path(game_dir: &Path, series_id: &str) -> PathBuf {
     game_dir
         .join(".eternalcraft")
@@ -818,6 +862,37 @@ mod tests {
         assert!(reconcile_staged(&game, &manifest, &staging).is_err());
         assert!(!game.join("mods/not-mod.jar").exists());
         fs::remove_dir_all(&staging).unwrap();
+        fs::remove_dir_all(game).unwrap();
+    }
+
+    #[test]
+    fn launch_validation_rejects_missing_stale_or_modified_official_mods() {
+        let game = temp_dir();
+        let mods = game.join("mods");
+        let officials = mods.join("Oficiales");
+        let metadata = game.join(".eternalcraft");
+        fs::create_dir_all(&officials).unwrap();
+        fs::create_dir_all(&metadata).unwrap();
+        let bytes = b"verified mod payload";
+        let hash = format!("{:x}", Sha256::digest(bytes));
+        fs::write(mods.join("active.jar"), bytes).unwrap();
+        fs::write(officials.join("active.jar"), bytes).unwrap();
+        atomic_save_state(
+            &state_path(&game, "siege"),
+            &PackState {
+                schema_version: 1,
+                series_id: "siege".into(),
+                version: "1.2.0".into(),
+                files: BTreeMap::from([("active.jar".into(), hash)]),
+            },
+        )
+        .unwrap();
+        assert!(verify_installed_pack(&game, "siege").is_ok());
+        fs::write(officials.join("retired.jar"), b"obsolete").unwrap();
+        assert!(verify_installed_pack(&game, "siege").is_err());
+        fs::remove_file(officials.join("retired.jar")).unwrap();
+        fs::write(mods.join("active.jar"), b"modified by user").unwrap();
+        assert!(verify_installed_pack(&game, "siege").is_err());
         fs::remove_dir_all(game).unwrap();
     }
 }

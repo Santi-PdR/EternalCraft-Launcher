@@ -23,6 +23,8 @@ export interface Bootstrap {
   javaManuallySelected: boolean;
   managedGameDirectories: Record<string, string>;
   installedProfiles: Record<string, string>;
+  microsoftClientId: string | null;
+  microsoftProfile: { username: string; uuid: string } | null;
 }
 
 export interface JavaStatus {

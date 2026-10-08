@@ -1,0 +1,21 @@
+[package]
+name = "eternalcraft-launcher"
+version = "0.1.0"
+description = "EternalCraft native game launcher"
+authors = ["EternalCraft"]
+edition = "2021"
+rust-version = "1.90"
+
+[lib]
+name = "eternalcraft_launcher_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+atomic-write-file = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"

@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "series": [
+    {
+      "id": "siege",
+      "name": "SIEGE",
+      "subtitle": "Supervivencia táctica",
+      "description": "Una campaña de supervivencia y asedio en el universo EternalCraft.",
+      "accent": "#d1a35b",
+      "minecraftVersion": "1.20.1",
+      "loader": "Forge",
+      "loaderVersion": "47.4.10",
+      "packStatus": "unpublished"
+    },
+    {
+      "id": "ghouls-outbreak",
+      "name": "GHOULS OUTBREAK",
+      "subtitle": "El brote ya comenzó",
+      "description": "Una experiencia de supervivencia zombi inspirada en el horror cooperativo.",
+      "accent": "#bf624d",
+      "minecraftVersion": "1.20.1",
+      "loader": "Forge",
+      "loaderVersion": "47.4.10",
+      "packStatus": "unpublished"
+    }
+  ]
+}

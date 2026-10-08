@@ -1,5 +1,3 @@
-/home/Santipdr/.bashrc: line 47: /tmp/eternalcraft-cargo/env: No such file or directory
-/home/Santipdr/.bash_profile: line 18: /tmp/eternalcraft-cargo/env: No such file or directory
 <script lang="ts">
   import { convertFileSrc, invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';

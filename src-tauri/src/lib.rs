@@ -1970,7 +1970,7 @@ mod tests {
         ));
         assert!(!is_valid_microsoft_client_id("not-a-client-id"));
         assert!(!is_valid_microsoft_client_id(
-            "12345678-1234-1234-1234-123456789abc"
+            "12345678-1234-4234-8234-123456789ab"
         ));
     }
 

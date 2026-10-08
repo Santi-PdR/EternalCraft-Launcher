@@ -740,7 +740,7 @@ mod tests {
         reconcile_staged(&game, &first, &stage1).unwrap();
         fs::remove_dir_all(&stage1).unwrap();
         assert!(files_to_download(&game, &first).unwrap().is_empty());
-        let updated = mod_jar("kept");
+        let updated = same.clone();
         let new = mod_jar("new");
         let second = manifest("siege", &[("kept.jar", &updated), ("new.jar", &new)]);
         assert_eq!(

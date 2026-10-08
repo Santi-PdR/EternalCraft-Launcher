@@ -1280,24 +1280,22 @@ fn with_memory_arguments(
         .ok_or_else(|| {
             "No se encontró el límite entre argumentos JVM y argumentos de Minecraft".to_string()
         })?;
-    args[..main_index].retain(|argument| !argument.starts_with("-Xms") && !argument.starts_with("-Xmx"));
-    let main_index = args
-        .iter()
-        .position(|argument| argument == main_class)
-        .ok_or_else(|| {
-            "Se perdió la clase principal de Minecraft al preparar la memoria".to_string()
-        })?;
+    let mut jvm_arguments = args
+        .drain(..main_index)
+        .filter(|argument| !argument.starts_with("-Xms") && !argument.starts_with("-Xmx"))
+        .collect::<Vec<_>>();
     let initial_heap_mb = memory_mb.min(1024);
-    args.splice(
-        main_index..main_index,
-        [format!("-Xms{initial_heap_mb}M"), format!("-Xmx{memory_mb}M")],
-    );
+    jvm_arguments.push(format!("-Xms{initial_heap_mb}M"));
+    jvm_arguments.push(format!("-Xmx{memory_mb}M"));
+    jvm_arguments.append(args);
+    *args = jvm_arguments;
     Ok(())
 }
 
 fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
     let catalog = parse_catalog()?;
     let settings = read_settings(app)?;
+    let memory = memory_status(&settings);
     let default_series = catalog
         .series
         .first()
@@ -1332,7 +1330,6 @@ fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
         .join("launcher.log")
         .to_string_lossy()
         .into_owned();
-    let memory = memory_status(&settings);
     let microsoft_profile = app
         .state::<AuthSession>()
         .0
@@ -1899,7 +1896,15 @@ fn launch_minecraft(app: AppHandle, series_id: String) -> Result<(), String> {
             },
         )
         .map_err(|error| format!("No se pudieron preparar los argumentos de Minecraft: {error}"))?;
-    with_memory_arguments(&mut command.args, &version.main_class, memory_status(&settings).selected_mb)?;
+    let main_class = version
+        .main_class
+        .as_deref()
+        .ok_or_else(|| "El perfil de Minecraft no declara su clase principal".to_string())?;
+    with_memory_arguments(
+        &mut command.args,
+        main_class,
+        memory_status(&settings).selected_mb,
+    )?;
     Command::new(&command.executable)
         .args(&command.args)
         .current_dir(&command.working_dir)

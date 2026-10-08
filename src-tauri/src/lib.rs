@@ -956,9 +956,27 @@ fn remove_personal_mod(name: &str, mods_directory: &Path) -> Result<(), String> 
     }
     let loaded_file = mods_directory.join(name);
     match fs::symlink_metadata(&loaded_file) {
-        Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_symlink() => {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            if !files_are_identical(&personal_file, &loaded_file)? {
+                return Err(
+                    "El archivo activo cambió y ya no coincide con el mod personal; no se eliminó".into(),
+                );
+            }
             fs::remove_file(&loaded_file)
                 .map_err(|error| format!("No se pudo retirar el mod activo: {error}"))?;
+        }
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            let personal_target = fs::canonicalize(&personal_file)
+                .map_err(|error| format!("No se pudo resolver el mod personal: {error}"))?;
+            let loaded_target = fs::canonicalize(&loaded_file)
+                .map_err(|error| format!("No se pudo resolver el mod activo: {error}"))?;
+            if loaded_target != personal_target {
+                return Err(
+                    "El enlace activo apunta a otro archivo; no se eliminó ningún mod".into(),
+                );
+            }
+            fs::remove_file(&loaded_file)
+                .map_err(|error| format!("No se pudo retirar el enlace activo: {error}"))?;
         }
         Ok(_) => return Err("La ruta activa del mod no es un archivo normal".into()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -2529,6 +2547,32 @@ mod tests {
 
         remove_personal_mod("stored.jar", &mods).unwrap();
         assert!(!personal_file.exists());
+        fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
+    fn removing_personal_mod_preserves_replacement_file_in_mods_root() {
+        let fixture = std::env::temp_dir().join(format!(
+            "eternalcraft-personal-replacement-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mods = fixture.join("mods");
+        let personal_dir = mods.join("personales");
+        fs::create_dir_all(&personal_dir).unwrap();
+        let personal_file = personal_dir.join("custom.jar");
+        let loaded_file = mods.join("custom.jar");
+        fs::write(&personal_file, b"original personal mod").unwrap();
+        create_loaded_mod_alias(&personal_file, &loaded_file).unwrap();
+
+        fs::remove_file(&loaded_file).unwrap();
+        fs::write(&loaded_file, b"replacement owned by the user").unwrap();
+        assert!(remove_personal_mod("custom.jar", &mods).is_err());
+        assert_eq!(fs::read(&loaded_file).unwrap(), b"replacement owned by the user");
+        assert_eq!(fs::read(&personal_file).unwrap(), b"original personal mod");
         fs::remove_dir_all(fixture).unwrap();
     }
 

@@ -17,3 +17,9 @@ This file preserves the requested product concepts while the implementation is r
 - Never display an unpublished pack as playable. Do not invent mod counts, versions, release status, progress, or successful installs.
 - Preserve existing user instance directories. Detection is read-only; the user explicitly chooses whether to link a directory.
 - Keep account/session secrets out of exported settings, logs, diagnostics, and support bundles.
+
+## Implementation status
+
+- The current mods view is read-only. It reports JARs at the Forge `mods/` root and JARs stored under `mods/Oficiales/` or `mods/personales/` separately; it does not yet reconcile or move files.
+- Forge 1.20.x scans JAR files directly in the mods directory. Do not claim that nested category folders are active unless the launcher mirrors their managed files into the root with a tested cross-platform mechanism.
+- SIEGE and Ghouls still have no official pack manifest or published assets in this repository. Keep both series unavailable until those real inputs are provided and verified.

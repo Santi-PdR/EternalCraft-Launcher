@@ -27,3 +27,16 @@ export interface JavaStatus {
   compatible: boolean;
   detail: string;
 }
+
+export interface ModFileEntry {
+  name: string;
+  sizeBytes: number;
+}
+
+export interface ModInventory {
+  gameDirectory: string | null;
+  modsDirectory: string | null;
+  loadedFromModsRoot: ModFileEntry[];
+  officialStore: ModFileEntry[];
+  personalStore: ModFileEntry[];
+}

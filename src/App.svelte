@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
-  import type { Bootstrap, Series } from './lib/types';
+  import type { Bootstrap, ModInventory, Series } from './lib/types';
 
   let bootstrap = $state<Bootstrap | null>(null);
   let selected = $derived.by(() => {
@@ -13,12 +13,29 @@
   let error = $state('');
   let notice = $state('');
   let javaRefreshing = $state(false);
+  let modInventory = $state<ModInventory | null>(null);
+  let modsLoading = $state(false);
+  let modsError = $state('');
+
+  async function loadMods(seriesId: string | undefined) {
+    if (!seriesId) return;
+    modsLoading = true;
+    modsError = '';
+    try {
+      modInventory = await invoke<ModInventory>('get_mod_inventory', { seriesId });
+    } catch (reason) {
+      modsError = String(reason);
+    } finally {
+      modsLoading = false;
+    }
+  }
 
   async function refresh() {
     loading = true;
     error = '';
     try {
       bootstrap = await invoke<Bootstrap>('get_bootstrap');
+      await loadMods(bootstrap.activeSeriesId);
     } catch (reason) {
       error = String(reason);
     } finally {
@@ -32,6 +49,7 @@
     error = '';
     try {
       bootstrap = await invoke<Bootstrap>('set_active_series', { seriesId: id });
+      await loadMods(id);
       notice = 'Serie activa guardada';
     } catch (reason) {
       error = String(reason);
@@ -46,6 +64,7 @@
     error = '';
     try {
       bootstrap = await invoke<Bootstrap>('select_game_directory', { seriesId: selected.id });
+      await loadMods(selected.id);
       notice = 'Carpeta de juego guardada';
     } catch (reason) {
       error = String(reason);
@@ -60,6 +79,7 @@
     error = '';
     try {
       bootstrap = await invoke<Bootstrap>('link_detected_directory', { seriesId: selected.id });
+      await loadMods(selected.id);
       notice = 'Instancia detectada vinculada al launcher';
     } catch (reason) {
       error = String(reason);
@@ -119,6 +139,16 @@
     return !isLinked(series) && Boolean(bootstrap?.suggestedDirectories[series.id]);
   }
 
+  function openMods() {
+    activePage = 'mods';
+    void loadMods(bootstrap?.activeSeriesId);
+  }
+
+  function formatBytes(bytes: number) {
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
   refresh();
 </script>
 
@@ -152,7 +182,7 @@
     <nav aria-label="Navegación principal">
       <span class="eyebrow nav-caption">LAUNCHER</span>
       <button class:current={activePage === 'home'} onclick={() => (activePage = 'home')}><span>⌂</span> Inicio</button>
-      <button class:current={activePage === 'mods'} onclick={() => (activePage = 'mods')}><span>▦</span> Mods</button>
+      <button class:current={activePage === 'mods'} onclick={openMods}><span>▦</span> Mods</button>
       <span class="eyebrow nav-caption">PREFERENCIAS</span>
       <button class:current={activePage === 'settings'} onclick={() => (activePage = 'settings')}><span>⚙</span> Ajustes</button>
     </nav>
@@ -201,7 +231,12 @@
           <p class="release-note">Las versiones estarán disponibles cuando se publiquen manifiestos y archivos oficiales en este repositorio.</p>
         </section>
       {:else if activePage === 'mods'}
-        <section class="page narrow-page"><div class="page-heading"><div><span class="eyebrow">CONTENIDO DEL JUEGO</span><h1>Mods</h1><p>Los mods oficiales y personales se mostrarán separados por serie.</p></div></div><div class="empty-card"><div class="empty-icon">▦</div><h2>El pack aún no está publicado</h2><p>Cuando {selected.name} tenga un manifiesto oficial, aquí podrás revisar los mods administrados por EternalCraft y tus mods personales.</p><span class="empty-status"><i></i> SIN MANIFIESTO DISPONIBLE</span></div></section>
+        <section class="page narrow-page"><div class="page-heading"><div><span class="eyebrow">CONTENIDO DEL JUEGO · {selected.name}</span><h1>Biblioteca de mods</h1><p>Inventario local de JARs. No se modifican archivos desde esta vista.</p></div><button class="button secondary" onclick={() => loadMods(selected.id)} disabled={modsLoading}>{modsLoading ? 'Leyendo…' : 'Actualizar inventario'}</button></div>
+          {#if modsError}<div class="toast error-toast" role="alert">{modsError}</div>{/if}
+          {#if !isLinked(selected)}<div class="empty-card"><div class="empty-icon">▦</div><h2>Vincula una carpeta de juego</h2><p>Elige una instancia en Inicio para revisar sus mods. La lectura del inventario es solo de consulta.</p><button class="button secondary" onclick={() => (activePage = 'home')}>Ir a Inicio</button></div>
+          {:else if modsLoading}<div class="center-state"><span class="spinner"></span><p>Leyendo inventario de mods…</p></div>
+          {:else if modInventory}<div class="settings-card inventory-card"><div class="inventory-path"><span class="eyebrow">CARPETA REVISADA</span><code>{modInventory.modsDirectory}</code></div><div class="inventory-stats"><article><strong>{modInventory.loadedFromModsRoot.length}</strong><span>JAR en <code>mods/</code></span></article><article><strong>{modInventory.officialStore.length}</strong><span>Guardados en <code>mods/Oficiales/</code></span></article><article><strong>{modInventory.personalStore.length}</strong><span>Guardados en <code>mods/personales/</code></span></article></div><div class="inventory-warning"><b>Compatibilidad Forge:</b> Forge 1.20.1 escanea los archivos JAR directamente dentro de <code>mods/</code>. Los JAR dentro de subcarpetas se muestran aparte y no se cuentan como cargados.</div><div class="inventory-list"><h2>JAR que Forge encuentra en la raíz</h2>{#if modInventory.loadedFromModsRoot.length}<ul>{#each modInventory.loadedFromModsRoot as file (file.name)}<li><span>{file.name}</span><small>{formatBytes(file.sizeBytes)}</small></li>{/each}</ul>{:else}<p>No hay JAR directamente dentro de <code>mods/</code>.</p>{/if}</div><div class="inventory-list storage-list"><h2>Almacenamiento organizado</h2><div class="storage-columns"><div><h3>Oficiales</h3>{#if modInventory.officialStore.length}<ul>{#each modInventory.officialStore as file (file.name)}<li><span>{file.name}</span><small>{formatBytes(file.sizeBytes)}</small></li>{/each}</ul>{:else}<p>Sin JAR guardados aquí.</p>{/if}</div><div><h3>Personales</h3>{#if modInventory.personalStore.length}<ul>{#each modInventory.personalStore as file (file.name)}<li><span>{file.name}</span><small>{formatBytes(file.sizeBytes)}</small></li>{/each}</ul>{:else}<p>Sin JAR guardados aquí.</p>{/if}</div></div></div></div>
+          {/if}</section>
       {:else}
         <section class="page narrow-page"><div class="page-heading"><div><span class="eyebrow">CONFIGURACIÓN LOCAL</span><h1>Ajustes</h1><p>Preferencias guardadas en este equipo.</p></div></div><div class="settings-card"><div class="setting-row"><div><span class="eyebrow">JAVA · MINECRAFT 1.20.1</span><h2>{bootstrap.java.compatible ? `Java ${bootstrap.java.version}` : 'Java 17 no está listo'}</h2><p>{bootstrap.java.detail}{#if bootstrap.java.executable}<br/><code>{bootstrap.java.executable}</code>{/if}</p></div><div class="play-actions"><span class:saved-chip={bootstrap.java.compatible} class:warning-chip={!bootstrap.java.compatible}>{bootstrap.java.compatible ? 'COMPATIBLE' : 'REVISAR'}</span><button class="button secondary" onclick={selectJava} disabled={busy}>Elegir Java 17</button>{#if bootstrap.javaManuallySelected}<button class="button secondary" onclick={resetJava} disabled={busy}>Automático</button>{/if}<button class="button secondary" onclick={refreshJava} disabled={javaRefreshing}>{javaRefreshing ? 'Comprobando…' : 'Volver a comprobar'}</button></div></div><div class="setting-row"><div><span class="eyebrow">INSTANCIA · {selected.name}</span><h2>Directorio del juego</h2><p>{pathFor(selected) || 'Todavía no has vinculado una carpeta.'}</p></div><div class="play-actions">{#if isDetected(selected)}<button class="button secondary" onclick={linkDetectedDirectory} disabled={busy}>Vincular detectada</button>{/if}<button class="button secondary" onclick={selectDirectory} disabled={busy}>{isLinked(selected) ? 'Cambiar carpeta' : 'Elegir carpeta'}</button></div></div><div class="setting-row"><div><span class="eyebrow">CONFIGURACIÓN</span><h2>Archivo de preferencias</h2><p>{bootstrap.configDirectory}</p></div><span class="saved-chip">GUARDADO LOCAL</span></div></div><p class="privacy-note">Las carpetas detectadas se sugieren sin alterarlas; solo se vinculan después de que lo confirmes.</p></section>
       {/if}

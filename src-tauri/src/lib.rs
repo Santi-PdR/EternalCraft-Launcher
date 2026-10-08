@@ -72,6 +72,23 @@ struct JavaStatus {
     detail: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModFileEntry {
+    name: String,
+    size_bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModInventory {
+    game_directory: Option<String>,
+    mods_directory: Option<String>,
+    loaded_from_mods_root: Vec<ModFileEntry>,
+    official_store: Vec<ModFileEntry>,
+    personal_store: Vec<ModFileEntry>,
+}
+
 fn parse_catalog() -> Result<Catalog, String> {
     let catalog: Catalog = serde_json::from_str(CATALOG_JSON)
         .map_err(|error| format!("El catálogo integrado no es válido: {error}"))?;
@@ -125,6 +142,35 @@ fn valid_game_dir(path: &Path) -> Result<PathBuf, String> {
     }
     path.canonicalize()
         .map_err(|error| format!("No se pudo resolver la carpeta seleccionada: {error}"))
+}
+
+fn list_jar_files(directory: &Path) -> Result<Vec<ModFileEntry>, String> {
+    let mut files = Vec::new();
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(files),
+        Err(error) => return Err(format!("No se pudo leer {}: {error}", directory.display())),
+    };
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("No se pudo leer una entrada de mods: {error}"))?;
+        let path = entry.path();
+        if path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("jar"))
+        {
+            if let Ok(metadata) = fs::metadata(&path) {
+                if metadata.is_file() {
+                    files.push(ModFileEntry {
+                        name: entry.file_name().to_string_lossy().into_owned(),
+                        size_bytes: metadata.len(),
+                    });
+                }
+            }
+        }
+    }
+    files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    Ok(files)
 }
 
 fn suggested_directories() -> BTreeMap<String, String> {
@@ -331,6 +377,36 @@ fn get_bootstrap(app: AppHandle) -> Result<Bootstrap, String> {
 }
 
 #[tauri::command]
+fn get_mod_inventory(app: AppHandle, series_id: String) -> Result<ModInventory, String> {
+    if !parse_catalog()?
+        .series
+        .iter()
+        .any(|series| series.id == series_id)
+    {
+        return Err("La serie solicitada no existe en el catálogo".into());
+    }
+    let settings = read_settings(&app)?;
+    let Some(path) = settings.game_directories.get(&series_id) else {
+        return Ok(ModInventory {
+            game_directory: None,
+            mods_directory: None,
+            loaded_from_mods_root: Vec::new(),
+            official_store: Vec::new(),
+            personal_store: Vec::new(),
+        });
+    };
+    let game_directory = valid_game_dir(Path::new(path))?;
+    let mods_directory = game_directory.join("mods");
+    Ok(ModInventory {
+        game_directory: Some(game_directory.to_string_lossy().into_owned()),
+        mods_directory: Some(mods_directory.to_string_lossy().into_owned()),
+        loaded_from_mods_root: list_jar_files(&mods_directory)?,
+        official_store: list_jar_files(&mods_directory.join("Oficiales"))?,
+        personal_store: list_jar_files(&mods_directory.join("personales"))?,
+    })
+}
+
+#[tauri::command]
 fn refresh_java_status(app: AppHandle) -> Result<Bootstrap, String> {
     make_bootstrap(&app)
 }
@@ -433,6 +509,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             get_bootstrap,
+            get_mod_inventory,
             refresh_java_status,
             select_java_executable,
             reset_java_selection,
@@ -499,5 +576,53 @@ mod tests {
             ("21.0.3".into(), 21)
         );
         assert!(parse_java_major("not a java version").is_none());
+    }
+
+    #[test]
+    fn mod_inventory_scans_only_jar_files_immediately_in_each_store() {
+        let fixture = std::env::temp_dir().join(format!(
+            "eternalcraft-mod-inventory-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mods = fixture.join("mods");
+        fs::create_dir_all(mods.join("Oficiales")).unwrap();
+        fs::create_dir_all(mods.join("personales")).unwrap();
+        fs::create_dir_all(mods.join("subfolder")).unwrap();
+        fs::write(mods.join("loaded.jar"), b"loaded").unwrap();
+        fs::write(mods.join("readme.txt"), b"ignored").unwrap();
+        fs::write(mods.join("Oficiales").join("managed.jar"), b"official").unwrap();
+        fs::write(mods.join("personales").join("custom.jar"), b"personal").unwrap();
+        fs::write(mods.join("subfolder").join("nested.jar"), b"ignored").unwrap();
+
+        let loaded = list_jar_files(&mods).unwrap();
+        let official = list_jar_files(&mods.join("Oficiales")).unwrap();
+        let personal = list_jar_files(&mods.join("personales")).unwrap();
+        assert_eq!(
+            loaded
+                .iter()
+                .map(|file| file.name.as_str())
+                .collect::<Vec<_>>(),
+            ["loaded.jar"]
+        );
+        assert_eq!(
+            official
+                .iter()
+                .map(|file| file.name.as_str())
+                .collect::<Vec<_>>(),
+            ["managed.jar"]
+        );
+        assert_eq!(
+            personal
+                .iter()
+                .map(|file| file.name.as_str())
+                .collect::<Vec<_>>(),
+            ["custom.jar"]
+        );
+        assert_eq!(loaded[0].size_bytes, 6);
+        fs::remove_dir_all(fixture).unwrap();
     }
 }

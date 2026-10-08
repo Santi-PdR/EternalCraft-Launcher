@@ -28,7 +28,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::{
     collections::BTreeMap,
     env, fs,
-    io::{self, Read, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -457,6 +457,53 @@ fn read_install_log_at(path: &Path) -> Result<String, String> {
             Ok("Todavía no hay registros de instalación.".into())
         }
         Err(error) => Err(format!("No se pudo leer el registro local: {error}")),
+    }
+}
+
+fn read_log_tail(path: &Path, max_bytes: u64) -> Result<Option<String>, String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
+        Ok(_) => return Err("El registro de Minecraft no es un archivo normal".into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("No se pudo revisar el registro de Minecraft: {error}")),
+    };
+    let mut file = fs::File::open(path)
+        .map_err(|error| format!("No se pudo abrir el registro de Minecraft: {error}"))?;
+    let start = metadata.len().saturating_sub(max_bytes);
+    file.seek(SeekFrom::Start(start))
+        .map_err(|error| format!("No se pudo buscar el final del registro: {error}"))?;
+    let mut bytes = Vec::with_capacity(metadata.len().saturating_sub(start) as usize);
+    file.take(max_bytes)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("No se pudo leer el registro de Minecraft: {error}"))?;
+    let text = String::from_utf8_lossy(&bytes);
+    let text = if start > 0 {
+        text.find('\\n')
+            .map(|offset| &text[offset + 1..])
+            .unwrap_or("")
+    } else {
+        text.as_ref()
+    };
+    Ok(Some(text.to_string()))
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::*;
+
+    #[test]
+    fn reads_only_complete_recent_lines_from_large_logs() {
+        let path = std::env::temp_dir().join(format!(
+            "eternalcraft-log-tail-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&path, b"123456\\nabcdef\\n").unwrap();
+        assert_eq!(read_log_tail(&path, 8).unwrap().as_deref(), Some("abcdef\\n"));
+        fs::remove_file(path).unwrap();
     }
 }
 
@@ -1399,14 +1446,25 @@ fn get_bootstrap(app: AppHandle) -> Result<Bootstrap, String> {
 }
 
 #[tauri::command]
-fn get_launcher_logs(app: AppHandle) -> Result<String, String> {
+fn get_launcher_logs(app: AppHandle, series_id: String) -> Result<String, String> {
     let path = app
         .path()
         .app_data_dir()
         .map_err(|error| error.to_string())?
         .join("logs")
         .join("launcher.log");
-    read_install_log_at(&path)
+    let launcher_log = read_install_log_at(&path)?;
+    let Some(game_directory) = resolve_series_game_directory(&app, &series_id)? else {
+        return Ok(launcher_log);
+    };
+    let game_log_path = game_directory.join("logs").join("latest.log");
+    let Some(game_log) = read_log_tail(&game_log_path, 256 * 1024)? else {
+        return Ok(launcher_log);
+    };
+    Ok(format!(
+        "=== EternalCraft Launcher ===\\n{launcher_log}\\n=== Minecraft · {} ===\\n{}",
+        series_id, game_log
+    ))
 }
 
 #[tauri::command]

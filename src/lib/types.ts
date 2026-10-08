@@ -17,6 +17,7 @@ export interface Bootstrap {
   suggestedDirectories: Record<string, string>;
   configDirectory: string;
   java: JavaStatus;
+  javaManuallySelected: boolean;
 }
 
 export interface JavaStatus {

@@ -46,6 +46,8 @@ struct Settings {
     active_series_id: Option<String>,
     #[serde(default)]
     game_directories: BTreeMap<String, String>,
+    #[serde(default)]
+    java_executable: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -57,6 +59,7 @@ struct Bootstrap {
     suggested_directories: BTreeMap<String, String>,
     config_directory: String,
     java: JavaStatus,
+    java_manually_selected: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -235,6 +238,48 @@ fn detect_java() -> JavaStatus {
         detail: "No se encontró una instalación de Java ejecutable. Se necesita Java 17 para Forge 1.20.1.".into() })
 }
 
+fn inspect_java(path: &Path) -> JavaStatus {
+    let executable = path.to_string_lossy().into_owned();
+    match Command::new(path).arg("-version").output() {
+        Ok(output) => {
+            let text = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if let Some((version, major)) = parse_java_major(&text) {
+                let compatible = major == 17;
+                JavaStatus {
+                    executable: Some(executable),
+                    version: Some(version),
+                    major: Some(major),
+                    compatible,
+                    detail: if compatible {
+                        "Java 17 seleccionado y compatible con Minecraft 1.20.1 / Forge".into()
+                    } else {
+                        format!("Java {major} seleccionado; Forge 1.20.1 requiere Java 17")
+                    },
+                }
+            } else {
+                JavaStatus {
+                    executable: Some(executable),
+                    version: None,
+                    major: None,
+                    compatible: false,
+                    detail: "El archivo seleccionado no devolvió una versión Java válida".into(),
+                }
+            }
+        }
+        Err(error) => JavaStatus {
+            executable: Some(executable),
+            version: None,
+            major: None,
+            compatible: false,
+            detail: format!("No se pudo ejecutar Java: {error}"),
+        },
+    }
+}
+
 fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
     let catalog = parse_catalog()?;
     let settings = read_settings(app)?;
@@ -263,13 +308,20 @@ fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
         .unwrap()
         .to_string_lossy()
         .into_owned();
+    let java_manually_selected = settings.java_executable.is_some();
+    let java = settings
+        .java_executable
+        .as_deref()
+        .map(|path| inspect_java(Path::new(path)))
+        .unwrap_or_else(detect_java);
     Ok(Bootstrap {
         series: catalog.series,
         active_series_id: active,
         game_directories: directories,
         suggested_directories: suggested_directories(),
         config_directory,
-        java: detect_java(),
+        java,
+        java_manually_selected,
     })
 }
 
@@ -280,6 +332,40 @@ fn get_bootstrap(app: AppHandle) -> Result<Bootstrap, String> {
 
 #[tauri::command]
 fn refresh_java_status(app: AppHandle) -> Result<Bootstrap, String> {
+    make_bootstrap(&app)
+}
+
+#[tauri::command]
+fn select_java_executable(app: AppHandle) -> Result<Bootstrap, String> {
+    let selected = app
+        .dialog()
+        .file()
+        .set_title("Seleccionar ejecutable Java 17")
+        .blocking_pick_file();
+    let Some(selected) = selected else {
+        return make_bootstrap(&app);
+    };
+    let path = selected
+        .into_path()
+        .map_err(|error| format!("Ruta de Java no válida: {error}"))?;
+    if !path.is_file() {
+        return Err("El ejecutable Java seleccionado ya no existe".into());
+    }
+    let status = inspect_java(&path);
+    if status.major != Some(17) {
+        return Err(status.detail);
+    }
+    let mut settings = read_settings(&app)?;
+    settings.java_executable = Some(path.to_string_lossy().into_owned());
+    write_settings(&app, &settings)?;
+    make_bootstrap(&app)
+}
+
+#[tauri::command]
+fn reset_java_selection(app: AppHandle) -> Result<Bootstrap, String> {
+    let mut settings = read_settings(&app)?;
+    settings.java_executable = None;
+    write_settings(&app, &settings)?;
     make_bootstrap(&app)
 }
 
@@ -348,6 +434,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_bootstrap,
             refresh_java_status,
+            select_java_executable,
+            reset_java_selection,
             set_active_series,
             select_game_directory,
             link_detected_directory
@@ -385,11 +473,13 @@ mod tests {
                 ("siege".into(), "/games/siege".into()),
                 ("ghouls-outbreak".into(), "/games/ghouls".into()),
             ]),
+            java_executable: Some("/usr/lib/jvm/java-17/bin/java".into()),
         };
         let encoded = serde_json::to_vec(&settings).expect("settings serialize");
         let decoded: Settings = serde_json::from_slice(&encoded).expect("settings deserialize");
         assert_eq!(decoded.active_series_id.as_deref(), Some("ghouls-outbreak"));
         assert_eq!(decoded.game_directories, settings.game_directories);
+        assert_eq!(decoded.java_executable, settings.java_executable);
     }
 
     #[test]

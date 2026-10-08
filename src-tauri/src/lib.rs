@@ -719,13 +719,41 @@ fn validate_personal_mod_name(name: &str) -> Result<(), String> {
 fn validate_forge_mod_archive(path: &Path) -> Result<(), String> {
     let file = fs::File::open(path)
         .map_err(|error| format!("No se pudo abrir el JAR {}: {error}", path.display()))?;
-    let archive = zip::ZipArchive::new(file)
+    let mut archive = zip::ZipArchive::new(file)
         .map_err(|error| format!("El archivo seleccionado no es un JAR válido: {error}"))?;
-    if !archive
+    if archive
         .file_names()
         .any(|name| name.eq_ignore_ascii_case("META-INF/mods.toml"))
     {
-        return Err("El JAR no contiene META-INF/mods.toml y no parece ser un mod Forge".into());
+        return Ok(());
+    }
+
+    // Forge libraries (for example Kotlin for Forge) are valid JARs in the
+    // mods directory even though they have no mods.toml. Only accept the
+    // explicit marker that Forge itself uses; arbitrary JARs stay rejected.
+    let manifest_index = archive
+        .file_names()
+        .position(|name| name.eq_ignore_ascii_case("META-INF/MANIFEST.MF"));
+    let Some(manifest_index) = manifest_index else {
+        return Err("El JAR no contiene mods.toml ni un manifiesto Forge de tipo LIBRARY".into());
+    };
+    let mut manifest = archive
+        .by_index(manifest_index)
+        .map_err(|error| format!("No se pudo leer el manifiesto del JAR: {error}"))?;
+    let mut contents = String::new();
+    manifest
+        .by_ref()
+        .take(64 * 1024)
+        .read_to_string(&mut contents)
+        .map_err(|error| format!("El manifiesto del JAR no es texto válido: {error}"))?;
+    let is_forge_library = contents.lines().any(|line| {
+        line.split_once(':').is_some_and(|(key, value)| {
+            key.trim().eq_ignore_ascii_case("FMLModType")
+                && value.trim().eq_ignore_ascii_case("LIBRARY")
+        })
+    });
+    if !is_forge_library {
+        return Err("El JAR no contiene mods.toml ni FMLModType: LIBRARY".into());
     }
     Ok(())
 }
@@ -1987,6 +2015,45 @@ mod tests {
             Some("expected".to_string())
         )
         .is_err());
+    }
+
+    #[test]
+    fn forge_archive_validation_accepts_library_jars_but_not_arbitrary_jars() {
+        use std::io::Write as _;
+        let fixture = std::env::temp_dir().join(format!(
+            "eternalcraft-forge-library-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&fixture).unwrap();
+
+        let library = fixture.join("kotlinforforge.jar");
+        let mut archive = zip::ZipWriter::new(fs::File::create(&library).unwrap());
+        archive
+            .start_file(
+                "META-INF/MANIFEST.MF",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        archive
+            .write_all(b"Manifest-Version: 1.0\\r\\nFMLModType: LIBRARY\\r\\n\\r\\n")
+            .unwrap();
+        archive.finish().unwrap();
+        validate_forge_mod_archive(&library).unwrap();
+
+        let arbitrary = fixture.join("arbitrary.jar");
+        let mut archive = zip::ZipWriter::new(fs::File::create(&arbitrary).unwrap());
+        archive
+            .start_file("META-INF/MANIFEST.MF", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        archive.write_all(b"Manifest-Version: 1.0\\r\\n\\r\\n").unwrap();
+        archive.finish().unwrap();
+        assert!(validate_forge_mod_archive(&arbitrary).is_err());
+
+        fs::remove_dir_all(fixture).unwrap();
     }
 
     #[test]

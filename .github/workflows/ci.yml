@@ -6,6 +6,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Push and pull_request events on the same branch share one build slot.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 

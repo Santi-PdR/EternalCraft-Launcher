@@ -2,7 +2,7 @@
   import { convertFileSrc, invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { onMount } from 'svelte';
-  import type { Bootstrap, InstallProgress, ModInventory, PackSyncProgress, PackSyncResult, Series } from './lib/types';
+  import type { Bootstrap, InstallProgress, MinecraftStatus, ModInventory, PackSyncProgress, PackSyncResult, Series } from './lib/types';
 
   let bootstrap = $state<Bootstrap | null>(null);
   let selected = $derived.by(() => {
@@ -16,6 +16,7 @@
   let notice = $state('');
   let javaRefreshing = $state(false);
   let memoryDraft = $state(0);
+  let minecraftStatus = $state<MinecraftStatus>({ running: false, seriesId: null, pid: null, exitCode: null, exitSuccess: null });
   let modInventory = $state<ModInventory | null>(null);
   let modsLoading = $state(false);
   let modsBusy = $state(false);
@@ -33,6 +34,13 @@
   onMount(() => {
     let disposed = false;
     const unlisteners: Array<() => void> = [];
+    const refreshMinecraftStatus = async () => {
+      try {
+        minecraftStatus = await invoke<MinecraftStatus>('get_minecraft_status');
+      } catch (reason) {
+        if (!disposed) error = `No se pudo consultar el estado de Minecraft: ${String(reason)}`;
+      }
+    };
     const subscribe = <T,>(event: string, callback: (payload: T) => void) => {
       void listen<T>(event, ({ payload }) => callback(payload)).then((stop) => {
         if (disposed) stop();
@@ -45,8 +53,11 @@
     subscribe<PackSyncProgress>('pack-sync-progress', (payload) => {
       if (payload.seriesId === selected?.id) packSyncMessage = payload.message;
     });
+    void refreshMinecraftStatus();
+    const statusTimer = window.setInterval(() => void refreshMinecraftStatus(), 2500);
     return () => {
       disposed = true;
+      window.clearInterval(statusTimer);
       unlisteners.forEach((stop) => stop());
     };
   });
@@ -169,8 +180,8 @@
     busy = true;
     error = '';
     try {
-      await invoke('launch_minecraft', { seriesId: selected.id });
-      notice = 'Minecraft se inició. El launcher seguirá disponible para ver sus registros.';
+      minecraftStatus = await invoke<MinecraftStatus>('launch_minecraft', { seriesId: selected.id });
+      notice = `Minecraft se inició${minecraftStatus.pid ? ` (PID ${minecraftStatus.pid})` : ''}. El launcher seguirá disponible para ver su estado y registros.`;
     } catch (reason) {
       error = String(reason);
     } finally {
@@ -455,7 +466,7 @@
             {/each}
           </div>
 
-          <div class="play-panel"><div class="play-copy"><span class="eyebrow">CARPETA DE JUEGO</span><h3>{isLinked(selected) ? 'Instancia vinculada' : bootstrap.installedProfiles[selected.id] ? 'Instancia de EternalCraft' : isDetected(selected) ? 'Instancia detectada' : 'Conecta tu instancia'}</h3><p>{bootstrap.installedProfiles[selected.id] && !isLinked(selected) ? bootstrap.managedGameDirectories[selected.id] : pathFor(selected) || 'Selecciona la carpeta de juego de esta serie para guardarla en el launcher.'}</p></div><div class="play-actions">{#if isDetected(selected)}<button class="button secondary" onclick={linkDetectedDirectory} disabled={busy || syncingPack}>Usar carpeta detectada</button>{/if}<button class="button secondary" onclick={selectDirectory} disabled={busy || syncingPack}>{isLinked(selected) ? 'Cambiar carpeta' : 'Seleccionar carpeta'}</button>{#if bootstrap.installedProfiles[selected.id]}<span class="saved-chip">FORGE INSTALADO</span>{:else}<button class="button secondary" onclick={installBase} disabled={installingSeries !== null || syncingPack} title="Instala una instancia aislada y descarga Java 17 de Mojang si hace falta">Instalar base de Forge y Java 17</button>{/if}{#if selected.packStatus === 'available'}<button class="button secondary" onclick={syncOfficialPack} disabled={syncingPack || !bootstrap.installedProfiles[selected.id] && !isLinked(selected)}>{syncingPack ? 'Actualizando mods…' : 'Instalar / actualizar pack'}</button>{#if bootstrap.microsoftProfile}<button class="button primary" onclick={launchMinecraft} disabled={busy || syncingPack || !bootstrap.installedProfiles[selected.id] && !isLinked(selected)}>{busy ? 'Preparando…' : 'Jugar'}</button>{/if}{:else}<button class="button primary" disabled title="El modpack de esta serie todavía no tiene archivos oficiales publicados">Pack no publicado</button>{/if}</div></div>
+          <div class="play-panel"><div class="play-copy"><span class="eyebrow">CARPETA DE JUEGO</span><h3>{isLinked(selected) ? 'Instancia vinculada' : bootstrap.installedProfiles[selected.id] ? 'Instancia de EternalCraft' : isDetected(selected) ? 'Instancia detectada' : 'Conecta tu instancia'}</h3><p>{bootstrap.installedProfiles[selected.id] && !isLinked(selected) ? bootstrap.managedGameDirectories[selected.id] : pathFor(selected) || 'Selecciona la carpeta de juego de esta serie para guardarla en el launcher.'}</p>{#if minecraftStatus.running}<span class="saved-chip process-chip">MINECRAFT EN EJECUCIÓN · {minecraftStatus.seriesId === selected.id ? 'ESTA SERIE' : minecraftStatus.seriesId?.toUpperCase()} · PID {minecraftStatus.pid}</span>{:else if minecraftStatus.exitSuccess === false}<span class="warning-chip process-chip">ÚLTIMA SESIÓN CERRÓ CON ERROR · CÓDIGO {minecraftStatus.exitCode ?? 'DESCONOCIDO'}</span>{/if}</div><div class="play-actions">{#if isDetected(selected)}<button class="button secondary" onclick={linkDetectedDirectory} disabled={busy || syncingPack}>Usar carpeta detectada</button>{/if}<button class="button secondary" onclick={selectDirectory} disabled={busy || syncingPack || minecraftStatus.running}>{isLinked(selected) ? 'Cambiar carpeta' : 'Seleccionar carpeta'}</button>{#if bootstrap.installedProfiles[selected.id]}<span class="saved-chip">FORGE INSTALADO</span>{:else}<button class="button secondary" onclick={installBase} disabled={installingSeries !== null || syncingPack || minecraftStatus.running} title="Instala una instancia aislada y descarga Java 17 de Mojang si hace falta">Instalar base de Forge y Java 17</button>{/if}{#if selected.packStatus === 'available'}<button class="button secondary" onclick={syncOfficialPack} disabled={syncingPack || minecraftStatus.running || !bootstrap.installedProfiles[selected.id] && !isLinked(selected)}>{syncingPack ? 'Actualizando mods…' : 'Instalar / actualizar pack'}</button>{#if bootstrap.microsoftProfile}<button class="button primary" onclick={launchMinecraft} disabled={busy || minecraftStatus.running || syncingPack || !bootstrap.installedProfiles[selected.id] && !isLinked(selected)}>{minecraftStatus.running ? 'Minecraft ejecutándose' : busy ? 'Preparando…' : 'Jugar'}</button>{/if}{:else}<button class="button primary" disabled title="El modpack de esta serie todavía no tiene archivos oficiales publicados">Pack no publicado</button>{/if}</div></div>
           {#if bootstrap.installedProfiles[selected.id]}<div class="managed-location"><span class="eyebrow">INSTANCIA ADMINISTRADA POR ETERNALCRAFT</span><code>{bootstrap.managedGameDirectories[selected.id]}</code></div>{/if}
           {#if installingSeries === selected.id}<div class="install-progress" role="status" aria-live="polite"><span class="spinner"></span><div><strong>{installMessage || 'Instalando Minecraft y Forge…'}</strong><p>Preparando el perfil del juego; Minecraft no se iniciará.</p></div></div>{/if}
           {#if syncingPack}<div class="install-progress" role="status" aria-live="polite"><span class="spinner"></span><div><strong>{packSyncMessage || 'Actualizando mods oficiales…'}</strong><p>El proceso verifica cada descarga antes de sustituir archivos administrados.</p></div></div>{/if}

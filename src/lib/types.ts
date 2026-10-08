@@ -36,6 +36,14 @@ export interface MemoryStatus {
   manuallySelected: boolean;
 }
 
+export interface MinecraftStatus {
+  running: boolean;
+  seriesId: string | null;
+  pid: number | null;
+  exitCode: number | null;
+  exitSuccess: boolean | null;
+}
+
 export interface JavaStatus {
   executable: string | null;
   version: string | null;

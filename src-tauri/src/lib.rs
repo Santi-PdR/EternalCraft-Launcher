@@ -105,6 +105,31 @@ struct AuthenticatedAccount {
 #[derive(Default)]
 struct AuthSession(std::sync::Mutex<Option<AuthenticatedAccount>>);
 
+#[derive(Default)]
+struct MinecraftProcess(std::sync::Mutex<MinecraftProcessState>);
+
+#[derive(Default)]
+struct MinecraftProcessState {
+    active: Option<RunningMinecraft>,
+    last_status: MinecraftStatus,
+}
+
+struct RunningMinecraft {
+    series_id: String,
+    pid: u32,
+    child: std::process::Child,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MinecraftStatus {
+    running: bool,
+    series_id: Option<String>,
+    pid: Option<u32>,
+    exit_code: Option<i32>,
+    exit_success: Option<bool>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Bootstrap {
@@ -1812,8 +1837,55 @@ fn reset_memory_limit(app: AppHandle) -> Result<Bootstrap, String> {
     make_bootstrap(&app)
 }
 
+fn minecraft_exit_status(series_id: &str, pid: u32, status: std::process::ExitStatus) -> MinecraftStatus {
+    MinecraftStatus {
+        running: false,
+        series_id: Some(series_id.to_string()),
+        pid: Some(pid),
+        exit_code: status.code(),
+        exit_success: Some(status.success()),
+    }
+}
+
 #[tauri::command]
-fn launch_minecraft(app: AppHandle, series_id: String) -> Result<(), String> {
+fn get_minecraft_status(app: AppHandle) -> Result<MinecraftStatus, String> {
+    let process = app.state::<MinecraftProcess>();
+    let mut state = process
+        .0
+        .lock()
+        .map_err(|_| "El estado del proceso de Minecraft quedó bloqueado".to_string())?;
+    let completed = match state.active.as_mut() {
+        Some(active) => match active.child.try_wait() {
+            Ok(Some(status)) => Some((active.series_id.clone(), active.pid, status)),
+            Ok(None) => {
+                return Ok(MinecraftStatus {
+                    running: true,
+                    series_id: Some(active.series_id.clone()),
+                    pid: Some(active.pid),
+                    exit_code: None,
+                    exit_success: None,
+                });
+            }
+            Err(error) => return Err(format!("No se pudo consultar Minecraft: {error}")),
+        },
+        None => return Ok(state.last_status.clone()),
+    };
+    let (series_id, pid, exit) = completed.ok_or_else(|| "No se pudo recuperar el estado de salida de Minecraft".to_string())?;
+    let exit_success = exit.success();
+    state.active = None;
+    let status = minecraft_exit_status(&series_id, pid, exit);
+    state.last_status = status.clone();
+    drop(state);
+    let message = match status.exit_code {
+        Some(code) => format!("Minecraft finalizó con código {code} (éxito: {exit_success})"),
+        None => "Minecraft finalizó sin código de salida (señal o terminación externa)".into(),
+    };
+    let _ = append_install_log(&app, &series_id, "Juego", &message);
+    Ok(status)
+}
+
+#[tauri::command]
+fn launch_minecraft(app: AppHandle, series_id: String) -> Result<MinecraftStatus, String> {
     let series = parse_catalog()?
         .series
         .into_iter()
@@ -1905,13 +1977,52 @@ fn launch_minecraft(app: AppHandle, series_id: String) -> Result<(), String> {
         main_class,
         memory_status(&settings).selected_mb,
     )?;
-    Command::new(&command.executable)
+    let process = app.state::<MinecraftProcess>();
+    let mut process_state = process
+        .0
+        .lock()
+        .map_err(|_| "El estado del proceso de Minecraft quedó bloqueado".to_string())?;
+    let previous_exit = match process_state.active.as_mut() {
+        Some(active) => match active.child.try_wait() {
+            Ok(None) => return Err("Minecraft ya está ejecutándose".into()),
+            Ok(Some(exit)) => Some((active.series_id.clone(), active.pid, exit)),
+            Err(error) => return Err(format!("No se pudo consultar el proceso anterior de Minecraft: {error}")),
+        },
+        None => None,
+    };
+    if let Some((previous_series, previous_pid, exit)) = previous_exit {
+        let finished = minecraft_exit_status(&previous_series, previous_pid, exit);
+        let message = format!("Minecraft finalizó; código: {:?}", finished.exit_code);
+        process_state.active = None;
+        process_state.last_status = finished;
+        let _ = append_install_log(&app, &previous_series, "Juego", &message);
+    }
+    let child = Command::new(&command.executable)
         .args(&command.args)
         .current_dir(&command.working_dir)
         .spawn()
-        .map_err(|error| format!("No se pudo iniciar Minecraft: {error}"))?;
-    append_install_log(&app, &series_id, "Juego", "Se inició el proceso Java de Minecraft.")?;
-    Ok(())
+        .map_err(|error| {
+            let message = format!("No se pudo iniciar Minecraft: {error}");
+            let _ = append_install_log(&app, &series_id, "Error", &message);
+            message
+        })?;
+    let pid = child.id();
+    let status = MinecraftStatus {
+        running: true,
+        series_id: Some(series_id.clone()),
+        pid: Some(pid),
+        exit_code: None,
+        exit_success: None,
+    };
+    process_state.active = Some(RunningMinecraft {
+        series_id: series_id.clone(),
+        pid,
+        child,
+    });
+    process_state.last_status = status.clone();
+    drop(process_state);
+    let _ = append_install_log(&app, &series_id, "Juego", &format!("Minecraft iniciado con PID {pid}"));
+    Ok(status)
 }
 
 fn mod_inventory_for_path(path: Option<PathBuf>) -> Result<ModInventory, String> {
@@ -2148,6 +2259,7 @@ fn link_detected_directory(app: AppHandle, series_id: String) -> Result<Bootstra
 pub fn run() {
     tauri::Builder::default()
         .manage(AuthSession::default())
+        .manage(MinecraftProcess::default())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             get_bootstrap,
@@ -2170,6 +2282,7 @@ pub fn run() {
             set_microsoft_client_id,
             login_microsoft,
             logout_microsoft,
+            get_minecraft_status,
             set_memory_limit,
             reset_memory_limit,
             launch_minecraft

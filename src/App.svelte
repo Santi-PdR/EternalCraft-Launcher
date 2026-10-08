@@ -21,6 +21,7 @@
     if (!seriesId) return;
     modsLoading = true;
     modsError = '';
+    modInventory = null;
     try {
       modInventory = await invoke<ModInventory>('get_mod_inventory', { seriesId });
     } catch (reason) {

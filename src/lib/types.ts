@@ -52,3 +52,17 @@ export interface InstallProgress {
   message: string;
   completedFiles: number;
 }
+
+export interface PackSyncResult {
+  seriesId: string;
+  version: string;
+  downloadedFiles: number;
+  removedFiles: number;
+}
+
+export interface PackSyncProgress {
+  seriesId: string;
+  completedFiles: number;
+  totalFiles: number;
+  message: string;
+}

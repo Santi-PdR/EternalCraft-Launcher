@@ -2,7 +2,7 @@
   import { convertFileSrc, invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { onMount } from 'svelte';
-  import type { Bootstrap, InstallProgress, ModInventory, Series } from './lib/types';
+  import type { Bootstrap, InstallProgress, ModInventory, PackSyncProgress, PackSyncResult, Series } from './lib/types';
 
   let bootstrap = $state<Bootstrap | null>(null);
   let selected = $derived.by(() => {
@@ -20,6 +20,8 @@
   let modsBusy = $state(false);
   let modsError = $state('');
   let installingSeries = $state<string | null>(null);
+  let syncingPack = $state(false);
+  let packSyncMessage = $state('');
   let installMessage = $state('');
   let launcherLogs = $state('Todavía no hay registros de instalación.');
   let logsLoading = $state(false);
@@ -27,11 +29,24 @@
   let themeAccent = $derived(bootstrap?.themeId === 'ghouls' ? '#bf624d' : bootstrap?.themeId === 'siege' ? '#d1a35b' : selected?.accent ?? '#d1a35b');
 
   onMount(() => {
-    let unlisten: (() => void) | undefined;
-    void listen<InstallProgress>('forge-install-progress', ({ payload }) => {
+    let disposed = false;
+    const unlisteners: Array<() => void> = [];
+    const subscribe = <T,>(event: string, callback: (payload: T) => void) => {
+      void listen<T>(event, ({ payload }) => callback(payload)).then((stop) => {
+        if (disposed) stop();
+        else unlisteners.push(stop);
+      });
+    };
+    subscribe<InstallProgress>('forge-install-progress', (payload) => {
       if (payload.seriesId === installingSeries) installMessage = payload.message;
-    }).then((stop) => (unlisten = stop));
-    return () => unlisten?.();
+    });
+    subscribe<PackSyncProgress>('pack-sync-progress', (payload) => {
+      if (payload.seriesId === selected?.id) packSyncMessage = payload.message;
+    });
+    return () => {
+      disposed = true;
+      unlisteners.forEach((stop) => stop());
+    };
   });
 
   async function loadMods(seriesId: string | undefined) {
@@ -220,6 +235,23 @@
     }
   }
 
+  async function syncOfficialPack() {
+    if (!selected || selected.packStatus !== 'available') return;
+    syncingPack = true;
+    packSyncMessage = 'Consultando la versión oficial…';
+    error = '';
+    try {
+      const result = await invoke<PackSyncResult>('sync_official_pack', { seriesId: selected.id });
+      await loadMods(selected.id);
+      notice = `Pack ${result.version} sincronizado: ${result.downloadedFiles} mods oficiales; ${result.removedFiles} retirados.`;
+    } catch (reason) {
+      error = String(reason);
+    } finally {
+      syncingPack = false;
+      packSyncMessage = '';
+    }
+  }
+
   function pathFor(series: Series) {
     return bootstrap?.gameDirectories[series.id] || bootstrap?.suggestedDirectories[series.id] || '';
   }
@@ -275,7 +307,7 @@
         <span class="eyebrow">SERIE ACTIVA</span>
         <div class="series-list">
           {#each bootstrap.series as series (series.id)}
-            <button class:active={series.id === bootstrap?.activeSeriesId} class="series-choice" onclick={() => chooseSeries(series.id)} disabled={busy || installingSeries !== null || modsBusy}>
+            <button class:active={series.id === bootstrap?.activeSeriesId} class="series-choice" onclick={() => chooseSeries(series.id)} disabled={busy || installingSeries !== null || modsBusy || syncingPack}>
               <span class="series-dot" style:--series-accent={series.accent}></span>
               <span>{series.name}</span>
               {#if series.id === bootstrap?.activeSeriesId}<span class="check">✓</span>{/if}
@@ -320,7 +352,7 @@
               <span class="eyebrow">ETERNALCRAFT ORIGINAL SERIES</span>
               <h2>{selected.name}</h2><p class="hero-subtitle">{selected.subtitle}</p>
               <p class="hero-description">{selected.description}</p>
-              <div class="hero-meta"><div><small>MINECRAFT</small><strong>{selected.minecraftVersion}</strong></div><div><small>CARGADOR</small><strong>{selected.loader} {selected.loaderVersion}</strong></div><div><small>ESTADO DEL PACK</small><strong class="muted-status">Aún sin publicar</strong></div></div>
+              <div class="hero-meta"><div><small>MINECRAFT</small><strong>{selected.minecraftVersion}</strong></div><div><small>CARGADOR</small><strong>{selected.loader} {selected.loaderVersion}</strong></div><div><small>ESTADO DEL PACK</small><strong class="muted-status">{selected.packStatus === 'available' ? 'Disponible' : 'Aún sin publicar'}</strong></div></div>
             </div>
             <div class="hero-side"><div class="series-emblem">{selected.id === 'siege' ? 'S' : 'G'}</div><span class="side-label">SERIE<br/>SELECCIONADA</span></div>
           </div>
@@ -328,16 +360,17 @@
           <div class="section-heading"><div><span class="eyebrow">UNIVERSOS</span><h2>Explora las series</h2></div><span class="quiet-count">{bootstrap.series.length} SERIES</span></div>
           <div class="series-grid">
             {#each bootstrap.series as series (series.id)}
-              <button class:selected-card={series.id === bootstrap.activeSeriesId} class="series-card" style:--card-accent={series.accent} onclick={() => chooseSeries(series.id)} disabled={busy || installingSeries !== null || modsBusy}>
+              <button class:selected-card={series.id === bootstrap.activeSeriesId} class="series-card" style:--card-accent={series.accent} onclick={() => chooseSeries(series.id)} disabled={busy || installingSeries !== null || modsBusy || syncingPack}>
                 <span class="card-orbit"></span><span class="card-kicker">ETERNALCRAFT</span><strong>{series.name}</strong><span class="card-subtitle">{series.subtitle}</span><span class="card-bottom">{series.minecraftVersion} <b>·</b> {series.loader} <span>↗</span></span>
               </button>
             {/each}
           </div>
 
-          <div class="play-panel"><div class="play-copy"><span class="eyebrow">CARPETA DE JUEGO</span><h3>{isLinked(selected) ? 'Instancia vinculada' : bootstrap.installedProfiles[selected.id] ? 'Instancia de EternalCraft' : isDetected(selected) ? 'Instancia detectada' : 'Conecta tu instancia'}</h3><p>{bootstrap.installedProfiles[selected.id] && !isLinked(selected) ? bootstrap.managedGameDirectories[selected.id] : pathFor(selected) || 'Selecciona la carpeta de juego de esta serie para guardarla en el launcher.'}</p></div><div class="play-actions">{#if isDetected(selected)}<button class="button secondary" onclick={linkDetectedDirectory} disabled={busy}>Usar carpeta detectada</button>{/if}<button class="button secondary" onclick={selectDirectory} disabled={busy}>{isLinked(selected) ? 'Cambiar carpeta' : 'Seleccionar carpeta'}</button>{#if bootstrap.installedProfiles[selected.id]}<span class="saved-chip">FORGE INSTALADO</span>{:else}<button class="button secondary" onclick={installBase} disabled={installingSeries !== null} title="Instala una instancia aislada y descarga Java 17 de Mojang si hace falta">Instalar base de Forge y Java 17</button>{/if}<button class="button primary" disabled title="El modpack de esta serie todavía no tiene archivos oficiales publicados">Pack no publicado</button></div></div>
+          <div class="play-panel"><div class="play-copy"><span class="eyebrow">CARPETA DE JUEGO</span><h3>{isLinked(selected) ? 'Instancia vinculada' : bootstrap.installedProfiles[selected.id] ? 'Instancia de EternalCraft' : isDetected(selected) ? 'Instancia detectada' : 'Conecta tu instancia'}</h3><p>{bootstrap.installedProfiles[selected.id] && !isLinked(selected) ? bootstrap.managedGameDirectories[selected.id] : pathFor(selected) || 'Selecciona la carpeta de juego de esta serie para guardarla en el launcher.'}</p></div><div class="play-actions">{#if isDetected(selected)}<button class="button secondary" onclick={linkDetectedDirectory} disabled={busy || syncingPack}>Usar carpeta detectada</button>{/if}<button class="button secondary" onclick={selectDirectory} disabled={busy || syncingPack}>{isLinked(selected) ? 'Cambiar carpeta' : 'Seleccionar carpeta'}</button>{#if bootstrap.installedProfiles[selected.id]}<span class="saved-chip">FORGE INSTALADO</span>{:else}<button class="button secondary" onclick={installBase} disabled={installingSeries !== null || syncingPack} title="Instala una instancia aislada y descarga Java 17 de Mojang si hace falta">Instalar base de Forge y Java 17</button>{/if}{#if selected.packStatus === 'available'}<button class="button primary" onclick={syncOfficialPack} disabled={syncingPack || !bootstrap.installedProfiles[selected.id] && !isLinked(selected)}>{syncingPack ? 'Actualizando mods…' : 'Instalar / actualizar pack'}</button>{:else}<button class="button primary" disabled title="El modpack de esta serie todavía no tiene archivos oficiales publicados">Pack no publicado</button>{/if}</div></div>
           {#if bootstrap.installedProfiles[selected.id]}<div class="managed-location"><span class="eyebrow">INSTANCIA ADMINISTRADA POR ETERNALCRAFT</span><code>{bootstrap.managedGameDirectories[selected.id]}</code></div>{/if}
           {#if installingSeries === selected.id}<div class="install-progress" role="status" aria-live="polite"><span class="spinner"></span><div><strong>{installMessage || 'Instalando Minecraft y Forge…'}</strong><p>Preparando el perfil del juego; Minecraft no se iniciará.</p></div></div>{/if}
-          <p class="release-note">Las versiones estarán disponibles cuando se publiquen manifiestos y archivos oficiales en este repositorio.</p>
+          {#if syncingPack}<div class="install-progress" role="status" aria-live="polite"><span class="spinner"></span><div><strong>{packSyncMessage || 'Actualizando mods oficiales…'}</strong><p>El proceso verifica cada descarga antes de sustituir archivos administrados.</p></div></div>{/if}
+          <p class="release-note">{selected.packStatus === 'available' ? 'El launcher verifica cada mod oficial y conserva tus archivos personales al sincronizar.' : 'Las versiones estarán disponibles cuando se publiquen manifiestos y archivos oficiales en este repositorio.'}</p>
         </section>
       {:else if activePage === 'mods'}
         <section class="page narrow-page"><div class="page-heading"><div><span class="eyebrow">CONTENIDO DEL JUEGO · {selected.name}</span><h1>Biblioteca de mods</h1><p>Los mods personales se guardan aparte y se enlazan a la raíz que Forge carga.</p></div><div class="play-actions"><button class="button secondary" onclick={addPersonalMod} disabled={modsBusy || modsLoading || !modInventory?.gameDirectory}>{modsBusy ? 'Guardando…' : 'Agregar mod personal'}</button><button class="button secondary" onclick={() => loadMods(selected.id)} disabled={modsLoading || modsBusy}>{modsLoading ? 'Leyendo…' : 'Actualizar inventario'}</button></div></div>

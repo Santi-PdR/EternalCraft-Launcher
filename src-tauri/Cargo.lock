@@ -970,6 +970,7 @@ dependencies = [
 name = "eternalcraft-launcher"
 version = "0.1.0"
 dependencies = [
+ "sha2 0.10.9",
  "atomic-write-file",
  "mc-launcher-core",
  "serde",

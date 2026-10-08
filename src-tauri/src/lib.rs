@@ -31,6 +31,8 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 
+mod pack;
+
 const CATALOG_JSON: &str = include_str!("../../resources/series/catalog.json");
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1345,6 +1347,63 @@ fn get_launcher_logs(app: AppHandle) -> Result<String, String> {
     read_install_log_at(&path)
 }
 
+#[tauri::command]
+async fn sync_official_pack(
+    app: AppHandle,
+    series_id: String,
+) -> Result<pack::PackSyncResult, String> {
+    let series = parse_catalog()?
+        .series
+        .into_iter()
+        .find(|series| series.id == series_id)
+        .ok_or_else(|| "La serie solicitada no existe en el catálogo".to_string())?;
+    if series.pack_status != PackStatus::Available {
+        return Err("Esta serie todavía no tiene un pack oficial publicado".into());
+    }
+    let game_dir = resolve_series_game_directory(&app, &series_id)?.ok_or_else(|| {
+        "Primero instala o vincula una carpeta de juego para esta serie".to_string()
+    })?;
+    verify_forge_profile(&game_dir, &series)?;
+    let progress_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        pack::sync_pack(
+            &game_dir,
+            &series_id,
+            &series.minecraft_version,
+            &series.loader,
+            &series.loader_version,
+            move |progress| {
+                let _ = progress_app.emit("pack-sync-progress", progress);
+            },
+        )
+    })
+    .await
+    .map_err(|error| format!("Falló la tarea de sincronización del pack: {error}"))?
+}
+
+fn verify_forge_profile(game_dir: &Path, series: &Series) -> Result<(), String> {
+    let profile_id = expected_profile_id(series)
+        .ok_or_else(|| "La serie no define un perfil Forge compatible".to_string())?;
+    let profile_path = game_dir
+        .join("versions")
+        .join(&profile_id)
+        .join(format!("{profile_id}.json"));
+    if !profile_path.is_file() {
+        return Err(format!(
+            "Forge {} no está instalado en esta instancia. Instala primero la base del juego.",
+            series.loader_version
+        ));
+    }
+    let profile = load_version_json(game_dir, &profile_id)
+        .map_err(|error| format!("El perfil Forge de la instancia no es válido: {error}"))?;
+    if profile.id.as_deref() != Some(profile_id.as_str())
+        || profile.main_class.as_deref().is_none_or(str::is_empty)
+    {
+        return Err("El perfil Forge no contiene los datos de ejecución necesarios".into());
+    }
+    Ok(())
+}
+
 fn resolve_series_game_directory(
     app: &AppHandle,
     series_id: &str,
@@ -1613,6 +1672,7 @@ pub fn run() {
             select_background,
             clear_background,
             get_launcher_logs,
+            sync_official_pack,
             install_forge_base,
             get_mod_inventory,
             add_personal_mod_to_series,
@@ -1656,6 +1716,23 @@ mod tests {
             expected_profile_id(&series).as_deref(),
             Some("1.20.1-forge-47.4.10")
         );
+        let game = std::env::temp_dir().join(format!(
+            "eternalcraft-forge-profile-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(verify_forge_profile(&game, &series).is_err());
+        fs::create_dir_all(game.join("versions/1.20.1-forge-47.4.10")).unwrap();
+        fs::write(
+            game.join("versions/1.20.1-forge-47.4.10/1.20.1-forge-47.4.10.json"),
+            b"{}",
+        )
+        .unwrap();
+        assert!(verify_forge_profile(&game, &series).is_err());
+        fs::remove_dir_all(game).unwrap();
     }
 
     #[test]
@@ -1807,7 +1884,9 @@ mod tests {
         let unrelated = fixture.join("keep.tmp");
         fs::write(&stale, b"partial image").unwrap();
         fs::write(&unrelated, b"unrelated").unwrap();
-        fs::File::open(&stale)
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&stale)
             .unwrap()
             .set_times(fs::FileTimes::new().set_modified(
                 std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60),

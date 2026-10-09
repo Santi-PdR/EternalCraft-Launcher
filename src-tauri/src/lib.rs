@@ -1336,6 +1336,18 @@ fn java_for_forge_install(
     Ok(None)
 }
 
+fn update_supported_for(target_os: &str, is_appimage: bool) -> bool {
+    target_os == "windows" || (target_os == "linux" && is_appimage)
+}
+
+#[tauri::command]
+fn launcher_updater_supported() -> bool {
+    update_supported_for(
+        std::env::consts::OS,
+        std::env::var_os("APPIMAGE").is_some(),
+    )
+}
+
 fn memory_bounds(total_mb: u32) -> (u32, u32) {
     let min_mb = if total_mb < 1024 {
         (total_mb / 512 * 512).max(512)
@@ -2339,6 +2351,8 @@ pub fn run() {
         .manage(MinecraftProcess::default())
         .manage(developer::GitHubDeveloper::default())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             get_bootstrap,
             set_theme,
@@ -2369,6 +2383,7 @@ pub fn run() {
             developer::refresh_pack_source_preview,
             developer::publish_pack_release,
             get_minecraft_status,
+            launcher_updater_supported,
             set_memory_limit,
             reset_memory_limit,
             launch_minecraft
@@ -2380,6 +2395,14 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn updater_is_limited_to_supported_installed_bundle_types() {
+        assert!(update_supported_for("windows", false));
+        assert!(update_supported_for("linux", true));
+        assert!(!update_supported_for("linux", false));
+        assert!(!update_supported_for("macos", false));
+    }
 
     #[test]
     fn memory_limits_reserve_system_memory_and_cap_large_allocations() {

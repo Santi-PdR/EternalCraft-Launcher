@@ -25,6 +25,18 @@ Developer authorization uses a GitHub App configured by its public Client ID, Gi
 
 Forge installation progress and installer output are kept in a rotating local log under the app data directory and can be read from Support. Linux release builds use verified `.deb` and `.rpm` bundles; the Windows workflow builds an NSIS installer.
 
+## Launcher updates and releases
+
+The launcher checks its signed update channel at startup and from Settings. In-app installation is enabled for Linux AppImage and Windows NSIS installations. Fedora RPM and Debian DEB installations can check the channel, but must be updated by installing the newer package because replacing system packages from inside the app would require elevated privileges. The updater verifies each artifact with the committed public key before installation.
+
+To publish a launcher release:
+
+1. Set `version` in `src-tauri/tauri.conf.json` and `package.json` to the same SemVer value and commit the change to `main`.
+2. Create and push the matching tag, for example `launcher-v0.1.0`.
+3. The `Launcher release` workflow runs checks, builds signed Linux AppImage/RPM/DEB and Windows NSIS installers, publishes the assets, and advances `latest.json` on the dedicated `launcher-updates` branch.
+
+The repository Actions secret `TAURI_SIGNING_PRIVATE_KEY` is required for signed builds. Keep its value identical to the private key used for the public key committed in `src-tauri/tauri.conf.json`; never place the private key in the repository, an issue, or a release asset. The release workflow publishes only after both platform build jobs succeed. The first successful release creates the updater channel branch automatically.
+
 ## Design constraints
 
 - No Electron; Tauri owns the native window and Rust owns filesystem/process operations.

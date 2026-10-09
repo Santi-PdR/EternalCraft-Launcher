@@ -25,7 +25,9 @@
     "security": {
       "assetProtocol": {
         "enable": true,
-        "scope": ["$APPCONFIG/appearance/**"]
+        "scope": [
+          "$APPCONFIG/appearance/**"
+        ]
       },
       "csp": "default-src 'self'; img-src 'self' asset: data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src ipc: http://ipc.localhost"
     }
@@ -50,5 +52,16 @@
       "icons/icon.ico"
     ],
     "targets": "all"
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEREQzZCMDVBMDIzM0I2ODYKUldTR3RqTUNXckRHM2FlUmlISFE5TXhWTE0wQllkYmg5Zm9NRzNTbDVBRDRZNDdBYnRteVFoWi8K",
+      "endpoints": [
+        "https://raw.githubusercontent.com/Santi-PdR/EternalCraft-Launcher/launcher-updates/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

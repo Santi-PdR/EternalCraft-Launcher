@@ -46,3 +46,9 @@
 .publish-controls .text-input{margin-top:0;width:180px}
 @media(max-width:760px){.developer-pack-card .setting-row{align-items:stretch;flex-direction:column}.developer-pack-card .inventory-stats{grid-template-columns:1fr}.developer-pack-card .inventory-list li{align-items:flex-start;flex-direction:column;gap:4px}}
 @media(max-width:520px){.publish-controls{align-items:stretch;flex-direction:column}.publish-controls .text-input{width:100%}.publish-controls .button{width:100%}}
+
+.updater-row { align-items: flex-start; padding: 20px 0; }
+.updater-row .privacy-note { max-width: 700px; }
+.update-progress { display: block; width: min(100%, 460px); height: 8px; margin-top: 12px; accent-color: var(--accent); }
+.updater-row small { display: block; margin-top: 6px; color: var(--muted); font-size: 10px; }
+@media(max-width:760px){.updater-row{align-items:stretch;flex-direction:column}}

@@ -1,6 +1,9 @@
 <script lang="ts">
   import { convertFileSrc, invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
+  import { getVersion } from '@tauri-apps/api/app';
+  import { check } from '@tauri-apps/plugin-updater';
+  import { relaunch } from '@tauri-apps/plugin-process';
   import { onMount } from 'svelte';
   import type { Bootstrap, DeveloperLoginStatus, InstallProgress, MinecraftStatus, ModInventory, PackPublishProgress, PackSourcePreview, PackSyncProgress, PackSyncResult, Series } from './lib/types';
 
@@ -27,6 +30,13 @@
   let installMessage = $state('');
   let launcherLogs = $state('Todavía no hay registros de instalación.');
   let logsLoading = $state(false);
+  let launcherVersion = $state('');
+  let launcherUpdateState = $state<'idle' | 'checking' | 'unsupported' | 'current' | 'available' | 'installing' | 'error'>('idle');
+  let launcherUpdateVersion = $state('');
+  let launcherUpdateMessage = $state('');
+  let launcherUpdateNotes = $state('');
+  let launcherUpdateDownloaded = $state(0);
+  let launcherUpdateSize = $state<number | null>(null);
   let clientIdDraft = $state('');
   let githubAppClientIdDraft = $state('');
   let developerLoginStatus = $state<DeveloperLoginStatus>({ status: 'signedOut', username: null, userCode: null, verificationUri: null, expiresInSeconds: null, intervalSeconds: null, message: null });
@@ -66,12 +76,15 @@
       if (payload.seriesId === selected?.id) packPublishMessage = `${payload.completedFiles}/${payload.totalFiles} · ${payload.message}`;
     });
     void refreshMinecraftStatus();
+    void getVersion().then((version) => { if (!disposed) launcherVersion = version; });
+    const updateTimer = window.setTimeout(() => { if (!disposed) void checkLauncherUpdate(); }, 1800);
     const statusTimer = window.setInterval(() => void refreshMinecraftStatus(), 2500);
     const developerTimer = window.setInterval(() => {
       if (developerLoginStatus.status === 'pending' && !developerPollBusy) void pollGitHubDeveloperLogin();
     }, Math.max(5000, (developerLoginStatus.intervalSeconds ?? 5) * 1000));
     return () => {
       disposed = true;
+      window.clearTimeout(updateTimer);
       window.clearInterval(statusTimer);
       window.clearInterval(developerTimer);
       unlisteners.forEach((stop) => stop());
@@ -133,6 +146,77 @@
 
   function personalModLoaded(fileName: string) {
     return Boolean(modInventory?.loadedFromModsRoot.some((file) => file.name.toLowerCase() === fileName.toLowerCase()));
+  }
+
+  async function checkLauncherUpdate() {
+    if (launcherUpdateState === 'checking' || launcherUpdateState === 'installing') return;
+    launcherUpdateState = 'checking';
+    launcherUpdateMessage = 'Consultando el canal oficial y verificando la firma…';
+    launcherUpdateNotes = '';
+    launcherUpdateVersion = '';
+    launcherUpdateDownloaded = 0;
+    try {
+      const supported = await invoke<boolean>('launcher_updater_supported');
+      if (!supported) {
+        launcherUpdateState = 'unsupported';
+        launcherUpdateMessage = 'La actualización integrada requiere AppImage en Linux. Este paquete se actualiza instalando el RPM/DEB más reciente.';
+        return;
+      }
+    } catch (reason) {
+      launcherUpdateState = 'error';
+      launcherUpdateMessage = `No se pudo detectar el tipo de instalación: ${String(reason)}`;
+      return;
+    }
+    launcherUpdateSize = null;
+    try {
+      const update = await check();
+      if (!update) {
+        launcherUpdateState = 'current';
+        launcherUpdateMessage = 'Ya tienes la versión más reciente.';
+        return;
+      }
+      launcherUpdateVersion = update.version;
+      launcherUpdateNotes = update.body ?? '';
+      launcherUpdateState = 'available';
+      launcherUpdateMessage = `Nueva versión ${update.version} disponible. La firma se comprobará antes de instalar.`;
+    } catch (reason) {
+      launcherUpdateState = 'error';
+      launcherUpdateMessage = `No se pudo comprobar la actualización: ${String(reason)}`;
+    }
+  }
+
+  async function installLauncherUpdate() {
+    if (launcherUpdateState !== 'available') return;
+    launcherUpdateState = 'installing';
+    launcherUpdateMessage = 'Preparando la actualización firmada…';
+    launcherUpdateDownloaded = 0;
+    launcherUpdateSize = null;
+    try {
+      const update = await check();
+      if (!update) {
+        launcherUpdateState = 'current';
+        launcherUpdateMessage = 'La actualización ya no está disponible; tienes la versión más reciente.';
+        return;
+      }
+      if (update.version !== launcherUpdateVersion) {
+        launcherUpdateVersion = update.version;
+        launcherUpdateNotes = update.body ?? '';
+      }
+      await update.downloadAndInstall((event) => {
+        if (event.event === 'Started') {
+          launcherUpdateSize = event.data.contentLength ?? null;
+          launcherUpdateMessage = 'Descargando el paquete de actualización…';
+        } else if (event.event === 'Progress') {
+          launcherUpdateDownloaded += event.data.chunkLength;
+        } else if (event.event === 'Finished') {
+          launcherUpdateMessage = 'Descarga y firma verificadas. Reiniciando EternalCraft…';
+        }
+      });
+      await relaunch();
+    } catch (reason) {
+      launcherUpdateState = 'error';
+      launcherUpdateMessage = `No se pudo instalar la actualización: ${String(reason)}`;
+    }
   }
 
   async function refresh() {
@@ -614,6 +698,7 @@
             <p class="privacy-note">Se suben solo los mods JAR de la carpeta revisada. Los archivos de configuración, otras carpetas y datos personales no se incluyen.</p></div>{/if}</section>
       {:else}
         <section class="page narrow-page"><div class="page-heading"><div><span class="eyebrow">CONFIGURACIÓN LOCAL</span><h1>Ajustes</h1><p>Preferencias guardadas en este equipo.</p></div></div><div class="settings-card">
+          <div class="setting-row updater-row"><div><span class="eyebrow">ACTUALIZACIONES DEL LAUNCHER</span><h2>{launcherVersion ? `EternalCraft ${launcherVersion}` : 'EternalCraft Launcher'}</h2><p>{launcherUpdateMessage || 'El launcher busca una versión firmada al iniciarse.'}</p>{#if launcherUpdateNotes}<p class="privacy-note">{launcherUpdateNotes}</p>{/if}{#if launcherUpdateState === 'installing' && launcherUpdateSize}<progress class="update-progress" max={launcherUpdateSize} value={Math.min(launcherUpdateDownloaded, launcherUpdateSize)}></progress><small>{formatBytes(launcherUpdateDownloaded)} / {formatBytes(launcherUpdateSize)}</small>{/if}<p class="privacy-note">La actualización se verifica con la clave pública integrada y el instalador no se aplica si la firma falla. AppImage en Linux y NSIS en Windows se actualizan dentro del launcher; RPM/DEB se actualizan instalando el paquete nuevo desde Releases.</p></div><div class="play-actions"><button class="button secondary" onclick={checkLauncherUpdate} disabled={launcherUpdateState === 'checking' || launcherUpdateState === 'installing'}>{launcherUpdateState === 'checking' ? 'Comprobando…' : 'Comprobar ahora'}</button>{#if launcherUpdateState === 'available'}<button class="button primary" onclick={installLauncherUpdate}>Descargar e instalar</button>{/if}</div></div>
           <div class="setting-row"><div><span class="eyebrow">CUENTA DE MINECRAFT</span><h2>{bootstrap.microsoftProfile?.username ?? 'Sin sesión iniciada'}</h2><p>{bootstrap.microsoftProfile ? `UUID ${bootstrap.microsoftProfile.uuid}` : 'Inicia sesión con Microsoft para jugar cuando el pack de una serie esté publicado.'}</p></div><div class="play-actions">{#if bootstrap.microsoftProfile}<button class="button secondary" onclick={logoutMicrosoft} disabled={busy}>Cerrar sesión</button>{:else}<button class="button primary" onclick={loginMicrosoft} disabled={busy || !bootstrap.microsoftClientId}>{busy ? 'Esperando navegador…' : 'Conectar cuenta Microsoft'}</button>{/if}</div></div>
           <div class="setting-row microsoft-registration-row"><div><span class="eyebrow">REGISTRO DE APLICACIÓN · MICROSOFT</span><h2>Client ID público</h2><p>Es el identificador público de EternalCraft en Microsoft Entra; no es una contraseña. Para conseguirlo:</p><ol class="setup-steps"><li>Abre <a href="https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank" rel="noreferrer">App registrations ↗</a> y crea un registro llamado <strong>EternalCraft Launcher</strong>.</li><li>En tipos de cuenta, permite <strong>cuentas personales de Microsoft</strong>.</li><li>En <strong>Authentication → Add a platform → Mobile and desktop applications</strong>, agrega <code>http://localhost</code> y habilita el flujo de cliente público.</li><li>En <strong>Overview</strong>, copia <strong>Application (client) ID</strong> y pégalo aquí. No crees ni compartas un client secret.</li></ol><p>El inicio de sesión usa el navegador del sistema y PKCE; el callback local puede usar un puerto dinámico.</p><a class="text-link" href="https://learn.microsoft.com/en-us/entra/identity-platform/scenario-desktop-overview" target="_blank" rel="noreferrer">Guía oficial de Microsoft para aplicaciones de escritorio ↗</a><input class="text-input" type="text" autocomplete="off" spellcheck="false" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" bind:value={clientIdDraft} /></div><button class="button secondary" onclick={saveMicrosoftClientId} disabled={busy || clientIdDraft.trim() === (bootstrap.microsoftClientId ?? '')}>Guardar ID</button></div>
           <div class="setting-row developer-registration-row"><div><span class="eyebrow">AUTORIZACIÓN DE PUBLICACIÓN · GITHUB</span><h2>{developerLoginStatus.username ? `Developer conectado: ${developerLoginStatus.username}` : 'Acceso developer protegido por GitHub'}</h2><p>La app confirma el permiso real de escritura en el repositorio. El token se conserva solo en memoria y se descarta al cerrar el launcher.</p><ol class="setup-steps"><li>Registra una <a href="https://github.com/settings/apps/new" target="_blank" rel="noreferrer">GitHub App ↗</a>, activa Device Flow y solicita solo <strong>Contents: Read and write</strong>.</li><li>Instálala únicamente en <code>Santi-PdR/EternalCraft-Launcher</code>, copia el Client ID público y pégalo aquí. No crees ni compartas una clave privada.</li></ol><a class="text-link" href="https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app" target="_blank" rel="noreferrer">Guía oficial de autorización de GitHub Apps ↗</a><label class="input-label">Client ID público<input class="text-input" type="text" autocomplete="off" spellcheck="false" placeholder="Iv23…" bind:value={githubAppClientIdDraft} /></label>{#if developerLoginStatus.userCode}<div class="device-code" role="status"><strong>{developerLoginStatus.userCode}</strong><span>Ingresa este código en <a href={developerLoginStatus.verificationUri ?? 'https://github.com/login/device'} target="_blank" rel="noreferrer">GitHub Device Login ↗</a>. Caduca en {Math.ceil((developerLoginStatus.expiresInSeconds ?? 0) / 60)} min.</span></div>{/if}{#if developerLoginStatus.message}<p class="privacy-note">{developerLoginStatus.message}</p>{/if}</div><div class="play-actions"><button class="button secondary" onclick={saveGitHubAppClientId} disabled={busy || !githubAppClientIdDraft.trim() || githubAppClientIdDraft.trim() === (bootstrap.githubAppClientId ?? '')}>Guardar ID</button>{#if developerLoginStatus.username}<button class="button secondary" onclick={logoutGitHubDeveloper} disabled={developerLoginBusy}>Desconectar</button>{:else}<button class="button primary" onclick={beginGitHubDeveloperLogin} disabled={developerLoginBusy || !bootstrap.githubAppClientId || developerLoginStatus.status === 'pending'}>{developerLoginStatus.status === 'pending' ? 'Esperando autorización…' : 'Conectar GitHub'}</button>{/if}</div></div>

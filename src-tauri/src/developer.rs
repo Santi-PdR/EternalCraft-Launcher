@@ -118,7 +118,7 @@ struct GitHubRelease {
     upload_url: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct GitHubReleaseAsset {
     id: u64,
     name: String,

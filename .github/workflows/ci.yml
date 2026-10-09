@@ -72,16 +72,23 @@ jobs:
           file "${deb[0]}" | grep -F "Debian binary package"
           file "${rpm[0]}" | grep -F "RPM"
           deb_contents="$(dpkg-deb --contents "${deb[0]}")"
-          printf '%s\n' "$deb_contents" | grep -E '\./usr/bin/[^/]+$'
           printf '%s\n' "$deb_contents" | grep -E '\./usr/share/applications/[^/]+\.desktop$'
           rpm_contents="$(rpm -qpl "${rpm[0]}")"
-          printf '%s\n' "$rpm_contents" | grep -E '^/usr/bin/[^/]+$'
           printf '%s\n' "$rpm_contents" | grep -E '^/usr/share/applications/[^/]+\.desktop$'
+          rpm_executables="$(rpm -qplv "${rpm[0]}" | grep -E '^-[rwxstST-]{9} .*x.* /' || true)"
+          [[ -n "$rpm_executables" ]] || { echo "RPM does not contain an executable file"; exit 1; }
+          printf '%s\n' "$rpm_executables"
           extracted="$(mktemp -d)"
           trap 'rm -rf "$extracted"' EXIT
           dpkg-deb --extract "${deb[0]}" "$extracted"
-          launcher_binary="$(find -L "$extracted/usr/bin" -maxdepth 1 -type f -executable -print -quit)"
-          [[ -n "$launcher_binary" ]] || { echo "No executable launcher binary found under the package's /usr/bin"; exit 1; }
+          launcher_binary=""
+          while IFS= read -r candidate; do
+            if file "$candidate" | grep -q "ELF"; then
+              launcher_binary="$candidate"
+              break
+            fi
+          done < <(find -L "$extracted" -type f -executable)
+          [[ -n "$launcher_binary" ]] || { echo "No executable ELF binary found in the Debian package"; exit 1; }
           file "$launcher_binary" | grep -F "ELF"
       - name: Verify Windows installer
         if: runner.os == 'Windows'

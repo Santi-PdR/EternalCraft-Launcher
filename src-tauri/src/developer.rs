@@ -957,6 +957,30 @@ fn sha256_file(path: &Path) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    fn write_forge_jar(path: &Path) {
+        use std::io::Write;
+        let file = fs::File::create(path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file("META-INF/mods.toml", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        archive.write_all(b"modLoader=\"javafml\"\n").unwrap();
+        archive.finish().unwrap();
+    }
+
+    fn temporary_directory(label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "eternalcraft-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
     #[test]
     fn github_app_client_id_validation_rejects_urls_and_empty_values() {
         assert!(valid_github_app_client_id("Iv1.abcDEF_123-456"));
@@ -988,5 +1012,35 @@ mod tests {
         let original = b"{series: ghouls outbreak}";
         assert_eq!(base64_decode(&base64_encode(original)).unwrap(), original);
         assert_eq!(encode_path_component("Mod Name (1).jar"), "Mod%20Name%20%281%29.jar");
+    }
+
+    #[test]
+    fn pack_source_publishes_only_root_forge_jars_and_ignores_personal_and_config_files() {
+        let source = temporary_directory("developer-pack-source");
+        fs::create_dir_all(source.join("personales")).unwrap();
+        fs::create_dir_all(source.join("config")).unwrap();
+        write_forge_jar(&source.join("Official Mod.jar"));
+        write_forge_jar(&source.join("personales/Personal Mod.jar"));
+        fs::write(source.join("config/options.txt"), b"user settings").unwrap();
+        fs::write(source.join("options.txt"), b"user settings").unwrap();
+
+        let preview = scan_pack_source(&source, "siege").unwrap();
+        assert_eq!(preview.files.len(), 1);
+        assert_eq!(preview.files[0].name, "Official Mod.jar");
+        assert_eq!(preview.files[0].sha256, sha256_file(&source.join("Official Mod.jar")).unwrap());
+        assert_eq!(preview.total_bytes, preview.files[0].size_bytes);
+
+        fs::remove_dir_all(source).unwrap();
+    }
+
+    #[test]
+    fn pack_source_refuses_to_publish_the_personal_mods_directory_as_official() {
+        let source = temporary_directory("developer-personal-source");
+        write_forge_jar(&source.join("Personal Mod.jar"));
+        let personal = source.join("Personales");
+        fs::create_dir(&personal).unwrap();
+
+        assert!(scan_pack_source(&personal, "siege").is_err());
+        fs::remove_dir_all(source).unwrap();
     }
 }

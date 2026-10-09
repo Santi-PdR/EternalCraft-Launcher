@@ -71,8 +71,50 @@ jobs:
           done
           file "${deb[0]}" | grep -F "Debian binary package"
           file "${rpm[0]}" | grep -F "RPM"
-          deb_contents="$(dpkg-deb --contents "${deb[0]}")"
-          printf '%s\n' "$deb_contents" | grep -E '[[:space:]]\./usr/share/applications/[^/]+\.desktop$'
+          deb_entries="$(dpkg-deb --fsys-tarfile "${deb[0]}" | tar -tf -)"
+          printf '%s\n' "$deb_entries" | grep -E '(^|/)usr/share/applications/[^/]+\.desktop
+          rpm_contents="$(rpm -qpl "${rpm[0]}")"
+          printf '%s\n' "$rpm_contents" | grep -E '^/usr/share/applications/[^/]+\.desktop$'
+          rpm_executables="$(rpm -qplv "${rpm[0]}" | grep -E '^-[rwxstST-]{9} .*x.* /' || true)"
+          [[ -n "$rpm_executables" ]] || { echo "RPM does not contain an executable file"; exit 1; }
+          printf '%s\n' "$rpm_executables"
+          extracted="$(mktemp -d)"
+          trap 'rm -rf "$extracted"' EXIT
+          dpkg-deb --extract "${deb[0]}" "$extracted"
+          launcher_binary=""
+          while IFS= read -r candidate; do
+            if file "$candidate" | grep -q "ELF"; then
+              launcher_binary="$candidate"
+              break
+            fi
+          done < <(find -L "$extracted" -type f -executable)
+          [[ -n "$launcher_binary" ]] || { echo "No executable ELF binary found in the Debian package"; exit 1; }
+          file "$launcher_binary" | grep -F "ELF"
+      - name: Verify Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem "src-tauri/target/release/bundle/nsis" -Filter "*setup.exe" -File)
+          if ($installers.Count -ne 1) { throw "Expected one NSIS setup executable, found $($installers.Count)" }
+          $installer = $installers[0]
+          if ($installer.Length -lt 1MB) { throw "NSIS setup executable is unexpectedly small: $($installer.Length) bytes" }
+          $stream = [System.IO.File]::OpenRead($installer.FullName)
+          try {
+            $header = New-Object byte[] 2
+            [void]$stream.Read($header, 0, 2)
+          } finally {
+            $stream.Dispose()
+          }
+          if ($header[0] -ne 0x4d -or $header[1] -ne 0x5a) { throw "NSIS setup is not a Windows PE executable" }
+          Write-Output "$($installer.Name): $($installer.Length) bytes; PE header valid"
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: eternalcraft-launcher-${{ runner.os }}
+          path: src-tauri/target/release/bundle/**
+          if-no-files-found: error
+          retention-days: 7
+
           rpm_contents="$(rpm -qpl "${rpm[0]}")"
           printf '%s\n' "$rpm_contents" | grep -E '^/usr/share/applications/[^/]+\.desktop$'
           rpm_executables="$(rpm -qplv "${rpm[0]}" | grep -E '^-[rwxstST-]{9} .*x.* /' || true)"

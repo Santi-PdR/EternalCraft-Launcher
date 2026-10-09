@@ -19,6 +19,42 @@ struct DeveloperState {
     pending: Option<PendingDeviceAuthorization>,
     session: Option<GitHubSession>,
     source_directories: BTreeMap<String, PathBuf>,
+    publish_active: bool,
+}
+
+struct PublishLease {
+    app: AppHandle,
+}
+
+fn reserve_publish(active: &mut bool) -> bool {
+    if *active {
+        false
+    } else {
+        *active = true;
+        true
+    }
+}
+
+impl PublishLease {
+    fn acquire(app: &AppHandle) -> Result<Self, String> {
+        let developer = app.state::<GitHubDeveloper>();
+        let mut state = developer
+            .0
+            .lock()
+            .map_err(|_| "El estado developer quedó bloqueado".to_string())?;
+        if !reserve_publish(&mut state.publish_active) {
+            return Err("Ya hay una publicación en curso. Espera a que termine antes de iniciar otra.".into());
+        }
+        Ok(Self { app: app.clone() })
+    }
+}
+
+impl Drop for PublishLease {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.app.state::<GitHubDeveloper>().0.lock() {
+            state.publish_active = false;
+        }
+    }
 }
 
 struct PendingDeviceAuthorization {
@@ -620,6 +656,7 @@ fn publish_pack_release_sync(
     series_id: String,
     version: String,
 ) -> Result<String, String> {
+    let _publish_lease = PublishLease::acquire(&app)?;
     let access_token = app.state::<GitHubDeveloper>().access_token()?;
     if !valid_pack_version(&version) {
         return Err("Usa una versión estable con formato MAJOR.MINOR.PATCH, por ejemplo 1.2.0".into());
@@ -1182,6 +1219,15 @@ mod tests {
         ));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn concurrent_pack_publications_are_serialized_for_catalog_consistency() {
+        let mut active = false;
+        assert!(reserve_publish(&mut active));
+        assert!(!reserve_publish(&mut active));
+        active = false;
+        assert!(reserve_publish(&mut active));
     }
 
     #[test]

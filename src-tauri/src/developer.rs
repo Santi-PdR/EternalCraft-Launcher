@@ -1,5 +1,6 @@
 use super::*;
 use sha2::Digest;
+use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 const GITHUB_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";

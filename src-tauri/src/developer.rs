@@ -685,6 +685,11 @@ fn publish_pack_release_sync(
     let tag = format!("{series_id}-v{version}");
     let release = get_or_create_draft_release(&access_token, &tag, &series.name)?;
     let assets = list_release_assets(&access_token, release.id)?;
+    if !release.draft && !published_asset_names_match(&source.files, &assets) {
+        return Err(format!(
+            "El release publicado {tag} ya tiene un conjunto de mods distinto; crea una versión nueva"
+        ));
+    }
     let mut verified_names = std::collections::BTreeSet::new();
     let total = source.files.len();
     for (index, source_file) in source.files.iter().enumerate() {
@@ -753,10 +758,20 @@ fn publish_pack_release_sync(
     };
     let manifest_bytes = serde_json::to_vec_pretty(&manifest)
         .map_err(|error| format!("No se pudo generar el manifiesto: {error}"))?;
-    put_repository_file(&access_token, &format!("packs/{series_id}/manifest.json"), &manifest_bytes, &format!("Publish {} {version} manifest", series.name))?;
-
     if release.draft {
         publish_github_release(&access_token, release.id, &series.name, &version)?;
+    }
+
+    // Publish the release assets before advancing the manifest pointer. Existing clients
+    // keep resolving the previous complete version while the new assets are not yet public.
+    let manifest_path = format!("packs/{series_id}/manifest.json");
+    let current_manifest = get_repository_file(&access_token, &manifest_path)?
+        .map(|file| file.content.ok_or_else(|| format!("GitHub no devolvió el manifiesto {manifest_path}")))
+        .transpose()?
+        .map(|content| base64_decode(&content))
+        .transpose()?;
+    if should_advance_manifest_pointer(current_manifest.as_deref(), &manifest_bytes)? {
+        put_repository_file(&access_token, &manifest_path, &manifest_bytes, &format!("Publish {} {version} manifest", series.name))?;
     }
     update_catalog_status(&access_token, &series_id)?;
     super::mark_runtime_series_available(&series_id)?;
@@ -782,6 +797,50 @@ fn emit_publish_progress(app: &AppHandle, series_id: &str, completed: usize, tot
         total_files: total,
         message: message.to_string(),
     });
+}
+
+fn published_asset_names_match(source: &[PackSourceFile], assets: &[GitHubReleaseAsset]) -> bool {
+    let source_names: BTreeSet<&str> = source.iter().map(|file| file.name.as_str()).collect();
+    let asset_names: BTreeSet<&str> = assets.iter().map(|asset| asset.name.as_str()).collect();
+    source_names == asset_names
+}
+
+fn should_advance_manifest_pointer(existing: Option<&[u8]>, expected: &[u8]) -> Result<bool, String> {
+    let expected: serde_json::Value = serde_json::from_slice(expected)
+        .map_err(|error| format!("Manifiesto esperado inválido: {error}"))?;
+    let target_version = expected["version"].as_str()
+        .ok_or_else(|| "El manifiesto esperado no contiene versión".to_string())?;
+    let target = parse_pack_version(target_version)
+        .ok_or_else(|| "La versión del manifiesto esperado no es SemVer estable".to_string())?;
+    let Some(existing) = existing else {
+        return Ok(true);
+    };
+    let existing: serde_json::Value = serde_json::from_slice(existing)
+        .map_err(|error| format!("El manifiesto actual no es JSON válido: {error}"))?;
+    if existing == expected {
+        return Ok(false);
+    }
+    let current_version = existing["version"].as_str()
+        .ok_or_else(|| "El manifiesto actual no contiene versión; no se reemplazó".to_string())?;
+    let current = parse_pack_version(current_version)
+        .ok_or_else(|| "El manifiesto actual no tiene una versión estable válida; no se reemplazó".to_string())?;
+    match target.cmp(&current) {
+        std::cmp::Ordering::Greater => Ok(true),
+        std::cmp::Ordering::Equal => Err(format!(
+            "La versión {target_version} ya tiene un manifiesto distinto; usa una versión nueva"
+        )),
+        std::cmp::Ordering::Less => Err(format!(
+            "La versión {target_version} es anterior al manifiesto actual {current_version}; no se permite retroceder"
+        )),
+    }
+}
+
+fn parse_pack_version(version: &str) -> Option<(u32, u32, u32)> {
+    if !valid_pack_version(version) {
+        return None;
+    }
+    let mut parts = version.split('.').map(str::parse::<u32>);
+    Some((parts.next()?.ok()?, parts.next()?.ok()?, parts.next()?.ok()?))
 }
 
 fn github_json<T: for<'de> Deserialize<'de>>(response: reqwest::blocking::Response, context: &str) -> Result<T, String> {
@@ -996,15 +1055,10 @@ fn publish_github_release(token: &str, release_id: u64, series_name: &str, versi
 }
 
 fn put_repository_file(token: &str, path: &str, bytes: &[u8], message: &str) -> Result<(), String> {
-    let client = http::client().map_err(|error| error.to_string())?;
     let endpoint = format!("{GITHUB_API}/repos/{PUBLISH_REPOSITORY}/contents/{path}");
-    let current = client.get(&endpoint).bearer_auth(token).header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28").header("User-Agent", "EternalCraft-Launcher")
-        .send().map_err(|error| format!("No se pudo leer {path} en GitHub: {error}"))?;
-    let sha = if current.status().is_success() {
-        Some(github_json::<GitHubContentResponse>(current, &format!("Leer {path}"))?.sha)
-    } else if current.status().as_u16() == 404 { None }
-    else { return Err(format!("GitHub no pudo leer {path} ({})", current.status())); };
+    let current = get_repository_file(token, path)?;
+    let sha = current.map(|content| content.sha);
+    let client = http::client().map_err(|error| error.to_string())?;
     let mut body = serde_json::json!({"message": message, "content": base64_encode(bytes)});
     if let Some(sha) = sha { body["sha"] = serde_json::Value::String(sha); }
     let response = client.put(endpoint).bearer_auth(token).header("Accept", "application/vnd.github+json")
@@ -1012,6 +1066,21 @@ fn put_repository_file(token: &str, path: &str, bytes: &[u8], message: &str) -> 
         .json(&body).send().map_err(|error| format!("No se pudo guardar {path} en GitHub: {error}"))?;
     if response.status().is_success() { Ok(()) }
     else { Err(format!("GitHub rechazó actualizar {path} ({}): {}", response.status(), response.text().unwrap_or_default().chars().take(400).collect::<String>())) }
+}
+
+fn get_repository_file(token: &str, path: &str) -> Result<Option<GitHubContentResponse>, String> {
+    let client = http::client().map_err(|error| error.to_string())?;
+    let response = client.get(format!("{GITHUB_API}/repos/{PUBLISH_REPOSITORY}/contents/{path}"))
+        .bearer_auth(token).header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28").header("User-Agent", "EternalCraft-Launcher")
+        .send().map_err(|error| format!("No se pudo leer {path} en GitHub: {error}"))?;
+    if response.status().is_success() {
+        github_json(response, &format!("Leer {path}")).map(Some)
+    } else if response.status().as_u16() == 404 {
+        Ok(None)
+    } else {
+        Err(format!("GitHub no pudo leer {path} ({})", response.status()))
+    }
 }
 
 fn update_catalog_status(token: &str, series_id: &str) -> Result<(), String> {
@@ -1229,6 +1298,47 @@ mod tests {
         assert!(!reserve_publish(&mut active));
         active = false;
         assert!(reserve_publish(&mut active));
+    }
+
+    #[test]
+    fn published_release_asset_set_must_match_the_source_exactly() {
+        let source = vec![
+            PackSourceFile { name: "alpha.jar".into(), size_bytes: 10, sha256: "a".repeat(64) },
+            PackSourceFile { name: "beta.jar".into(), size_bytes: 20, sha256: "b".repeat(64) },
+        ];
+        let complete = vec![
+            GitHubReleaseAsset { id: 2, name: "beta.jar".into(), digest: None },
+            GitHubReleaseAsset { id: 1, name: "alpha.jar".into(), digest: None },
+        ];
+        assert!(published_asset_names_match(&source, &complete));
+        assert!(!published_asset_names_match(&source, &complete[..1]));
+        let with_stale_asset = [complete.as_slice(), &[GitHubReleaseAsset { id: 3, name: "retired.jar".into(), digest: None }]].concat();
+        assert!(!published_asset_names_match(&source, &with_stale_asset));
+    }
+
+    #[test]
+    fn manifest_pointer_only_advances_after_a_new_complete_release() {
+        let expected = br#"{"seriesId":"siege","version":"1.2.0","files":[{"path":"mods/a.jar","sha256":"abc"}]}"#;
+        let same = br#"{
+            "seriesId": "siege",
+            "version": "1.2.0",
+            "files": [{"path": "mods/a.jar", "sha256": "abc"}]
+        }"#;
+        let same_version_changed = br#"{"seriesId":"siege","version":"1.2.0","files":[]}"#;
+        let older = br#"{"seriesId":"siege","version":"1.1.9","files":[]}"#;
+        let newer = br#"{"seriesId":"siege","version":"1.3.0","files":[]}"#;
+        assert!(should_advance_manifest_pointer(None, expected).unwrap());
+        assert!(!should_advance_manifest_pointer(Some(same), expected).unwrap());
+        assert!(should_advance_manifest_pointer(Some(older), expected).unwrap());
+        assert!(should_advance_manifest_pointer(Some(same_version_changed), expected).is_err());
+        assert!(should_advance_manifest_pointer(Some(newer), expected).is_err());
+        assert!(should_advance_manifest_pointer(Some(b"not json"), expected).is_err());
+    }
+
+    #[test]
+    fn pack_versions_compare_numerically() {
+        assert_eq!(parse_pack_version("1.10.0"), Some((1, 10, 0)));
+        assert!(parse_pack_version("1.2.3-beta").is_none());
     }
 
     #[test]

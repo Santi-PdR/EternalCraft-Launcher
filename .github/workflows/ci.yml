@@ -71,6 +71,17 @@ jobs:
           done
           file "${deb[0]}" | grep -F "Debian binary package"
           file "${rpm[0]}" | grep -F "RPM"
+          deb_contents="$(dpkg-deb --contents "${deb[0]}")"
+          printf '%s\n' "$deb_contents" | grep -E '\./usr/bin/eternalcraft-launcher$'
+          printf '%s\n' "$deb_contents" | grep -E '\./usr/share/applications/[^/]+\.desktop$'
+          rpm_contents="$(rpm -qpl "${rpm[0]}")"
+          printf '%s\n' "$rpm_contents" | grep -E '^/usr/bin/eternalcraft-launcher$'
+          printf '%s\n' "$rpm_contents" | grep -E '^/usr/share/applications/[^/]+\.desktop$'
+          extracted="$(mktemp -d)"
+          trap 'rm -rf "$extracted"' EXIT
+          dpkg-deb --extract "${deb[0]}" "$extracted"
+          [[ -x "$extracted/usr/bin/eternalcraft-launcher" ]] || { echo "Packaged launcher binary is missing or not executable"; exit 1; }
+          file "$extracted/usr/bin/eternalcraft-launcher" | grep -F "ELF"
       - name: Verify Windows installer
         if: runner.os == 'Windows'
         shell: pwsh

@@ -671,7 +671,15 @@ fn publish_pack_release_sync(
         if current.len() != source_file.size_bytes || sha256_file(&path)? != source_file.sha256 {
             return Err(format!("{} cambió después de la revisión; vuelve a escanear la carpeta", source_file.name));
         }
-        let uploaded = upload_release_asset(&access_token, &release.upload_url, &source_file.name, &path, source_file.size_bytes)?;
+        let uploaded = upload_release_asset_resumable(
+            &access_token,
+            &release.upload_url,
+            release.id,
+            &source_file.name,
+            &expected_digest,
+            &path,
+            source_file.size_bytes,
+        )?;
         if uploaded.name != source_file.name || uploaded.digest.as_deref() != Some(expected_digest.as_str()) {
             let _ = delete_release_asset(&access_token, release.id, uploaded.id);
             return Err(format!("GitHub no confirmó el SHA-256 esperado para {}", source_file.name));
@@ -808,19 +816,133 @@ fn delete_release_asset(token: &str, release_id: u64, asset_id: u64) -> Result<(
     if response.status().is_success() { Ok(()) } else { Err(format!("GitHub rechazó retirar el asset {asset_id} ({})", response.status())) }
 }
 
-fn upload_release_asset(token: &str, upload_url: &str, name: &str, path: &Path, size: u64) -> Result<GitHubReleaseAsset, String> {
-    let url = format!("{}?name={}", upload_url.split('{').next().unwrap_or(upload_url), encode_path_component(name));
-    let file = fs::File::open(path).map_err(|error| format!("No se pudo abrir {name} para subirlo: {error}"))?;
+struct AssetUploadFailure {
+    message: String,
+    retryable: bool,
+}
+
+fn retryable_upload_status(status: reqwest::StatusCode) -> bool {
+    status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+}
+
+fn upload_release_asset_once(
+    token: &str,
+    upload_url: &str,
+    name: &str,
+    path: &Path,
+    size: u64,
+) -> Result<GitHubReleaseAsset, AssetUploadFailure> {
+    let url = format!(
+        "{}?name={}",
+        upload_url.split('{').next().unwrap_or(upload_url),
+        encode_path_component(name)
+    );
+    let file = fs::File::open(path).map_err(|error| AssetUploadFailure {
+        message: format!("No se pudo abrir {name} para subirlo: {error}"),
+        retryable: false,
+    })?;
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(20 * 60))
         .user_agent("EternalCraft-Launcher")
         .build()
-        .map_err(|error| format!("No se pudo preparar la subida de {name}: {error}"))?;
-    let response = client.put(url).bearer_auth(token).header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28").header("User-Agent", "EternalCraft-Launcher")
-        .header("Content-Type", "application/java-archive").header("Content-Length", size.to_string()).body(reqwest::blocking::Body::new(file))
-        .send().map_err(|error| format!("No se pudo subir {name}: {error}"))?;
-    github_json(response, &format!("Subir {name}"))
+        .map_err(|error| AssetUploadFailure {
+            message: format!("No se pudo preparar la subida de {name}: {error}"),
+            retryable: false,
+        })?;
+    let response = client
+        .put(url)
+        .bearer_auth(token)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", "EternalCraft-Launcher")
+        .header("Content-Type", "application/java-archive")
+        .header("Content-Length", size.to_string())
+        .body(reqwest::blocking::Body::new(file))
+        .send()
+        .map_err(|error| AssetUploadFailure {
+            message: format!("No se pudo subir {name}: {error}"),
+            retryable: error.is_timeout() || error.is_connect(),
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().unwrap_or_default();
+        return Err(AssetUploadFailure {
+            message: format!(
+                "Subir {name} falló ({status}): {}",
+                body.chars().take(500).collect::<String>()
+            ),
+            retryable: retryable_upload_status(status),
+        });
+    }
+    response.json().map_err(|error| AssetUploadFailure {
+        message: format!("GitHub devolvió una respuesta inválida al subir {name}: {error}"),
+        retryable: true,
+    })
+}
+
+fn upload_release_asset_resumable(
+    token: &str,
+    upload_url: &str,
+    release_id: u64,
+    name: &str,
+    expected_digest: &str,
+    path: &Path,
+    size: u64,
+) -> Result<GitHubReleaseAsset, String> {
+    const MAX_ATTEMPTS: usize = 3;
+    let mut last_error = String::new();
+    for attempt in 1..=MAX_ATTEMPTS {
+        match upload_release_asset_once(token, upload_url, name, path, size) {
+            Ok(asset)
+                if asset.name == name && asset.digest.as_deref() == Some(expected_digest) =>
+            {
+                return Ok(asset);
+            }
+            Ok(asset) => {
+                let _ = delete_release_asset(token, release_id, asset.id);
+                return Err(format!("GitHub no confirmó el SHA-256 esperado para {name}"));
+            }
+            Err(failure) => {
+                last_error = failure.message;
+                match list_release_assets(token, release_id) {
+                    Ok(assets) => {
+                        if let Some(asset) = assets.iter().find(|asset| {
+                            asset.name == name && asset.digest.as_deref() == Some(expected_digest)
+                        }) {
+                            return Ok(GitHubReleaseAsset {
+                                id: asset.id,
+                                name: asset.name.clone(),
+                                digest: asset.digest.clone(),
+                            });
+                        }
+                        let mut removed_stale_asset = false;
+                        for asset in assets.iter().filter(|asset| asset.name == name) {
+                            delete_release_asset(token, release_id, asset.id)?;
+                            removed_stale_asset = true;
+                        }
+                        if !failure.retryable && !removed_stale_asset {
+                            return Err(last_error);
+                        }
+                        if attempt == MAX_ATTEMPTS {
+                            break;
+                        }
+                    }
+                    Err(verify_error) if !failure.retryable || attempt == MAX_ATTEMPTS => {
+                        return Err(format!(
+                            "{last_error}. No se pudo confirmar si GitHub aceptó el archivo: {verify_error}"
+                        ));
+                    }
+                    Err(_) => {}
+                }
+                if attempt < MAX_ATTEMPTS {
+                    std::thread::sleep(Duration::from_secs(2_u64.pow(attempt as u32)));
+                }
+            }
+        }
+    }
+    Err(format!(
+        "No se pudo confirmar la carga de {name} después de {MAX_ATTEMPTS} intentos: {last_error}"
+    ))
 }
 
 fn publish_github_release(token: &str, release_id: u64, series_name: &str, version: &str) -> Result<(), String> {
@@ -1060,6 +1182,15 @@ mod tests {
         ));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn release_upload_retry_policy_retries_throttling_and_server_errors_only() {
+        assert!(retryable_upload_status(reqwest::StatusCode::TOO_MANY_REQUESTS));
+        assert!(retryable_upload_status(reqwest::StatusCode::BAD_GATEWAY));
+        assert!(retryable_upload_status(reqwest::StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(!retryable_upload_status(reqwest::StatusCode::FORBIDDEN));
+        assert!(!retryable_upload_status(reqwest::StatusCode::UNPROCESSABLE_ENTITY));
     }
 
     #[test]

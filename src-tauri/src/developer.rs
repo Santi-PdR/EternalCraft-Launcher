@@ -54,7 +54,7 @@ impl Drop for PublishLease {
         let developer = self.app.state::<GitHubDeveloper>();
         if let Ok(mut state) = developer.0.lock() {
             state.publish_active = false;
-        }
+        };
     }
 }
 

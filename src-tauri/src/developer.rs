@@ -137,14 +137,37 @@ struct GitHubUser {
 }
 
 #[derive(Deserialize)]
-struct RepositoryAccess {
-    permissions: Option<RepositoryPermissions>,
-}
-
-#[derive(Deserialize)]
 struct RepositoryPermissions {
     push: Option<bool>,
     admin: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct UserInstallationsResponse {
+    installations: Vec<GitHubInstallation>,
+}
+
+#[derive(Deserialize)]
+struct GitHubInstallation {
+    id: u64,
+    account: GitHubAccount,
+    permissions: BTreeMap<String, String>,
+}
+
+#[derive(Deserialize)]
+struct GitHubAccount {
+    login: String,
+}
+
+#[derive(Deserialize)]
+struct InstallationRepositoriesResponse {
+    repositories: Vec<InstallationRepository>,
+}
+
+#[derive(Deserialize)]
+struct InstallationRepository {
+    full_name: String,
+    permissions: Option<RepositoryPermissions>,
 }
 
 impl GitHubDeveloper {
@@ -448,29 +471,87 @@ fn get_github_user(access_token: &str) -> Result<GitHubUser, String> {
         .map_err(|error| format!("GitHub devolvió una cuenta inválida: {error}"))
 }
 
+fn installation_has_contents_write(permissions: &BTreeMap<String, String>) -> bool {
+    permissions
+        .get("contents")
+        .is_some_and(|permission| permission.eq_ignore_ascii_case("write"))
+}
+
+fn repository_permissions_allow_write(permissions: Option<RepositoryPermissions>) -> bool {
+    permissions.is_some_and(|permissions| {
+        permissions.push == Some(true) || permissions.admin == Some(true)
+    })
+}
+
 fn ensure_repository_write_access(access_token: &str) -> Result<(), String> {
     let client = http::client().map_err(|error| error.to_string())?;
-    let response = client
-        .get(format!("{GITHUB_API}/repos/{PUBLISH_REPOSITORY}"))
-        .bearer_auth(access_token)
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .header("User-Agent", "EternalCraft-Launcher")
-        .send()
-        .map_err(|error| format!("No se pudo comprobar el acceso al repositorio: {error}"))?;
-    if !response.status().is_success() {
-        return Err("La GitHub App no tiene acceso instalado al repositorio EternalCraft-Launcher".into());
+    let mut installations = Vec::new();
+    for page in 1..=10 {
+        let response = client
+            .get(format!("{GITHUB_API}/user/installations?per_page=100&page={page}"))
+            .bearer_auth(access_token)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", "EternalCraft-Launcher")
+            .send()
+            .map_err(|error| format!("No se pudieron validar las instalaciones de la GitHub App: {error}"))?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "GitHub no pudo validar la instalación de la App ({})",
+                response.status()
+            ));
+        }
+        let result: UserInstallationsResponse = response
+            .json()
+            .map_err(|error| format!("GitHub devolvió instalaciones inválidas: {error}"))?;
+        let count = result.installations.len();
+        installations.extend(result.installations);
+        if count < 100 {
+            break;
+        }
     }
-    let access: RepositoryAccess = response
-        .json()
-        .map_err(|error| format!("GitHub devolvió permisos de repositorio inválidos: {error}"))?;
-    let can_write = access
-        .permissions
-        .is_some_and(|permissions| permissions.push == Some(true) || permissions.admin == Some(true));
-    if !can_write {
-        return Err("Tu cuenta no tiene permiso de escritura en EternalCraft-Launcher".into());
+
+    for installation in installations.into_iter().filter(|installation| {
+        installation.account.login.eq_ignore_ascii_case("Santi-PdR")
+            && installation_has_contents_write(&installation.permissions)
+    }) {
+        for page in 1..=10 {
+            let response = client
+                .get(format!(
+                    "{GITHUB_API}/user/installations/{}/repositories?per_page=100&page={page}",
+                    installation.id
+                ))
+                .bearer_auth(access_token)
+                .header("Accept", "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .header("User-Agent", "EternalCraft-Launcher")
+                .send()
+                .map_err(|error| format!("No se pudo comprobar el acceso de la GitHub App al repositorio: {error}"))?;
+            if !response.status().is_success() {
+                return Err(format!(
+                    "GitHub no pudo comprobar los repositorios de la instalación ({})",
+                    response.status()
+                ));
+            }
+            let result: InstallationRepositoriesResponse = response
+                .json()
+                .map_err(|error| format!("GitHub devolvió repositorios instalados inválidos: {error}"))?;
+            let count = result.repositories.len();
+            if let Some(repository) = result.repositories.into_iter().find(|repository| {
+                repository.full_name.eq_ignore_ascii_case(PUBLISH_REPOSITORY)
+            }) {
+                if repository_permissions_allow_write(repository.permissions) {
+                    return Ok(());
+                }
+                return Err("Tu cuenta no tiene permiso de escritura en EternalCraft-Launcher".into());
+            }
+            if count < 100 {
+                break;
+            }
+        }
     }
-    Ok(())
+
+    Err("Instala la GitHub App con permiso Contents: Read and write únicamente en Santi-PdR/EternalCraft-Launcher.".into())
 }
 
 #[tauri::command]
@@ -979,6 +1060,33 @@ mod tests {
         ));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn github_developer_access_requires_contents_write_permission() {
+        let mut permissions = BTreeMap::new();
+        permissions.insert("contents".into(), "write".into());
+        assert!(installation_has_contents_write(&permissions));
+        permissions.insert("contents".into(), "read".into());
+        assert!(!installation_has_contents_write(&permissions));
+        assert!(!installation_has_contents_write(&BTreeMap::new()));
+    }
+
+    #[test]
+    fn github_developer_access_requires_user_write_on_installed_repository() {
+        assert!(repository_permissions_allow_write(Some(RepositoryPermissions {
+            push: Some(true),
+            admin: Some(false),
+        })));
+        assert!(repository_permissions_allow_write(Some(RepositoryPermissions {
+            push: Some(false),
+            admin: Some(true),
+        })));
+        assert!(!repository_permissions_allow_write(Some(RepositoryPermissions {
+            push: Some(false),
+            admin: Some(false),
+        })));
+        assert!(!repository_permissions_allow_write(None));
     }
 
     #[test]

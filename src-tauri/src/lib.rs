@@ -244,7 +244,7 @@ fn detect_background_format(header: &[u8]) -> Option<BackgroundFormat> {
 }
 
 fn is_valid_theme(theme_id: &str) -> bool {
-    matches!(theme_id, "series" | "siege" | "ghouls")
+    matches!(theme_id, "series" | "siege" | "ghouls" | "light")
 }
 
 fn is_safe_background_filename(file_name: &str) -> bool {
@@ -2716,6 +2716,7 @@ mod tests {
         assert!(is_valid_theme("series"));
         assert!(is_valid_theme("siege"));
         assert!(is_valid_theme("ghouls"));
+        assert!(is_valid_theme("light"));
         assert!(!is_valid_theme("developer"));
         assert!(is_safe_background_filename("background-123.png"));
         assert!(!is_safe_background_filename("../background-123.png"));

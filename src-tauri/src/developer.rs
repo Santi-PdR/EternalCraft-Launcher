@@ -195,8 +195,8 @@ pub(super) fn set_github_app_client_id(
     let mut settings = read_settings(&app)?;
     settings.github_app_client_id = Some(client_id.to_string());
     write_settings(&app, &settings)?;
-    let mut auth = app
-        .state::<GitHubDeveloper>()
+    let developer = app.state::<GitHubDeveloper>();
+    let mut auth = developer
         .0
         .lock()
         .map_err(|_| "El estado de autorización GitHub quedó bloqueado".to_string())?;
@@ -387,8 +387,8 @@ pub(super) fn github_developer_status(app: AppHandle) -> DeveloperLoginStatus {
 
 #[tauri::command]
 pub(super) fn logout_github_developer(app: AppHandle) -> Result<DeveloperLoginStatus, String> {
-    let mut state = app
-        .state::<GitHubDeveloper>()
+    let developer = app.state::<GitHubDeveloper>();
+    let mut state = developer
         .0
         .lock()
         .map_err(|_| "El estado de autorización GitHub quedó bloqueado".to_string())?;
@@ -626,7 +626,7 @@ fn publish_pack_release_sync(
     };
     let manifest_bytes = serde_json::to_vec_pretty(&manifest)
         .map_err(|error| format!("No se pudo generar el manifiesto: {error}"))?;
-    put_repository_file(&access_token, &format!("packs/{series_id}/manifest.json"), &manifest_bytes, &format!("Publish {series.name} {version} manifest"))?;
+    put_repository_file(&access_token, &format!("packs/{series_id}/manifest.json"), &manifest_bytes, &format!("Publish {} {version} manifest", series.name))?;
 
     if release.draft {
         publish_github_release(&access_token, release.id, &series.name, &version)?;

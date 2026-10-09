@@ -377,7 +377,7 @@ fn refresh_runtime_catalog() -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn mark_runtime_series_available(series_id: &str) -> Result<(), String> {
+fn mark_runtime_series_available(series_id: &str) -> Result<(), String> {
     let mut catalog = current_catalog()?;
     let series = catalog.series.iter_mut().find(|series| series.id == series_id)
         .ok_or_else(|| format!("La serie {series_id} ya no existe en el catálogo"))?;

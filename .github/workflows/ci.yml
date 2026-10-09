@@ -75,7 +75,7 @@ jobs:
           printf '%s\n' "$deb_entries" | grep -E '(^|/)usr/share/applications/[^/]+\.desktop$'
           rpm_contents="$(rpm -qpl "${rpm[0]}")"
           printf '%s\n' "$rpm_contents" | grep -E '^/usr/share/applications/[^/]+\.desktop$'
-          rpm_executables="$(rpm -qplv "${rpm[0]}" | grep -E '^-[rwxstST-]{9} .*x.* /' || true)"
+          rpm_executables="$(rpm -qplv "${rpm[0]}" | awk '$1 ~ /^-/ && $1 ~ /x/ {print}' || true)"
           [[ -n "$rpm_executables" ]] || { echo "RPM does not contain an executable file"; exit 1; }
           printf '%s\n' "$rpm_executables"
           extracted="$(mktemp -d)"

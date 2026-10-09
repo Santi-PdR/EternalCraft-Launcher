@@ -34,6 +34,14 @@
     "active": true,
     "category": "Game",
     "shortDescription": "Launcher oficial de EternalCraft",
+    "linux": {
+      "deb": {
+        "desktopTemplate": "linux/eternalcraft.desktop.hbs"
+      },
+      "rpm": {
+        "desktopTemplate": "linux/eternalcraft.desktop.hbs"
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

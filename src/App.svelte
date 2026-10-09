@@ -245,7 +245,7 @@
     error = '';
     try {
       bootstrap = await invoke<Bootstrap>('logout_microsoft');
-      notice = 'Se quitó la cuenta y su credencial del llavero del sistema';
+      notice = 'Se cerró la sesión; las credenciales solo estaban en la memoria de esta ejecución';
     } catch (reason) {
       error = String(reason);
     } finally {

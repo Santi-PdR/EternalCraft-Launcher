@@ -49,13 +49,39 @@ jobs:
       - if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf libfuse2 rpm
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf libfuse2 rpm xvfb
       - run: npm ci
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
       - if: runner.os == 'Linux'
         run: npm run tauri -- build --bundles deb,rpm
       - if: runner.os == 'Windows'
         run: npm run tauri -- build --bundles nsis
+      - name: Smoke test Linux launcher startup
+        if: runner.os == 'Linux'
+        run: |
+          set +e
+          xvfb-run -a timeout --signal=TERM --kill-after=5s 30s ./src-tauri/target/release/eternalcraft-launcher
+          status=$?
+          if [[ $status -ne 124 && $status -ne 137 && $status -ne 143 ]]; then
+            echo "Launcher did not remain open during the startup smoke test (exit $status)"
+            exit 1
+          fi
+          echo "Launcher remained open for 30 seconds; Minecraft was not started."
+      - name: Smoke test Windows launcher startup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $launcher = Resolve-Path "src-tauri/target/release/eternalcraft-launcher.exe"
+          $process = Start-Process -FilePath $launcher.Path -PassThru
+          try {
+            Start-Sleep -Seconds 15
+            $process.Refresh()
+            if ($process.HasExited) { throw "Launcher exited during the startup smoke test with code $($process.ExitCode)" }
+            Write-Output "Launcher remained open for 15 seconds; Minecraft was not started."
+          } finally {
+            $process.Refresh()
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+          }
       - name: Verify Linux packages
         if: runner.os == 'Linux'
         run: |

@@ -72,7 +72,7 @@ jobs:
           file "${deb[0]}" | grep -F "Debian binary package"
           file "${rpm[0]}" | grep -F "RPM"
           deb_contents="$(dpkg-deb --contents "${deb[0]}")"
-          printf '%s\n' "$deb_contents" | grep -E '\./usr/share/applications/[^/]+\.desktop$'
+          printf '%s\n' "$deb_contents" | grep -E '[[:space:]]\./usr/share/applications/[^/]+\.desktop$'
           rpm_contents="$(rpm -qpl "${rpm[0]}")"
           printf '%s\n' "$rpm_contents" | grep -E '^/usr/share/applications/[^/]+\.desktop$'
           rpm_executables="$(rpm -qplv "${rpm[0]}" | grep -E '^-[rwxstST-]{9} .*x.* /' || true)"

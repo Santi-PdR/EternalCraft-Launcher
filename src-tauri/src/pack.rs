@@ -70,9 +70,14 @@ fn valid_file_name(name: &str) -> bool {
         && name.to_ascii_lowercase().ends_with(".jar")
         && name != "."
         && name != ".."
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'+'))
+        && !name.starts_with('.')
+        && !name.starts_with(' ')
+        && !name.ends_with(' ')
+        && !name.ends_with('.')
+        && name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'.' | b'_' | b'-' | b'+' | b' ' | b'(' | b')' | b'[' | b']' | b'\'')
+        })
 }
 
 fn validate_manifest(manifest: &PackManifest, expected_series: &str) -> Result<(), String> {

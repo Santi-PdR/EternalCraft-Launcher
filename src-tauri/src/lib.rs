@@ -24,6 +24,7 @@ use mc_launcher_core::{
 };
 use serde::{Deserialize, Serialize};
 use sysinfo::System;
+use std::sync::{OnceLock, RwLock};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
@@ -37,6 +38,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 
 mod pack;
+mod developer;
 
 const CATALOG_JSON: &str = include_str!("../../resources/series/catalog.json");
 
@@ -61,12 +63,15 @@ enum PackStatus {
     Available,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Catalog {
     schema_version: u32,
     series: Vec<Series>,
 }
+
+static RUNTIME_CATALOG: OnceLock<RwLock<Option<Catalog>>> = OnceLock::new();
+static RUNTIME_CATALOG_ONLINE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -84,6 +89,8 @@ struct Settings {
     background_file: Option<String>,
     #[serde(default)]
     microsoft_client_id: Option<String>,
+    #[serde(default)]
+    github_app_client_id: Option<String>,
     #[serde(default)]
     memory_limit_mb: Option<u32>,
 }
@@ -135,6 +142,7 @@ struct MinecraftStatus {
 struct Bootstrap {
     series: Vec<Series>,
     active_series_id: String,
+    catalog_online: bool,
     game_directories: BTreeMap<String, String>,
     suggested_directories: BTreeMap<String, String>,
     config_directory: String,
@@ -146,6 +154,8 @@ struct Bootstrap {
     managed_game_directories: BTreeMap<String, String>,
     installed_profiles: BTreeMap<String, String>,
     microsoft_client_id: Option<String>,
+    github_app_client_id: Option<String>,
+    developer_github_user: Option<String>,
     microsoft_profile: Option<MicrosoftProfile>,
     memory: MemoryStatus,
 }
@@ -303,16 +313,79 @@ fn clean_staged_backgrounds(directory: &Path) -> Result<(), String> {
 fn parse_catalog() -> Result<Catalog, String> {
     let catalog: Catalog = serde_json::from_str(CATALOG_JSON)
         .map_err(|error| format!("El catálogo integrado no es válido: {error}"))?;
+    validate_catalog(catalog)
+}
+
+fn validate_catalog(catalog: Catalog) -> Result<Catalog, String> {
     if catalog.schema_version != 1 || catalog.series.is_empty() {
         return Err("La versión del catálogo no es compatible o no contiene series".into());
     }
     let mut ids = std::collections::BTreeSet::new();
     for series in &catalog.series {
-        if series.id.is_empty() || !ids.insert(series.id.as_str()) {
+        if series.id.is_empty()
+            || series.id.len() > 64
+            || !series.id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            || !ids.insert(series.id.as_str())
+        {
             return Err("El catálogo contiene identificadores de serie vacíos o duplicados".into());
         }
     }
     Ok(catalog)
+}
+
+fn current_catalog() -> Result<Catalog, String> {
+    if let Some(catalog) = RUNTIME_CATALOG
+        .get_or_init(|| RwLock::new(None))
+        .read()
+        .map_err(|_| "El catálogo local quedó bloqueado".to_string())?
+        .clone()
+    {
+        return Ok(catalog);
+    }
+    parse_catalog()
+}
+
+fn refresh_runtime_catalog() -> Result<(), String> {
+    if RUNTIME_CATALOG.get_or_init(|| RwLock::new(None)).read()
+        .map_err(|_| "El catálogo local quedó bloqueado".to_string())?.is_some() {
+        return Ok(());
+    }
+    const CATALOG_URL: &str = "https://raw.githubusercontent.com/Santi-PdR/EternalCraft-Launcher/main/resources/series/catalog.json";
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .user_agent("EternalCraft-Launcher")
+        .build()
+        .map_err(|error| format!("No se pudo preparar la conexión del catálogo: {error}"))?;
+    let response = client.get(CATALOG_URL).send()
+        .map_err(|error| format!("No se pudo consultar el catálogo de EternalCraft: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!("GitHub respondió {} al consultar el catálogo", response.status()));
+    }
+    if response.content_length().is_some_and(|length| length > 1024 * 1024) {
+        return Err("El catálogo remoto excede 1 MiB".into());
+    }
+    let bytes = response.bytes().map_err(|error| format!("No se pudo leer el catálogo remoto: {error}"))?;
+    if bytes.len() > 1024 * 1024 {
+        return Err("El catálogo remoto excede 1 MiB".into());
+    }
+    let catalog: Catalog = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("El catálogo remoto no es válido: {error}"))?;
+    let catalog = validate_catalog(catalog)?;
+    *RUNTIME_CATALOG.get_or_init(|| RwLock::new(None)).write()
+        .map_err(|_| "El catálogo local quedó bloqueado".to_string())? = Some(catalog);
+    RUNTIME_CATALOG_ONLINE.store(true, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
+}
+
+pub(super) fn mark_runtime_series_available(series_id: &str) -> Result<(), String> {
+    let mut catalog = current_catalog()?;
+    let series = catalog.series.iter_mut().find(|series| series.id == series_id)
+        .ok_or_else(|| format!("La serie {series_id} ya no existe en el catálogo"))?;
+    series.pack_status = PackStatus::Available;
+    *RUNTIME_CATALOG.get_or_init(|| RwLock::new(None)).write()
+        .map_err(|_| "El catálogo local quedó bloqueado".to_string())? = Some(catalog);
+    RUNTIME_CATALOG_ONLINE.store(true, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -356,7 +429,7 @@ fn valid_game_dir(path: &Path) -> Result<PathBuf, String> {
 }
 
 fn managed_game_dir(app: &AppHandle, series_id: &str) -> Result<PathBuf, String> {
-    let catalog = parse_catalog()?;
+    let catalog = current_catalog()?;
     if !catalog.series.iter().any(|series| series.id == series_id) {
         return Err("La serie solicitada no existe en el catálogo".into());
     }
@@ -1318,7 +1391,7 @@ fn with_memory_arguments(
 }
 
 fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
-    let catalog = parse_catalog()?;
+    let catalog = current_catalog()?;
     let settings = read_settings(app)?;
     let memory = memory_status(&settings);
     let default_series = catalog
@@ -1400,6 +1473,7 @@ fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
     Ok(Bootstrap {
         series: catalog.series,
         active_series_id: active,
+        catalog_online: RUNTIME_CATALOG_ONLINE.load(std::sync::atomic::Ordering::Relaxed),
         game_directories: directories,
         suggested_directories: suggested_directories(),
         config_directory,
@@ -1414,6 +1488,8 @@ fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
         managed_game_directories,
         installed_profiles,
         microsoft_client_id: settings.microsoft_client_id,
+        github_app_client_id: settings.github_app_client_id,
+        developer_github_user: app.state::<developer::GitHubDeveloper>().username(),
         microsoft_profile,
         memory,
     })
@@ -1565,7 +1641,8 @@ fn clear_background(app: AppHandle) -> Result<Bootstrap, String> {
 }
 
 #[tauri::command]
-fn get_bootstrap(app: AppHandle) -> Result<Bootstrap, String> {
+async fn get_bootstrap(app: AppHandle) -> Result<Bootstrap, String> {
+    let _ = tauri::async_runtime::spawn_blocking(move || refresh_runtime_catalog()).await;
     make_bootstrap(&app)
 }
 
@@ -1596,7 +1673,7 @@ async fn sync_official_pack(
     app: AppHandle,
     series_id: String,
 ) -> Result<pack::PackSyncResult, String> {
-    let series = parse_catalog()?
+    let series = current_catalog()?
         .series
         .into_iter()
         .find(|series| series.id == series_id)
@@ -1652,7 +1729,7 @@ fn resolve_series_game_directory(
     app: &AppHandle,
     series_id: &str,
 ) -> Result<Option<PathBuf>, String> {
-    let series = parse_catalog()?
+    let series = current_catalog()?
         .series
         .into_iter()
         .find(|series| series.id == series_id)
@@ -1886,7 +1963,7 @@ fn get_minecraft_status(app: AppHandle) -> Result<MinecraftStatus, String> {
 
 #[tauri::command]
 fn launch_minecraft(app: AppHandle, series_id: String) -> Result<MinecraftStatus, String> {
-    let series = parse_catalog()?
+    let series = current_catalog()?
         .series
         .into_iter()
         .find(|series| series.id == series_id)
@@ -2136,7 +2213,7 @@ fn reset_java_selection(app: AppHandle) -> Result<Bootstrap, String> {
 
 #[tauri::command]
 async fn install_forge_base(app: AppHandle, series_id: String) -> Result<Bootstrap, String> {
-    let series = parse_catalog()?
+    let series = current_catalog()?
         .series
         .into_iter()
         .find(|series| series.id == series_id)
@@ -2199,7 +2276,7 @@ async fn install_forge_base(app: AppHandle, series_id: String) -> Result<Bootstr
 
 #[tauri::command]
 fn set_active_series(app: AppHandle, series_id: String) -> Result<Bootstrap, String> {
-    let catalog = parse_catalog()?;
+    let catalog = current_catalog()?;
     if !catalog.series.iter().any(|series| series.id == series_id) {
         return Err("La serie solicitada no existe en el catálogo".into());
     }
@@ -2211,7 +2288,7 @@ fn set_active_series(app: AppHandle, series_id: String) -> Result<Bootstrap, Str
 
 #[tauri::command]
 async fn select_game_directory(app: AppHandle, series_id: String) -> Result<Bootstrap, String> {
-    let catalog = parse_catalog()?;
+    let catalog = current_catalog()?;
     if !catalog.series.iter().any(|series| series.id == series_id) {
         return Err("La serie solicitada no existe en el catálogo".into());
     }
@@ -2238,7 +2315,7 @@ async fn select_game_directory(app: AppHandle, series_id: String) -> Result<Boot
 
 #[tauri::command]
 fn link_detected_directory(app: AppHandle, series_id: String) -> Result<Bootstrap, String> {
-    let catalog = parse_catalog()?;
+    let catalog = current_catalog()?;
     if !catalog.series.iter().any(|series| series.id == series_id) {
         return Err("La serie solicitada no existe en el catálogo".into());
     }
@@ -2260,6 +2337,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AuthSession::default())
         .manage(MinecraftProcess::default())
+        .manage(developer::GitHubDeveloper::default())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             get_bootstrap,
@@ -2282,6 +2360,14 @@ pub fn run() {
             set_microsoft_client_id,
             login_microsoft,
             logout_microsoft,
+            developer::set_github_app_client_id,
+            developer::begin_github_developer_login,
+            developer::poll_github_developer_login,
+            developer::github_developer_status,
+            developer::logout_github_developer,
+            developer::choose_pack_source_directory,
+            developer::refresh_pack_source_preview,
+            developer::publish_pack_release,
             get_minecraft_status,
             set_memory_limit,
             reset_memory_limit,
@@ -2583,6 +2669,7 @@ mod tests {
             theme_id: Some("ghouls".into()),
             background_file: Some("background-123.webp".into()),
             microsoft_client_id: Some("12345678-1234-4234-8234-123456789abc".into()),
+            github_app_client_id: Some("Iv23liAbCdEfGh123456".into()),
             memory_limit_mb: Some(4096),
         };
         let encoded = serde_json::to_vec(&settings).expect("settings serialize");
@@ -2597,6 +2684,7 @@ mod tests {
             Some("background-123.webp")
         );
         assert_eq!(decoded.microsoft_client_id, settings.microsoft_client_id);
+        assert_eq!(decoded.github_app_client_id, settings.github_app_client_id);
         assert_eq!(decoded.memory_limit_mb, Some(4096));
     }
 

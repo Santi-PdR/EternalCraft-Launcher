@@ -13,6 +13,7 @@ export interface Series {
 export interface Bootstrap {
   series: Series[];
   activeSeriesId: string;
+  catalogOnline: boolean;
   gameDirectories: Record<string, string>;
   suggestedDirectories: Record<string, string>;
   configDirectory: string;
@@ -24,6 +25,8 @@ export interface Bootstrap {
   managedGameDirectories: Record<string, string>;
   installedProfiles: Record<string, string>;
   microsoftClientId: string | null;
+  githubAppClientId: string | null;
+  developerGithubUser: string | null;
   microsoftProfile: { username: string; uuid: string } | null;
   memory: MemoryStatus;
 }
@@ -42,6 +45,36 @@ export interface MinecraftStatus {
   pid: number | null;
   exitCode: number | null;
   exitSuccess: boolean | null;
+}
+
+export interface DeveloperLoginStatus {
+  status: 'pending' | 'authorized' | 'signedOut' | 'expired' | 'denied' | 'failed';
+  username: string | null;
+  userCode: string | null;
+  verificationUri: string | null;
+  expiresInSeconds: number | null;
+  intervalSeconds: number | null;
+  message: string | null;
+}
+
+export interface PackSourceFile {
+  name: string;
+  sizeBytes: number;
+  sha256: string;
+}
+
+export interface PackSourcePreview {
+  seriesId: string;
+  directory: string;
+  files: PackSourceFile[];
+  totalBytes: number;
+}
+
+export interface PackPublishProgress {
+  seriesId: string;
+  completedFiles: number;
+  totalFiles: number;
+  message: string;
 }
 
 export interface JavaStatus {

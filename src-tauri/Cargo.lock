@@ -974,6 +974,7 @@ dependencies = [
  "sha2 0.10.9",
  "atomic-write-file",
  "mc-launcher-core",
+ "reqwest 0.13.5",
  "serde",
  "serde_json",
  "tauri",

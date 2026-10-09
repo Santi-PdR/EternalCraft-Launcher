@@ -56,6 +56,38 @@ jobs:
         run: npm run tauri -- build --bundles deb,rpm
       - if: runner.os == 'Windows'
         run: npm run tauri -- build --bundles nsis
+      - name: Verify Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          deb=(src-tauri/target/release/bundle/deb/*.deb)
+          rpm=(src-tauri/target/release/bundle/rpm/*.rpm)
+          [[ ${#deb[@]} -eq 1 ]] || { echo "Expected one .deb package, found ${#deb[@]}"; exit 1; }
+          [[ ${#rpm[@]} -eq 1 ]] || { echo "Expected one .rpm package, found ${#rpm[@]}"; exit 1; }
+          for package in "${deb[0]}" "${rpm[0]}"; do
+            [[ -s "$package" ]] || { echo "Package is empty: $package"; exit 1; }
+            file "$package"
+          done
+          file "${deb[0]}" | grep -F "Debian binary package"
+          file "${rpm[0]}" | grep -F "RPM"
+      - name: Verify Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem "src-tauri/target/release/bundle/nsis" -Filter "*setup.exe" -File)
+          if ($installers.Count -ne 1) { throw "Expected one NSIS setup executable, found $($installers.Count)" }
+          $installer = $installers[0]
+          if ($installer.Length -lt 1MB) { throw "NSIS setup executable is unexpectedly small: $($installer.Length) bytes" }
+          $stream = [System.IO.File]::OpenRead($installer.FullName)
+          try {
+            $header = New-Object byte[] 2
+            [void]$stream.Read($header, 0, 2)
+          } finally {
+            $stream.Dispose()
+          }
+          if ($header[0] -ne 0x4d -or $header[1] -ne 0x5a) { throw "NSIS setup is not a Windows PE executable" }
+          Write-Output "$($installer.Name): $($installer.Length) bytes; PE header valid"
       - uses: actions/upload-artifact@v4
         if: success()
         with:

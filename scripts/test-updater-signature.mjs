@@ -45,7 +45,9 @@ try {
 
   const publicKey = fs.readFileSync(publicKeyPath, 'utf8');
   fs.writeFileSync(configPath, JSON.stringify({
-    plugins: { updater: { pubkey: Buffer.from(publicKey, 'utf8').toString('base64') } }
+    // Tauri's signer already writes the updater public key in Base64 form.
+    // Match tauri.conf.json instead of encoding that value a second time.
+    plugins: { updater: { pubkey: publicKey.trim() } }
   }));
   const verifierEnv = {
     ...process.env,

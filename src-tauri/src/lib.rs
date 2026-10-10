@@ -93,6 +93,8 @@ struct Settings {
     microsoft_client_id: Option<String>,
     #[serde(default)]
     memory_limit_mb: Option<u32>,
+    #[serde(default)]
+    offline_username: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -157,6 +159,7 @@ struct Bootstrap {
     github_developer_enabled: bool,
     developer_github_user: Option<String>,
     microsoft_profile: Option<MicrosoftProfile>,
+    offline_username: Option<String>,
     memory: MemoryStatus,
 }
 
@@ -1566,6 +1569,7 @@ fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
         github_developer_enabled: developer::github_app_client_id_configured(),
         developer_github_user: app.state::<developer::GitHubDeveloper>().username(),
         microsoft_profile,
+        offline_username: settings.offline_username,
         memory,
     })
 }
@@ -1957,6 +1961,37 @@ fn logout_microsoft(app: AppHandle) -> Result<Bootstrap, String> {
     make_bootstrap(&app)
 }
 
+fn valid_offline_username(username: &str) -> bool {
+    (3..=16).contains(&username.len())
+        && username
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+#[tauri::command]
+fn login_offline(app: AppHandle, username: String) -> Result<Bootstrap, String> {
+    let username = username.trim();
+    if !valid_offline_username(username) {
+        return Err("El nombre local debe tener entre 3 y 16 caracteres: letras ASCII, números o guion bajo".into());
+    }
+    let mut settings = read_settings(&app)?;
+    settings.offline_username = Some(username.to_string());
+    write_settings(&app, &settings)?;
+    *app.state::<AuthSession>()
+        .0
+        .lock()
+        .map_err(|_| "La sesión Microsoft quedó bloqueada".to_string())? = None;
+    make_bootstrap(&app)
+}
+
+#[tauri::command]
+fn logout_offline(app: AppHandle) -> Result<Bootstrap, String> {
+    let mut settings = read_settings(&app)?;
+    settings.offline_username = None;
+    write_settings(&app, &settings)?;
+    make_bootstrap(&app)
+}
+
 #[tauri::command]
 fn set_memory_limit(app: AppHandle, memory_mb: u32) -> Result<Bootstrap, String> {
     let mut settings = read_settings(&app)?;
@@ -2038,27 +2073,41 @@ fn launch_minecraft(app: AppHandle, series_id: String) -> Result<MinecraftStatus
         return Err("Esta serie todavía no tiene un pack oficial publicado y no se puede iniciar como serie jugable.".into());
     }
     let settings = read_settings(&app)?;
-    let mut session = app
+    let session = app
         .state::<AuthSession>()
         .0
         .lock()
         .map_err(|_| "La sesión Microsoft quedó bloqueada".to_string())?
-        .clone()
-        .ok_or_else(|| "Inicia sesión con una cuenta Microsoft propietaria de Minecraft antes de jugar.".to_string())?;
-    let client_id = configured_microsoft_client_id()
-        .ok_or_else(|| "El inicio de sesión Microsoft no está habilitado en esta compilación.".to_string())?;
-    let account = complete_refresh(client_id, None, &session.refresh_token)
-        .map_err(|error| format!("La sesión Microsoft necesita renovarse. Vuelve a iniciar sesión: {error}"))?;
-    session.profile = MicrosoftProfile {
-        username: account.name.clone(),
-        uuid: account.id.clone(),
+        .clone();
+    let account = if let Some(mut session) = session {
+        let client_id = configured_microsoft_client_id()
+            .ok_or_else(|| "El inicio de sesión Microsoft no está habilitado en esta compilación.".to_string())?;
+        let account = complete_refresh(client_id, None, &session.refresh_token)
+            .map_err(|error| format!("La sesión Microsoft necesita renovarse. Vuelve a iniciar sesión: {error}"))?;
+        session.profile = MicrosoftProfile {
+            username: account.name.clone(),
+            uuid: account.id.clone(),
+        };
+        session.access_token = account.access_token.clone();
+        session.refresh_token = account.refresh_token.clone();
+        *app.state::<AuthSession>()
+            .0
+            .lock()
+            .map_err(|_| "La sesión Microsoft quedó bloqueada".to_string())? = Some(session);
+        Account::Microsoft {
+            username: account.name,
+            uuid: account.id,
+            access_token: account.access_token,
+        }
+    } else if let Some(username) = settings
+        .offline_username
+        .as_deref()
+        .filter(|username| valid_offline_username(username))
+    {
+        Account::offline(username)
+    } else {
+        return Err("Inicia sesión con Microsoft o configura un perfil local con nombre para jugar.".into());
     };
-    session.access_token = account.access_token.clone();
-    session.refresh_token = account.refresh_token.clone();
-    *app.state::<AuthSession>()
-        .0
-        .lock()
-        .map_err(|_| "La sesión Microsoft quedó bloqueada".to_string())? = Some(session);
     let game_dir = resolve_series_game_directory(&app, &series_id)?
         .ok_or_else(|| "Selecciona o instala la carpeta de juego de esta serie primero.".to_string())?;
     verify_forge_profile(&game_dir, &series)?;
@@ -2096,11 +2145,7 @@ fn launch_minecraft(app: AppHandle, series_id: String) -> Result<MinecraftStatus
         .build_launch_command_from_version(
             &version,
             LaunchOptions {
-                account: Account::Microsoft {
-                    username: account.name,
-                    uuid: account.id,
-                    access_token: account.access_token,
-                },
+                account,
                 java_executable: Some(java.executable.ok_or_else(|| "No se encontró el ejecutable de Java 17".to_string())?.into()),
                 game_directory: Some(game_dir.clone()),
                 launcher_name: "EternalCraft".into(),
@@ -2425,6 +2470,8 @@ pub fn run() {
             link_detected_directory,
             login_microsoft,
             logout_microsoft,
+            login_offline,
+            logout_offline,
             developer::begin_github_developer_login,
             developer::poll_github_developer_login,
             developer::github_developer_status,
@@ -2444,6 +2491,20 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn offline_username_accepts_minecraft_style_names() {
+        assert!(super::valid_offline_username("Santi_17"));
+        assert!(super::valid_offline_username("Abc"));
+        assert!(super::valid_offline_username("A123456789012345"));
+    }
+
+    #[test]
+    fn offline_username_rejects_invalid_names() {
+        for username in ["", "ab", "abcdefghijklmnopq", "two words", "name-1", "ñandú", "a.b"] {
+            assert!(!super::valid_offline_username(username), "unexpectedly accepted {username:?}");
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -2772,6 +2833,7 @@ mod tests {
             background_file: Some("background-123.webp".into()),
             microsoft_client_id: None,
             memory_limit_mb: Some(4096),
+            offline_username: Some("Player_17".into()),
         };
         let encoded = serde_json::to_vec(&settings).expect("settings serialize");
         let decoded: Settings = serde_json::from_slice(&encoded).expect("settings deserialize");
@@ -2785,6 +2847,7 @@ mod tests {
             Some("background-123.webp")
         );
         assert_eq!(decoded.memory_limit_mb, Some(4096));
+        assert_eq!(decoded.offline_username.as_deref(), Some("Player_17"));
     }
 
     #[test]

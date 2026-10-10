@@ -251,17 +251,15 @@
     let prepareInitialInstance = false;
     try {
       bootstrap = await invoke<Bootstrap>('get_bootstrap');
-      if (!localStorage.getItem('eternalcraft-welcome-v2')) {
-        const hasAccount = Boolean(bootstrap.microsoftProfile || bootstrap.accountMode === 'offline');
-        if (hasAccount) {
-          localStorage.setItem('eternalcraft-welcome-v1', 'done');
-        } else {
-          welcomeOpen = true;
-        }
-      }
+      const hasAccount = Boolean(bootstrap.microsoftProfile || bootstrap.accountMode === 'offline');
+      if (hasAccount) localStorage.setItem('eternalcraft-welcome-v2', 'done');
+      else if (!localStorage.getItem('eternalcraft-welcome-v2')) welcomeOpen = true;
+      // Prepare the launcher's own isolated game directory on first start. This
+      // does not launch Minecraft and does not ask the player to install Java:
+      // Forge's official metadata selects and provisions Java 17 automatically.
       prepareInitialInstance = Boolean(
-        (bootstrap.microsoftProfile || bootstrap.accountMode === 'offline') &&
-        !bootstrap.installedProfiles[bootstrap.activeSeriesId]
+        !bootstrap.installedProfiles[bootstrap.activeSeriesId] &&
+        !bootstrap.gameDirectories[bootstrap.activeSeriesId]
       );
       offlineUsernameDraft = bootstrap.offlineUsername ?? '';
       memoryDraft = bootstrap.memory.selectedMb;
@@ -534,7 +532,7 @@
   }
 
   async function installBase() {
-    if (!selected) return;
+    if (!selected || installingSeries !== null) return;
     const seriesId = selected.id;
     installingSeries = seriesId;
     installMessage = 'Iniciando la instalación verificada de Forge…';
@@ -740,6 +738,15 @@
       {#if activePage === 'home'}
         <section class="page home-page">
           <div class="page-heading"><div><span class="eyebrow">TU PRÓXIMA AVENTURA</span><h1>Elige tu mundo.</h1><p>Una biblioteca, distintas historias de EternalCraft.</p></div><span class="connection-pill"><i></i> Catálogo {bootstrap.catalogOnline ? 'actualizado' : 'sin conexión'}</span></div>
+
+          {#if !bootstrap.microsoftProfile && bootstrap.accountMode !== 'offline'}
+            <section class="account-setup-card" aria-labelledby="offline-profile-title">
+              <div><span class="eyebrow">ANTES DE JUGAR</span><h2 id="offline-profile-title">Elige tu perfil</h2><p>Inicia sesión con Microsoft o escribe un nick offline. La instancia y Java 17 se preparan automáticamente en segundo plano.</p></div>
+              <label class="account-name-field">Nick offline<input class="text-input" bind:value={offlineUsernameDraft} minlength="3" maxlength="16" autocomplete="nickname" placeholder="De 3 a 16 letras, números o _" /></label>
+              <div class="play-actions"><button class="button secondary" onclick={loginOffline} disabled={busy || !/^[A-Za-z0-9_]{3,16}$/.test(offlineUsernameDraft.trim())}>{busy ? 'Guardando…' : 'Usar este nick'}</button><button class="button secondary" onclick={loginMicrosoft} disabled={busy || !bootstrap.microsoftLoginAvailable}>{busy ? 'Abriendo…' : 'Iniciar sesión con Microsoft'}</button></div>
+              <small>El perfil offline no valida la propiedad del juego y solo funciona en servidores que permiten cuentas offline.</small>
+            </section>
+          {/if}
 
           <div class="hero-card" style:--hero-accent={themeAccent} style:--hero-background={backgroundUrl ? `url("${backgroundUrl}")` : 'none'}>
             <div class="hero-noise"></div><div class="hero-content">

@@ -1,7 +1,7 @@
 [package]
 name = "eternalcraft-launcher"
 default-run = "eternalcraft-launcher"
-version = "0.1.6"
+version = "0.1.7"
 description = "EternalCraft native game launcher"
 authors = ["EternalCraft"]
 edition = "2021"

@@ -982,6 +982,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-process",
  "tauri-plugin-updater",
+ "toml 1.1.7+spec-1.1.0",
  "zip 2.4.2",
 ]
 

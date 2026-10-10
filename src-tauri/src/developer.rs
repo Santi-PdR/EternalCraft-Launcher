@@ -92,6 +92,16 @@ pub(super) struct PackSourceFile {
     name: String,
     size_bytes: u64,
     sha256: String,
+    license: Option<String>,
+    license_status: PackLicenseStatus,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum PackLicenseStatus {
+    Recognized,
+    PermissionRequired,
+    Unknown,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -101,6 +111,7 @@ pub(super) struct PackSourcePreview {
     directory: String,
     files: Vec<PackSourceFile>,
     total_bytes: u64,
+    source_fingerprint: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -647,8 +658,11 @@ pub(super) async fn publish_pack_release(
     app: AppHandle,
     series_id: String,
     version: String,
+    confirmed_source_fingerprint: String,
 ) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || publish_pack_release_sync(app, series_id, version))
+    tauri::async_runtime::spawn_blocking(move || {
+        publish_pack_release_sync(app, series_id, version, confirmed_source_fingerprint)
+    })
         .await
         .map_err(|error| format!("La tarea de publicación se interrumpió: {error}"))?
 }
@@ -657,6 +671,7 @@ fn publish_pack_release_sync(
     app: AppHandle,
     series_id: String,
     version: String,
+    confirmed_source_fingerprint: String,
 ) -> Result<String, String> {
     let _publish_lease = PublishLease::acquire(&app)?;
     let access_token = app.state::<GitHubDeveloper>().access_token()?;
@@ -679,6 +694,9 @@ fn publish_pack_release_sync(
         .cloned()
         .ok_or_else(|| "Selecciona primero la carpeta fuente de mods de esta serie".to_string())?;
     let source = scan_pack_source(&source, &series_id)?;
+    if source.source_fingerprint != confirmed_source_fingerprint {
+        return Err("La carpeta o sus JAR cambiaron desde la revisión de licencias. Vuelve a verificar la fuente y confirma otra vez.".into());
+    }
     if source.files.len() > MAX_GITHUB_ASSETS_PER_RELEASE {
         return Err(format!("GitHub permite hasta {MAX_GITHUB_ASSETS_PER_RELEASE} assets por release"));
     }
@@ -1210,6 +1228,8 @@ fn scan_pack_source(path: &Path, series_id: &str) -> Result<PackSourcePreview, S
         }
         validate_forge_mod_archive(&jar_path)
             .map_err(|error| format!("{name}: {error}"))?;
+        let license = read_pack_license(&jar_path);
+        let license_status = pack_license_status(license.as_deref());
         let digest = sha256_file(&jar_path)?;
         let after = fs::metadata(&jar_path)
             .map_err(|error| format!("No se pudo verificar el origen de {name}: {error}"))?;
@@ -1220,18 +1240,98 @@ fn scan_pack_source(path: &Path, series_id: &str) -> Result<PackSourcePreview, S
             name: name.to_string(),
             size_bytes: before.len(),
             sha256: digest,
+            license,
+            license_status,
         });
     }
     files.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
     if files.is_empty() {
         return Err("La carpeta elegida no contiene archivos JAR oficiales en su nivel raíz".into());
     }
+    let source_fingerprint = pack_source_fingerprint(&files);
     Ok(PackSourcePreview {
         series_id: series_id.to_string(),
         directory: directory.to_string_lossy().into_owned(),
         files,
         total_bytes,
+        source_fingerprint,
     })
+}
+
+fn pack_source_fingerprint(files: &[PackSourceFile]) -> String {
+    let mut hasher = sha2::Sha256::new();
+    for file in files {
+        hasher.update(file.name.to_ascii_lowercase().as_bytes());
+        hasher.update([0]);
+        hasher.update(file.sha256.as_bytes());
+        hasher.update([0]);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn read_pack_license(path: &Path) -> Option<String> {
+    let file = fs::File::open(path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    let index = archive
+        .file_names()
+        .position(|name| name.eq_ignore_ascii_case("META-INF/mods.toml"))?;
+    let mut metadata = archive.by_index(index).ok()?;
+    let mut contents = String::new();
+    metadata
+        .by_ref()
+        .take(256 * 1024)
+        .read_to_string(&mut contents)
+        .ok()?;
+    let document: toml::Value = toml::from_str(&contents).ok()?;
+    document
+        .get("license")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|license| !license.is_empty())
+        .map(str::to_string)
+}
+
+fn pack_license_status(license: Option<&str>) -> PackLicenseStatus {
+    let Some(license) = license.map(str::trim).filter(|value| !value.is_empty()) else {
+        return PackLicenseStatus::Unknown;
+    };
+    let normalized = license.to_ascii_lowercase();
+    let words: Vec<&str> = normalized
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
+    let has_arr_marker = words.contains(&"arr");
+    if normalized.contains("all rights reserved")
+        || normalized.replace('-', " ").contains("all rights reserved")
+        || normalized.contains("noncommercial")
+        || normalized.contains("non-commercial")
+        || normalized.contains("by-nc")
+        || normalized.contains("by nc")
+        || normalized.contains("protective")
+        || has_arr_marker
+    {
+        return PackLicenseStatus::PermissionRequired;
+    }
+    let recognized = words.contains(&"mit")
+        || words.contains(&"apache")
+        || words.contains(&"bsd")
+        || words.iter().any(|word| word.starts_with("lgpl"))
+        || words.iter().any(|word| word.starts_with("gpl"))
+        || words.iter().any(|word| word.starts_with("mpl"))
+        || words.contains(&"unlicense")
+        || words.contains(&"academic") && words.contains(&"license")
+        || words.contains(&"lesser")
+            && words.contains(&"general")
+            && words.contains(&"public")
+            && words.contains(&"license")
+        || words.contains(&"general")
+            && words.contains(&"public")
+            && words.contains(&"license");
+    if recognized {
+        PackLicenseStatus::Recognized
+    } else {
+        PackLicenseStatus::Unknown
+    }
 }
 
 fn valid_official_asset_name(name: &str) -> bool {
@@ -1275,7 +1375,9 @@ mod tests {
         archive
             .start_file("META-INF/mods.toml", zip::write::SimpleFileOptions::default())
             .unwrap();
-        archive.write_all(b"modLoader=\"javafml\"\n").unwrap();
+        archive
+            .write_all(b"modLoader=\"javafml\"\nlicense=\"MIT\"\n")
+            .unwrap();
         archive.finish().unwrap();
     }
 
@@ -1304,8 +1406,20 @@ mod tests {
     #[test]
     fn published_release_asset_set_must_match_the_source_exactly() {
         let source = vec![
-            PackSourceFile { name: "alpha.jar".into(), size_bytes: 10, sha256: "a".repeat(64) },
-            PackSourceFile { name: "beta.jar".into(), size_bytes: 20, sha256: "b".repeat(64) },
+            PackSourceFile {
+                name: "alpha.jar".into(),
+                size_bytes: 10,
+                sha256: "a".repeat(64),
+                license: Some("MIT".into()),
+                license_status: PackLicenseStatus::Recognized,
+            },
+            PackSourceFile {
+                name: "beta.jar".into(),
+                size_bytes: 20,
+                sha256: "b".repeat(64),
+                license: Some("MIT".into()),
+                license_status: PackLicenseStatus::Recognized,
+            },
         ];
         let complete = vec![
             GitHubReleaseAsset { id: 2, name: "beta.jar".into(), digest: None },
@@ -1315,6 +1429,32 @@ mod tests {
         assert!(!published_asset_names_match(&source, &complete[..1]));
         let with_stale_asset = [complete.as_slice(), &[GitHubReleaseAsset { id: 3, name: "retired.jar".into(), digest: None }]].concat();
         assert!(!published_asset_names_match(&source, &with_stale_asset));
+    }
+
+    #[test]
+    fn pack_source_fingerprint_changes_when_a_mod_changes_and_is_order_independent() {
+        let first = PackSourceFile {
+            name: "Alpha.jar".into(),
+            size_bytes: 10,
+            sha256: "a".repeat(64),
+            license: Some("MIT".into()),
+            license_status: PackLicenseStatus::Recognized,
+        };
+        let second = PackSourceFile {
+            name: "beta.jar".into(),
+            size_bytes: 20,
+            sha256: "b".repeat(64),
+            license: Some("MIT".into()),
+            license_status: PackLicenseStatus::Recognized,
+        };
+        let original = pack_source_fingerprint(&[first.clone(), second.clone()]);
+        assert_eq!(original.len(), 64);
+        assert_eq!(original, pack_source_fingerprint(&[second.clone(), first.clone()]));
+        let changed = PackSourceFile {
+            sha256: "c".repeat(64),
+            ..first
+        };
+        assert_ne!(original, pack_source_fingerprint(&[changed, second]));
     }
 
     #[test]
@@ -1340,6 +1480,23 @@ mod tests {
     fn pack_versions_compare_numerically() {
         assert_eq!(parse_pack_version("1.10.0"), Some((1, 10, 0)));
         assert!(parse_pack_version("1.2.3-beta").is_none());
+    }
+
+    #[test]
+    fn pack_license_review_flags_restricted_and_unknown_metadata() {
+        assert_eq!(pack_license_status(Some("MIT")), PackLicenseStatus::Recognized);
+        assert_eq!(pack_license_status(Some("LGPL-3.0")), PackLicenseStatus::Recognized);
+        assert_eq!(pack_license_status(Some("All Rights Reserved")), PackLicenseStatus::PermissionRequired);
+        assert_eq!(pack_license_status(Some("All-Rights-Reserved")), PackLicenseStatus::PermissionRequired);
+        assert_eq!(
+            pack_license_status(Some("MIT License, Art Resources: All Rights Reserved.")),
+            PackLicenseStatus::PermissionRequired
+        );
+        assert_eq!(pack_license_status(Some("ARR")), PackLicenseStatus::PermissionRequired);
+        assert_eq!(pack_license_status(Some("CC BY-NC-ND 4.0")), PackLicenseStatus::PermissionRequired);
+        assert_eq!(pack_license_status(Some("Not specified")), PackLicenseStatus::Unknown);
+        assert_eq!(pack_license_status(Some("AGNYA License")), PackLicenseStatus::Unknown);
+        assert_eq!(pack_license_status(None), PackLicenseStatus::Unknown);
     }
 
     #[test]
@@ -1424,6 +1581,9 @@ mod tests {
         let preview = scan_pack_source(&source, "siege").unwrap();
         assert_eq!(preview.files.len(), 1);
         assert_eq!(preview.files[0].name, "Official Mod.jar");
+        assert_eq!(preview.files[0].license.as_deref(), Some("MIT"));
+        assert_eq!(preview.files[0].license_status, PackLicenseStatus::Recognized);
+        assert_eq!(preview.source_fingerprint.len(), 64);
         assert_eq!(preview.files[0].sha256, sha256_file(&source.join("Official Mod.jar")).unwrap());
         assert_eq!(preview.total_bytes, preview.files[0].size_bytes);
 

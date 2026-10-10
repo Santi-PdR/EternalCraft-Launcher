@@ -61,6 +61,8 @@ export interface PackSourceFile {
   name: string;
   sizeBytes: number;
   sha256: string;
+  license: string | null;
+  licenseStatus: 'recognized' | 'permissionRequired' | 'unknown';
 }
 
 export interface PackSourcePreview {
@@ -68,6 +70,7 @@ export interface PackSourcePreview {
   directory: string;
   files: PackSourceFile[];
   totalBytes: number;
+  sourceFingerprint: string;
 }
 
 export interface PackPublishProgress {

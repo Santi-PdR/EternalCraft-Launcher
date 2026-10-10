@@ -48,6 +48,9 @@
   let developerPollBusy = false;
   let packSourcePreview = $state<PackSourcePreview | null>(null);
   let packSourceBusy = $state(false);
+  let licenseReviewFingerprint = $state('');
+  let permissionRequiredCount = $derived(packSourcePreview?.files.filter((file) => file.licenseStatus === 'permissionRequired').length ?? 0);
+  let unknownLicenseCount = $derived(packSourcePreview?.files.filter((file) => file.licenseStatus === 'unknown').length ?? 0);
   let publishingPack = $state(false);
   let packPublishMessage = $state('');
   let publishVersion = $state('1.0.0');
@@ -309,6 +312,7 @@
     try {
       developerLoginStatus = await invoke<DeveloperLoginStatus>('logout_github_developer');
       packSourcePreview = null;
+      licenseReviewFingerprint = '';
       bootstrap = await invoke<Bootstrap>('get_bootstrap');
       notice = developerLoginStatus.message ?? 'Sesión developer cerrada';
     } catch (reason) {
@@ -546,6 +550,7 @@
 
   async function choosePackSource() {
     if (!selected || !developerLoginStatus.username) return;
+    licenseReviewFingerprint = '';
     packSourceBusy = true;
     error = '';
     try {
@@ -560,6 +565,7 @@
 
   async function refreshPackSource() {
     if (!selected || !developerLoginStatus.username) return;
+    licenseReviewFingerprint = '';
     packSourceBusy = true;
     error = '';
     try {
@@ -574,14 +580,19 @@
 
   async function publishPack() {
     if (!selected || !developerLoginStatus.username || packSourcePreview?.seriesId !== selected.id) return;
+    if (licenseReviewFingerprint !== packSourcePreview.sourceFingerprint) {
+      error = 'Revisa las licencias y confirma que tienes permiso para redistribuir todos los JAR incluidos.';
+      return;
+    }
     if (!window.confirm(`Publicar ${selected.name} ${publishVersion} en GitHub? Esta versión quedará disponible para todos los usuarios del launcher.`)) return;
     publishingPack = true;
     packPublishMessage = 'Preparando release borrador…';
     error = '';
     try {
-      notice = await invoke<string>('publish_pack_release', { seriesId: selected.id, version: publishVersion.trim() });
+      notice = await invoke<string>('publish_pack_release', { seriesId: selected.id, version: publishVersion.trim(), confirmedSourceFingerprint: licenseReviewFingerprint });
       bootstrap = await invoke<Bootstrap>('get_bootstrap');
       packSourcePreview = null;
+      licenseReviewFingerprint = '';
     } catch (reason) {
       error = String(reason);
     } finally {
@@ -731,7 +742,16 @@
         <section class="page narrow-page"><div class="page-heading"><div><span class="eyebrow">PUBLICACIÓN DE CONTENIDO · {selected.name}</span><h1>Developer</h1><p>Prepara una fuente oficial de mods para la serie seleccionada. Solo se inspeccionan JAR en el nivel raíz; configs y carpetas personales quedan fuera.</p></div><span class="connection-pill">{developerLoginStatus.username ? `GITHUB · ${developerLoginStatus.username}` : 'GITHUB · DESCONECTADO'}</span></div>
           <details class="developer-integrations"><summary>Configuración de acceso de publicación</summary><p>El acceso se valida con GitHub Device Flow y permisos de escritura del repositorio; no se usa una contraseña compartida.</p><label class="input-label">GitHub App Client ID público<input class="text-input" type="text" autocomplete="off" spellcheck="false" placeholder="ID de la aplicación" bind:value={githubAppClientIdDraft} /></label><div class="play-actions"><button class="button secondary" onclick={saveGitHubAppClientId} disabled={busy || !githubAppClientIdDraft.trim() || githubAppClientIdDraft.trim() === (bootstrap.githubAppClientId ?? '')}>Guardar ID de GitHub</button>{#if developerLoginStatus.username}<button class="button secondary" onclick={logoutGitHubDeveloper} disabled={developerLoginBusy}>Desconectar {developerLoginStatus.username}</button>{:else}<button class="button primary" onclick={beginGitHubDeveloperLogin} disabled={developerLoginBusy || !bootstrap.githubAppClientId || developerLoginStatus.status === 'pending'}>{developerLoginStatus.status === 'pending' ? 'Esperando autorización…' : 'Autorizar GitHub'}</button>{/if}</div>{#if developerLoginStatus.userCode}<div class="device-code" role="status"><strong>{developerLoginStatus.userCode}</strong><span>Ingresa este código en <a href={developerLoginStatus.verificationUri ?? 'https://github.com/login/device'} target="_blank" rel="noreferrer">GitHub Device Login ↗</a>. Caduca en {Math.ceil((developerLoginStatus.expiresInSeconds ?? 0) / 60)} min.</span></div>{/if}{#if developerLoginStatus.message}<p class="privacy-note">{developerLoginStatus.message}</p>{/if}</details><details class="developer-integrations"><summary>Inicio de sesión Microsoft</summary><p>El Client ID es público y solo configura el inicio de sesión oficial. No guardes aquí secretos.</p><label class="input-label">Client ID de la aplicación registrada<input class="text-input" type="text" autocomplete="off" spellcheck="false" placeholder="ID público de Microsoft" bind:value={clientIdDraft} /></label><button class="button secondary" onclick={saveMicrosoftClientId} disabled={busy || clientIdDraft.trim() === (bootstrap.microsoftClientId ?? '')}>Guardar configuración Microsoft</button><a class="text-link" href="https://learn.microsoft.com/en-us/entra/identity-platform/scenario-desktop-overview" target="_blank" rel="noreferrer">Guía oficial para aplicaciones de escritorio ↗</a></details>{#if !developerLoginStatus.username}<div class="empty-card developer-empty"><div class="empty-icon">⬆</div><h2>Acceso de publicación pendiente</h2><p>Configura la aplicación de GitHub y autoriza una cuenta con acceso al repositorio para publicar el pack de {selected.name}.</p></div>
           {:else}<div class="settings-card developer-pack-card"><div class="setting-row"><div><span class="eyebrow">FUENTE LOCAL · {selected.name}</span><h2>{packSourcePreview?.seriesId === selected.id ? `${packSourcePreview.files.length} JAR oficiales` : 'Selecciona la carpeta de mods'}</h2><p>{packSourcePreview?.seriesId === selected.id ? packSourcePreview.directory : 'Se leerán únicamente archivos .jar del directorio elegido. No se cargan configuraciones ni subcarpetas.'}</p></div><div class="play-actions"><button class="button secondary" onclick={choosePackSource} disabled={packSourceBusy}>{packSourceBusy ? 'Verificando…' : 'Elegir carpeta'}</button>{#if packSourcePreview?.seriesId === selected.id}<button class="button secondary" onclick={refreshPackSource} disabled={packSourceBusy}>Volver a verificar</button>{/if}</div></div>
-            {#if packSourcePreview?.seriesId === selected.id}<div class="inventory-stats"><article><strong>{packSourcePreview.files.length}</strong><span>Mods JAR verificados</span></article><article><strong>{formatBytes(packSourcePreview.totalBytes)}</strong><span>Tamaño total</span></article><article><strong>SHA-256</strong><span>Comprobado archivo por archivo</span></article></div><div class="inventory-list"><h2>Archivos incluidos en la fuente</h2><ul>{#each packSourcePreview.files as file (file.name)}<li><span>{file.name}</span><small>{formatBytes(file.sizeBytes)} · {file.sha256.slice(0, 12)}…</small></li>{/each}</ul></div><div class="publish-controls"><label>Versión de esta serie<input class="text-input" value={publishVersion} oninput={(event) => (publishVersion = event.currentTarget.value)} placeholder="1.0.0" /></label><button class="button primary" onclick={publishPack} disabled={publishingPack || packSourceBusy || !/^\d+\.\d+\.\d+$/.test(publishVersion.trim())}>{publishingPack ? 'Publicando…' : `Publicar ${selected.name}`}</button></div>{#if publishingPack}<div class="install-progress" role="status" aria-live="polite"><span class="spinner"></span><div><strong>{packPublishMessage}</strong><p>La publicación se puede reintentar si falla; el release conserva los assets verificados.</p></div></div>{/if}{/if}
+            {#if packSourcePreview?.seriesId === selected.id}
+              {@const sourceFingerprint = packSourcePreview.sourceFingerprint}
+              <div class="inventory-stats"><article><strong>{packSourcePreview.files.length}</strong><span>Mods JAR verificados</span></article><article><strong>{formatBytes(packSourcePreview.totalBytes)}</strong><span>Tamaño total</span></article><article><strong>SHA-256</strong><span>Comprobado archivo por archivo</span></article></div>
+              <div class="inventory-list"><h2>Archivos incluidos en la fuente</h2><ul>{#each packSourcePreview.files as file (file.name)}<li><span>{file.name}</span><small>{formatBytes(file.sizeBytes)} · SHA-256 {file.sha256.slice(0, 12)}… · Licencia: {file.license ?? 'no declarada'} · {file.licenseStatus === 'permissionRequired' ? 'requiere revisión/permiso' : file.licenseStatus === 'unknown' ? 'licencia por verificar' : 'revisar condiciones'}</small></li>{/each}</ul></div>
+              <div class="inventory-warning"><b>Revisión antes de publicar:</b> {permissionRequiredCount} JAR tienen condiciones restrictivas y {unknownLicenseCount} tienen licencia desconocida. Los demás también conservan sus condiciones. Verifica las licencias y permisos de redistribución antes de subir archivos públicamente.
+                <label class="license-confirm"><input type="checkbox" checked={licenseReviewFingerprint === sourceFingerprint} onchange={(event) => (licenseReviewFingerprint = event.currentTarget.checked ? sourceFingerprint : '')} /> Confirmo que revisé las licencias y tengo derecho a redistribuir públicamente todos los JAR de esta fuente.</label>
+              </div>
+              <div class="publish-controls"><label>Versión de esta serie<input class="text-input" value={publishVersion} oninput={(event) => (publishVersion = event.currentTarget.value)} placeholder="1.0.0" /></label><button class="button primary" onclick={publishPack} disabled={publishingPack || packSourceBusy || licenseReviewFingerprint !== sourceFingerprint || !/^\d+\.\d+\.\d+$/.test(publishVersion.trim())}>{publishingPack ? 'Publicando…' : `Publicar ${selected.name}`}</button></div>
+              {#if publishingPack}<div class="install-progress" role="status" aria-live="polite"><span class="spinner"></span><div><strong>{packPublishMessage}</strong><p>La publicación se puede reintentar si falla; el release conserva los assets verificados.</p></div></div>{/if}
+            {/if}
             <p class="privacy-note">Se suben solo los mods JAR de la carpeta revisada. Los archivos de configuración, otras carpetas y datos personales no se incluyen.</p></div>{/if}</section>
       {:else}
         <section class="page narrow-page settings-page"><div class="page-heading"><div><span class="eyebrow">PREFERENCIAS LOCALES</span><h1>Ajustes</h1><p>Configura tu experiencia de EternalCraft.</p></div></div>

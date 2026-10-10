@@ -77,6 +77,7 @@ jobs:
           [[ ${#files[@]} -eq 1 ]] || { echo "Expected one updater installer, found ${#files[@]}"; exit 1; }
           [[ -s "${files[0]}.sig" ]] || { echo "Missing updater signature: ${files[0]}.sig"; exit 1; }
           [[ -s "${files[0]}" ]] || { echo "Installer is empty: ${files[0]}"; exit 1; }
+          node scripts/verify-updater-signature.mjs "${files[0]}"
       - uses: actions/upload-artifact@v4
         with:
           name: launcher-bundles-${{ runner.os }}

@@ -972,6 +972,7 @@ version = "0.1.6"
 dependencies = [
  "atomic-write-file",
  "mc-launcher-core",
+ "minisign-verify",
  "reqwest",
  "serde",
  "serde_json",

@@ -6,7 +6,14 @@ El launcher usa dos identificadores públicos distintos. No son contraseñas ni 
 
 El launcher no muestra el Client ID en Ajustes ni lo guarda en preferencias. El propietario configura el ID público de la app de escritorio una sola vez como variable de GitHub Actions `ETERNALCRAFT_MICROSOFT_CLIENT_ID`. No es un secreto y no se debe crear un client secret. El workflow de release rechaza IDs que no tengan formato UUID y no publica una versión jugable sin esta variable.
 
-Para registrar la app: abre [Microsoft Entra](https://entra.microsoft.com/), entra a **App registrations → New registration**, registra `EternalCraft Launcher` para cuentas Microsoft personales y agrega `http://localhost` en **Authentication → Mobile and desktop applications**. Copia **Application (client) ID** desde Overview y guárdalo como variable de Actions en `Santi-PdR/EternalCraft-Launcher`. El launcher usa un puerto local disponible y PKCE al iniciar sesión.
+Para registrar la app: abre [Microsoft Entra](https://entra.microsoft.com/), entra a **App registrations → New registration**, registra `EternalCraft Launcher` para cuentas Microsoft personales y agrega `http://localhost` en **Authentication → Mobile and desktop applications**. Copia **Application (client) ID** desde Overview. No copies el Object ID.
+
+Guárdalo como **variable**, no como secret, en GitHub: [EternalCraft-Launcher → Settings → Secrets and variables → Actions → Variables](https://github.com/Santi-PdR/EternalCraft-Launcher/settings/variables/actions) → **New repository variable**. Completa exactamente:
+
+- **Name:** `ETERNALCRAFT_MICROSOFT_CLIENT_ID`
+- **Value:** el `Application (client) ID` de Microsoft Entra
+
+No pegues este ID en el launcher ni en el código. Al guardar la variable, los siguientes builds de Actions la incorporarán. El launcher usa un puerto local disponible y PKCE al iniciar sesión.
 
 El inicio requiere una cuenta Microsoft con licencia de Minecraft; configurar el ID no concede una licencia. Si el ID no está en una compilación, el launcher permite explorar pero desactiva el inicio de sesión y el lanzamiento.
 

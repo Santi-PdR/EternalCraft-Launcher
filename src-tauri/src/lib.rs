@@ -341,15 +341,55 @@ fn validate_catalog(catalog: Catalog) -> Result<Catalog, String> {
     }
     let mut ids = std::collections::BTreeSet::new();
     for series in &catalog.series {
+        let id = series.id.to_ascii_lowercase();
         if series.id.is_empty()
             || series.id.len() > 64
-            || !series.id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-            || !ids.insert(series.id.as_str())
+            || !series.id.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_'))
+            || !ids.insert(id)
         {
             return Err("El catálogo contiene identificadores de serie vacíos o duplicados".into());
         }
+        if !valid_catalog_text(&series.name, 80)
+            || !valid_catalog_text(&series.subtitle, 100)
+            || !valid_catalog_text(&series.description, 600)
+        {
+            return Err(format!("La serie {} contiene texto vacío, demasiado largo o con controles", series.id));
+        }
+        if !valid_catalog_color(&series.accent) {
+            return Err(format!("El color de la serie {} no es un hexadecimal #RRGGBB válido", series.id));
+        }
+        if !valid_numeric_version(&series.minecraft_version, 2, 3)
+            || !series.loader.eq_ignore_ascii_case("forge")
+            || !valid_numeric_version(&series.loader_version, 2, 4)
+        {
+            return Err(format!("La serie {} no define una versión compatible de Minecraft y Forge", series.id));
+        }
     }
     Ok(catalog)
+}
+
+fn valid_catalog_text(value: &str, max_chars: usize) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty()
+        && trimmed.chars().count() <= max_chars
+        && !trimmed.chars().any(char::is_control)
+}
+
+fn valid_catalog_color(value: &str) -> bool {
+    value.len() == 7
+        && value.starts_with('#')
+        && value[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn valid_numeric_version(value: &str, min_parts: usize, max_parts: usize) -> bool {
+    let parts: Vec<&str> = value.split('.').collect();
+    (min_parts..=max_parts).contains(&parts.len())
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && part.len() <= 6
+                && part.bytes().all(|byte| byte.is_ascii_digit())
+                && (*part == "0" || !part.starts_with('0'))
+        })
 }
 
 fn current_catalog() -> Result<Catalog, String> {
@@ -2581,6 +2621,34 @@ mod tests {
             .series
             .iter()
             .any(|series| series.id == "ghouls-outbreak"));
+    }
+
+    #[test]
+    fn remote_catalog_rejects_case_colliding_ids_and_css_injection() {
+        let mut catalog = parse_catalog().unwrap();
+        let mut duplicate = catalog.series[0].clone();
+        duplicate.id = "SIEGE".into();
+        catalog.series.push(duplicate);
+        assert!(validate_catalog(catalog).is_err());
+
+        let mut catalog = parse_catalog().unwrap();
+        catalog.series[0].accent = "#fff;background:url(https://example.invalid)".into();
+        assert!(validate_catalog(catalog).is_err());
+    }
+
+    #[test]
+    fn remote_catalog_rejects_unsupported_loaders_and_malformed_versions() {
+        let mut catalog = parse_catalog().unwrap();
+        catalog.series[0].loader = "Fabric".into();
+        assert!(validate_catalog(catalog).is_err());
+
+        let mut catalog = parse_catalog().unwrap();
+        catalog.series[0].minecraft_version = "../../outside".into();
+        assert!(validate_catalog(catalog).is_err());
+
+        let mut catalog = parse_catalog().unwrap();
+        catalog.series[0].name = "  \n".into();
+        assert!(validate_catalog(catalog).is_err());
     }
 
     #[test]

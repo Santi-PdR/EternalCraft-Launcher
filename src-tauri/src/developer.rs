@@ -94,6 +94,8 @@ pub(super) struct PackSourceFile {
     sha256: String,
     license: Option<String>,
     license_status: PackLicenseStatus,
+    minecraft_compatibility: PackCompatibilityStatus,
+    minecraft_version_range: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -101,6 +103,14 @@ pub(super) struct PackSourceFile {
 enum PackLicenseStatus {
     Recognized,
     PermissionRequired,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum PackCompatibilityStatus {
+    Compatible,
+    Incompatible,
     Unknown,
 }
 
@@ -608,7 +618,12 @@ pub(super) fn choose_pack_source_directory(
     let path = selected
         .into_path()
         .map_err(|error| format!("Ruta de carpeta no válida: {error}"))?;
-    let preview = scan_pack_source(&path, &series_id)?;
+    let series = catalog
+        .series
+        .iter()
+        .find(|series| series.id == series_id)
+        .ok_or_else(|| "La serie solicitada no existe en el catálogo".to_string())?;
+    let preview = scan_pack_source(&path, &series_id, &series.minecraft_version)?;
     let canonical_path = PathBuf::from(&preview.directory);
     app.state::<GitHubDeveloper>()
         .0
@@ -634,7 +649,12 @@ pub(super) fn refresh_pack_source_preview(
         .get(&series_id)
         .cloned()
         .ok_or_else(|| "Selecciona primero una carpeta fuente para esta serie".to_string())?;
-    scan_pack_source(&path, &series_id)
+    let series = current_catalog()?
+        .series
+        .into_iter()
+        .find(|series| series.id == series_id)
+        .ok_or_else(|| "La serie solicitada no existe en el catálogo".to_string())?;
+    scan_pack_source(&path, &series_id, &series.minecraft_version)
 }
 
 #[tauri::command]
@@ -677,7 +697,21 @@ fn publish_pack_release_sync(
         .get(&series_id)
         .cloned()
         .ok_or_else(|| "Selecciona primero la carpeta fuente de mods de esta serie".to_string())?;
-    let source = scan_pack_source(&source, &series_id)?;
+    let source = scan_pack_source(&source, &series_id, &series.minecraft_version)?;
+    let incompatible: Vec<&str> = source
+        .files
+        .iter()
+        .filter(|file| file.minecraft_compatibility == PackCompatibilityStatus::Incompatible)
+        .map(|file| file.name.as_str())
+        .collect();
+    if !incompatible.is_empty() {
+        return Err(format!(
+            "No se puede publicar: {} declara incompatibilidad con Minecraft {}: {}",
+            incompatible.len(),
+            series.minecraft_version,
+            incompatible.join(", ")
+        ));
+    }
     if source.source_fingerprint != confirmed_source_fingerprint {
         return Err("La carpeta o sus JAR cambiaron desde la revisión de licencias. Vuelve a verificar la fuente y confirma otra vez.".into());
     }
@@ -1156,7 +1190,11 @@ fn format_bytes(bytes: u64) -> String {
     else { format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0)) }
 }
 
-fn scan_pack_source(path: &Path, series_id: &str) -> Result<PackSourcePreview, String> {
+fn scan_pack_source(
+    path: &Path,
+    series_id: &str,
+    minecraft_version: &str,
+) -> Result<PackSourcePreview, String> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| format!("No se pudo inspeccionar la carpeta elegida: {error}"))?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
@@ -1214,6 +1252,8 @@ fn scan_pack_source(path: &Path, series_id: &str) -> Result<PackSourcePreview, S
             .map_err(|error| format!("{name}: {error}"))?;
         let license = read_pack_license(&jar_path);
         let license_status = pack_license_status(license.as_deref());
+        let (minecraft_compatibility, minecraft_version_range) =
+            read_pack_minecraft_compatibility(&jar_path, minecraft_version);
         let digest = sha256_file(&jar_path)?;
         let after = fs::metadata(&jar_path)
             .map_err(|error| format!("No se pudo verificar el origen de {name}: {error}"))?;
@@ -1226,6 +1266,8 @@ fn scan_pack_source(path: &Path, series_id: &str) -> Result<PackSourcePreview, S
             sha256: digest,
             license,
             license_status,
+            minecraft_compatibility,
+            minecraft_version_range,
         });
     }
     files.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
@@ -1240,6 +1282,143 @@ fn scan_pack_source(path: &Path, series_id: &str) -> Result<PackSourcePreview, S
         total_bytes,
         source_fingerprint,
     })
+}
+
+fn read_pack_minecraft_compatibility(
+    path: &Path,
+    target_version: &str,
+) -> (PackCompatibilityStatus, Option<String>) {
+    let unknown = (PackCompatibilityStatus::Unknown, None);
+    let Some(contents) = read_forge_mod_metadata(path) else {
+        return unknown;
+    };
+    let Ok(document) = toml::from_str::<toml::Value>(&contents) else {
+        return unknown;
+    };
+    let Some(dependencies) = document.get("dependencies").and_then(toml::Value::as_table) else {
+        return unknown;
+    };
+
+    let mut found_minecraft_dependency = false;
+    let mut reported_range = None;
+    for entries in dependencies.values().filter_map(toml::Value::as_array) {
+        for dependency in entries {
+            let Some(table) = dependency.as_table() else { continue };
+            if !table
+                .get("modId")
+                .and_then(toml::Value::as_str)
+                .is_some_and(|id| id.eq_ignore_ascii_case("minecraft"))
+            {
+                continue;
+            }
+            found_minecraft_dependency = true;
+            let Some(range) = table
+                .get("versionRange")
+                .and_then(toml::Value::as_str)
+                .map(str::trim)
+                .filter(|range| !range.is_empty())
+            else {
+                continue;
+            };
+            reported_range = Some(range.to_string());
+            match maven_version_range_contains(range, target_version) {
+                Some(true) => {}
+                Some(false) => {
+                    return (PackCompatibilityStatus::Incompatible, reported_range);
+                }
+                None => return unknown,
+            }
+        }
+    }
+    if found_minecraft_dependency && reported_range.is_some() {
+        (PackCompatibilityStatus::Compatible, reported_range)
+    } else {
+        unknown
+    }
+}
+
+fn read_forge_mod_metadata(path: &Path) -> Option<String> {
+    let file = fs::File::open(path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    let index = archive
+        .file_names()
+        .position(|name| name.eq_ignore_ascii_case("META-INF/mods.toml"))?;
+    let mut metadata = archive.by_index(index).ok()?;
+    let mut contents = String::new();
+    metadata
+        .by_ref()
+        .take(256 * 1024)
+        .read_to_string(&mut contents)
+        .ok()?;
+    Some(contents)
+}
+
+fn maven_version_range_contains(range: &str, target: &str) -> Option<bool> {
+    let target = numeric_version_parts(target)?;
+    let mut remaining = range.trim();
+    if remaining.is_empty() {
+        return None;
+    }
+    let mut matched = false;
+    while !remaining.is_empty() {
+        let opening = remaining.chars().next()?;
+        if opening != '[' && opening != '(' {
+            return None;
+        }
+        let closing_index = remaining.find(|character| character == ')' || character == ']')?;
+        let closing = remaining[closing_index..].chars().next()?;
+        let body = &remaining[1..closing_index];
+        if let Some((lower, upper)) = body.split_once(',') {
+            let lower = if lower.trim().is_empty() {
+                None
+            } else {
+                Some(numeric_version_parts(lower.trim())?)
+            };
+            let upper = if upper.trim().is_empty() {
+                None
+            } else {
+                Some(numeric_version_parts(upper.trim())?)
+            };
+            let above_lower = lower.as_ref().is_none_or(|bound| {
+                let comparison = compare_numeric_versions(&target, bound);
+                comparison.is_gt() || comparison.is_eq() && opening == '['
+            });
+            let below_upper = upper.as_ref().is_none_or(|bound| {
+                let comparison = compare_numeric_versions(&target, bound);
+                comparison.is_lt() || comparison.is_eq() && closing == ']'
+            });
+            matched |= above_lower && below_upper;
+        } else {
+            if opening != '[' || closing != ']' {
+                return None;
+            }
+            let exact = numeric_version_parts(body.trim())?;
+            matched |= compare_numeric_versions(&target, &exact).is_eq();
+        }
+        remaining = remaining[closing_index + 1..].trim_start();
+        if remaining.is_empty() {
+            break;
+        }
+        remaining = remaining.strip_prefix(',')?.trim_start();
+    }
+    Some(matched)
+}
+
+fn numeric_version_parts(version: &str) -> Option<Vec<u64>> {
+    let parts: Vec<u64> = version
+        .split('.')
+        .map(str::parse::<u64>)
+        .collect::<Result<_, _>>()
+        .ok()?;
+    (!parts.is_empty()).then_some(parts)
+}
+
+fn compare_numeric_versions(left: &[u64], right: &[u64]) -> std::cmp::Ordering {
+    let part_count = left.len().max(right.len());
+    (0..part_count)
+        .map(|index| left.get(index).copied().unwrap_or(0).cmp(&right.get(index).copied().unwrap_or(0)))
+        .find(|ordering| !ordering.is_eq())
+        .unwrap_or(std::cmp::Ordering::Equal)
 }
 
 fn pack_source_fingerprint(files: &[PackSourceFile]) -> String {
@@ -1260,18 +1439,7 @@ fn pack_source_fingerprint(files: &[PackSourceFile]) -> String {
 }
 
 fn read_pack_license(path: &Path) -> Option<String> {
-    let file = fs::File::open(path).ok()?;
-    let mut archive = zip::ZipArchive::new(file).ok()?;
-    let index = archive
-        .file_names()
-        .position(|name| name.eq_ignore_ascii_case("META-INF/mods.toml"))?;
-    let mut metadata = archive.by_index(index).ok()?;
-    let mut contents = String::new();
-    metadata
-        .by_ref()
-        .take(256 * 1024)
-        .read_to_string(&mut contents)
-        .ok()?;
+    let contents = read_forge_mod_metadata(path)?;
     let document: toml::Value = toml::from_str(&contents).ok()?;
     document
         .get("license")
@@ -1402,6 +1570,8 @@ mod tests {
                 sha256: "a".repeat(64),
                 license: Some("MIT".into()),
                 license_status: PackLicenseStatus::Recognized,
+                minecraft_compatibility: PackCompatibilityStatus::Unknown,
+                minecraft_version_range: None,
             },
             PackSourceFile {
                 name: "beta.jar".into(),
@@ -1409,6 +1579,8 @@ mod tests {
                 sha256: "b".repeat(64),
                 license: Some("MIT".into()),
                 license_status: PackLicenseStatus::Recognized,
+                minecraft_compatibility: PackCompatibilityStatus::Unknown,
+                minecraft_version_range: None,
             },
         ];
         let complete = vec![
@@ -1429,6 +1601,8 @@ mod tests {
             sha256: "a".repeat(64),
             license: Some("MIT".into()),
             license_status: PackLicenseStatus::Recognized,
+            minecraft_compatibility: PackCompatibilityStatus::Unknown,
+            minecraft_version_range: None,
         };
         let second = PackSourceFile {
             name: "beta.jar".into(),
@@ -1436,6 +1610,8 @@ mod tests {
             sha256: "b".repeat(64),
             license: Some("MIT".into()),
             license_status: PackLicenseStatus::Recognized,
+            minecraft_compatibility: PackCompatibilityStatus::Unknown,
+            minecraft_version_range: None,
         };
         let original = pack_source_fingerprint(&[first.clone(), second.clone()]);
         assert_eq!(original.len(), 64);
@@ -1487,6 +1663,55 @@ mod tests {
         assert_eq!(pack_license_status(Some("Not specified")), PackLicenseStatus::Unknown);
         assert_eq!(pack_license_status(Some("AGNYA License")), PackLicenseStatus::Unknown);
         assert_eq!(pack_license_status(None), PackLicenseStatus::Unknown);
+    }
+
+    #[test]
+    fn minecraft_metadata_ranges_match_series_version_and_fail_closed() {
+        assert_eq!(
+            maven_version_range_contains("[1.20,1.21)", "1.20.1"),
+            Some(true)
+        );
+        assert_eq!(
+            maven_version_range_contains("[1.20.2,1.21)", "1.20.1"),
+            Some(false)
+        );
+        assert_eq!(
+            maven_version_range_contains("(1.20.1,1.20.2]", "1.20.1"),
+            Some(false)
+        );
+        assert_eq!(
+            maven_version_range_contains("[1.20.1]", "1.20.1"),
+            Some(true)
+        );
+        assert_eq!(
+            maven_version_range_contains("[1.20.1,1.20.2),[1.20.4,1.21)", "1.20.4"),
+            Some(true)
+        );
+        assert_eq!(maven_version_range_contains("not-a-range", "1.20.1"), None);
+    }
+
+    #[test]
+    fn pack_source_reports_minecraft_compatibility_from_forge_metadata() {
+        use std::io::Write;
+
+        let source = temporary_directory("developer-pack-minecraft-range");
+        let file = fs::File::create(source.join("Compatible.jar")).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file("META-INF/mods.toml", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        archive
+            .write_all(
+                b"modLoader=\"javafml\"\nlicense=\"MIT\"\n[[dependencies.example]]\nmodId=\"minecraft\"\nmandatory=true\nversionRange=\"[1.20.2,1.21)\"\n",
+            )
+            .unwrap();
+        archive.finish().unwrap();
+
+        let preview = scan_pack_source(&source, "siege", "1.20.1").unwrap();
+        assert_eq!(preview.files[0].minecraft_compatibility, PackCompatibilityStatus::Incompatible);
+        assert_eq!(preview.files[0].minecraft_version_range.as_deref(), Some("[1.20.2,1.21)"));
+
+        fs::remove_dir_all(source).unwrap();
     }
 
     #[test]
@@ -1568,11 +1793,12 @@ mod tests {
         fs::write(source.join("config/options.txt"), b"user settings").unwrap();
         fs::write(source.join("options.txt"), b"user settings").unwrap();
 
-        let preview = scan_pack_source(&source, "siege").unwrap();
+        let preview = scan_pack_source(&source, "siege", "1.20.1").unwrap();
         assert_eq!(preview.files.len(), 1);
         assert_eq!(preview.files[0].name, "Official Mod.jar");
         assert_eq!(preview.files[0].license.as_deref(), Some("MIT"));
         assert_eq!(preview.files[0].license_status, PackLicenseStatus::Recognized);
+        assert_eq!(preview.files[0].minecraft_compatibility, PackCompatibilityStatus::Unknown);
         assert_eq!(preview.source_fingerprint.len(), 64);
         assert_eq!(preview.files[0].sha256, sha256_file(&source.join("Official Mod.jar")).unwrap());
         assert_eq!(preview.total_bytes, preview.files[0].size_bytes);
@@ -1587,7 +1813,7 @@ mod tests {
         let personal = source.join("Personales");
         fs::create_dir(&personal).unwrap();
 
-        assert!(scan_pack_source(&personal, "siege").is_err());
+        assert!(scan_pack_source(&personal, "siege", "1.20.1").is_err());
         fs::remove_dir_all(source).unwrap();
     }
 }

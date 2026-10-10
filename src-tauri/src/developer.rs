@@ -1260,7 +1260,13 @@ fn scan_pack_source(path: &Path, series_id: &str) -> Result<PackSourcePreview, S
 
 fn pack_source_fingerprint(files: &[PackSourceFile]) -> String {
     let mut hasher = sha2::Sha256::new();
-    for file in files {
+    let mut sorted_files: Vec<&PackSourceFile> = files.iter().collect();
+    sorted_files.sort_by(|left, right| {
+        left.name
+            .to_ascii_lowercase()
+            .cmp(&right.name.to_ascii_lowercase())
+    });
+    for file in sorted_files {
         hasher.update(file.name.to_ascii_lowercase().as_bytes());
         hasher.update([0]);
         hasher.update(file.sha256.as_bytes());

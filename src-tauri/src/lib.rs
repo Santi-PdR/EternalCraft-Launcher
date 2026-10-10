@@ -19,8 +19,7 @@ use mc_launcher_core::{
         http,
     },
     progress::{ProgressEvent, ProgressReporter},
-    runtime::{get_executable_path, get_installed_jvm_runtimes, install_jvm_runtime},
-    types::CallbackDict,
+    runtime::{get_executable_path, get_installed_jvm_runtimes},
 };
 use serde::{Deserialize, Serialize};
 use sysinfo::System;
@@ -39,6 +38,7 @@ use tauri_plugin_dialog::DialogExt;
 
 mod pack;
 mod developer;
+mod mojang_runtime;
 
 const CATALOG_JSON: &str = include_str!("../../resources/series/catalog.json");
 
@@ -786,8 +786,7 @@ fn install_forge_profile(
             "Java",
             "Descargando y verificando el runtime Java 17 de Mojang",
         );
-        install_jvm_runtime(&runtime.component, &game_dir, &CallbackDict::default())
-            .map_err(|error| format!("No se pudo instalar el runtime oficial de Java: {error}"))?;
+        mojang_runtime::install_java_runtime(&runtime.component, &game_dir)?;
         let java = get_executable_path(&runtime.component, &game_dir)
             .ok_or_else(|| "Mojang descargó Java, pero no se encontró su ejecutable".to_string())?;
         ensure_java_executable(&java)?;
@@ -2879,7 +2878,7 @@ mod tests {
         write_version_json(&game_dir, &vanilla).unwrap();
         let runtime = vanilla.java_version.as_ref().unwrap();
         assert_eq!(runtime.major_version, 17);
-        install_jvm_runtime(&runtime.component, &game_dir, &CallbackDict::default()).unwrap();
+        mojang_runtime::install_java_runtime(&runtime.component, &game_dir).unwrap();
         let java = get_executable_path(&runtime.component, &game_dir).unwrap();
         assert!(inspect_java(&java).compatible);
         install_version_files(&vanilla, &game_dir, &mut progress).unwrap();

@@ -968,13 +968,14 @@ dependencies = [
 
 [[package]]
 name = "eternalcraft-launcher"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "atomic-write-file",
  "base64 0.22.1",
  "mc-launcher-core",
  "minisign-verify",
  "reqwest",
+ "sha1 0.10.7",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -985,6 +986,7 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-updater",
  "toml 1.1.7+spec-1.1.0",
+ "xz2",
  "zip 2.4.2",
 ]
 

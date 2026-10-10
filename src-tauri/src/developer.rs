@@ -1,1857 +1,1 @@
-use super::*;
-use sha2::Digest;
-use std::collections::BTreeSet;
-use std::time::{Duration, Instant};
-
-const GITHUB_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
-const GITHUB_ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
-const GITHUB_DEVICE_VERIFICATION_URL: &str = "https://github.com/login/device";
-const GITHUB_API: &str = "https://api.github.com";
-const PUBLISH_REPOSITORY: &str = "Santi-PdR/EternalCraft-Launcher";
-const MAX_SOURCE_JAR_BYTES: u64 = 256 * 1024 * 1024;
-const MAX_SOURCE_PACK_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-const MAX_GITHUB_ASSETS_PER_RELEASE: usize = 1000;
-
-#[derive(Default)]
-pub(super) struct GitHubDeveloper(std::sync::Mutex<DeveloperState>);
-
-#[derive(Default)]
-struct DeveloperState {
-    pending: Option<PendingDeviceAuthorization>,
-    session: Option<GitHubSession>,
-    source_directories: BTreeMap<String, PathBuf>,
-    publish_active: bool,
-}
-
-struct PublishLease {
-    app: AppHandle,
-}
-
-fn reserve_publish(active: &mut bool) -> bool {
-    if *active {
-        false
-    } else {
-        *active = true;
-        true
-    }
-}
-
-impl PublishLease {
-    fn acquire(app: &AppHandle) -> Result<Self, String> {
-        let developer = app.state::<GitHubDeveloper>();
-        let mut state = developer
-            .0
-            .lock()
-            .map_err(|_| "El estado developer qued√≥ bloqueado".to_string())?;
-        if !reserve_publish(&mut state.publish_active) {
-            return Err("Ya hay una publicaci√≥n en curso. Espera a que termine antes de iniciar otra.".into());
-        }
-        Ok(Self { app: app.clone() })
-    }
-}
-
-impl Drop for PublishLease {
-    fn drop(&mut self) {
-        let developer = self.app.state::<GitHubDeveloper>();
-        if let Ok(mut state) = developer.0.lock() {
-            state.publish_active = false;
-        };
-    }
-}
-
-struct PendingDeviceAuthorization {
-    client_id: String,
-    device_code: String,
-    user_code: String,
-    interval: Duration,
-    expires_at: Instant,
-    next_poll_at: Instant,
-}
-
-struct GitHubSession {
-    username: String,
-    access_token: String,
-    expires_at: Option<Instant>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct DeveloperLoginStatus {
-    status: String,
-    username: Option<String>,
-    user_code: Option<String>,
-    verification_uri: Option<String>,
-    expires_in_seconds: Option<u64>,
-    interval_seconds: Option<u64>,
-    message: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct PackSourceFile {
-    name: String,
-    size_bytes: u64,
-    sha256: String,
-    license: Option<String>,
-    license_status: PackLicenseStatus,
-    minecraft_compatibility: PackCompatibilityStatus,
-    minecraft_version_range: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-enum PackLicenseStatus {
-    Recognized,
-    PermissionRequired,
-    Unknown,
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-enum PackCompatibilityStatus {
-    Compatible,
-    Incompatible,
-    Unknown,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct PackSourcePreview {
-    series_id: String,
-    directory: String,
-    files: Vec<PackSourceFile>,
-    total_bytes: u64,
-    source_fingerprint: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct PackPublishProgress {
-    series_id: String,
-    completed_files: usize,
-    total_files: usize,
-    message: String,
-}
-
-#[derive(Deserialize)]
-struct GitHubRelease {
-    id: u64,
-    draft: bool,
-    upload_url: String,
-}
-
-#[derive(Clone, Deserialize)]
-struct GitHubReleaseAsset {
-    id: u64,
-    name: String,
-    digest: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct GitHubContentResponse {
-    sha: String,
-    content: Option<String>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Manifest {
-    schema_version: u32,
-    series_id: String,
-    version: String,
-    minecraft_version: String,
-    loader: String,
-    loader_version: String,
-    files: Vec<ManifestFile>,
-}
-
-#[derive(Serialize)]
-struct ManifestFile {
-    path: String,
-    url: String,
-    size_bytes: u64,
-    sha256: String,
-}
-
-#[derive(Deserialize)]
-struct DeviceCodeResponse {
-    device_code: String,
-    user_code: String,
-    verification_uri: String,
-    expires_in: u64,
-    interval: Option<u64>,
-}
-
-#[derive(Deserialize)]
-struct TokenResponse {
-    access_token: Option<String>,
-    expires_in: Option<u64>,
-    error: Option<String>,
-    error_description: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct GitHubUser {
-    login: String,
-}
-
-#[derive(Deserialize)]
-struct RepositoryPermissions {
-    push: Option<bool>,
-    admin: Option<bool>,
-}
-
-#[derive(Deserialize)]
-struct UserInstallationsResponse {
-    installations: Vec<GitHubInstallation>,
-}
-
-#[derive(Deserialize)]
-struct GitHubInstallation {
-    id: u64,
-    account: GitHubAccount,
-    permissions: BTreeMap<String, String>,
-}
-
-#[derive(Deserialize)]
-struct GitHubAccount {
-    login: String,
-}
-
-#[derive(Deserialize)]
-struct InstallationRepositoriesResponse {
-    repositories: Vec<InstallationRepository>,
-}
-
-#[derive(Deserialize)]
-struct InstallationRepository {
-    full_name: String,
-    permissions: Option<RepositoryPermissions>,
-}
-
-impl GitHubDeveloper {
-    pub(super) fn username(&self) -> Option<String> {
-        self.0
-            .lock()
-            .ok()
-            .and_then(|state| {
-                state.session.as_ref().and_then(|session| {
-                    (!session.expires_at.is_some_and(|deadline| Instant::now() >= deadline))
-                        .then(|| session.username.clone())
-                })
-            })
-    }
-
-    fn access_token(&self) -> Result<String, String> {
-        let state = self
-            .0
-            .lock()
-            .map_err(|_| "El estado de autorizaci√≥n GitHub qued√≥ bloqueado".to_string())?;
-        let session = state
-            .session
-            .as_ref()
-            .ok_or_else(|| "Inicia sesi√≥n con GitHub y permiso de escritura para publicar".to_string())?;
-        if session.expires_at.is_some_and(|deadline| Instant::now() >= deadline) {
-            return Err("La sesi√≥n de GitHub expir√≥. Vuelve a autorizar el launcher".into());
-        }
-        Ok(session.access_token.clone())
-    }
-}
-
-fn valid_github_app_client_id(value: &str) -> bool {
-    (10..=100).contains(&value.len())
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-}
-
-fn configured_github_app_client_id() -> Option<&'static str> {
-    option_env!("ETERNALCRAFT_GITHUB_APP_CLIENT_ID")
-        .filter(|value| valid_github_app_client_id(value))
-}
-
-pub(super) fn github_app_client_id_configured() -> bool {
-    configured_github_app_client_id().is_some()
-}
-
-#[tauri::command]
-pub(super) fn begin_github_developer_login(app: AppHandle) -> Result<DeveloperLoginStatus, String> {
-    let client_id = configured_github_app_client_id()
-        .ok_or_else(|| "El acceso Developer no est√° configurado para esta compilaci√≥n".to_string())?;
-    let client = http::client().map_err(|error| error.to_string())?;
-    let response = client
-        .post(GITHUB_DEVICE_CODE_URL)
-        .header("Accept", "application/json")
-        .header("User-Agent", "EternalCraft-Launcher")
-        .form(&[("client_id", client_id.to_string())])
-        .send()
-        .map_err(|error| format!("No se pudo solicitar autorizaci√≥n a GitHub: {error}"))?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().unwrap_or_default();
-        return Err(format!("GitHub rechaz√≥ el inicio de sesi√≥n ({status}): {}", body.chars().take(300).collect::<String>()));
-    }
-    let device: DeviceCodeResponse = response
-        .json()
-        .map_err(|error| format!("GitHub devolvi√≥ una respuesta de autorizaci√≥n inv√°lida: {error}"))?;
-    if device.device_code.is_empty()
-        || device.user_code.is_empty()
-        || !device.verification_uri.starts_with("https://github.com/")
-        || device.expires_in == 0
-        || device.expires_in > 900
-    {
-        return Err("GitHub devolvi√≥ datos de dispositivo inv√°lidos".into());
-    }
-    let interval = Duration::from_secs(device.interval.unwrap_or(5).clamp(5, 60));
-    let now = Instant::now();
-    let expires_at = now + Duration::from_secs(device.expires_in);
-    app.state::<GitHubDeveloper>()
-        .0
-        .lock()
-        .map_err(|_| "El estado de autorizaci√≥n GitHub qued√≥ bloqueado".to_string())?
-        .pending = Some(PendingDeviceAuthorization {
-            client_id: client_id.to_string(),
-            device_code: device.device_code,
-            user_code: device.user_code.clone(),
-        interval,
-        expires_at,
-        next_poll_at: now + interval,
-    });
-    let _ = open_system_browser(GITHUB_DEVICE_VERIFICATION_URL);
-    Ok(DeveloperLoginStatus {
-        status: "pending".into(),
-        username: None,
-        user_code: Some(device.user_code),
-        verification_uri: Some(GITHUB_DEVICE_VERIFICATION_URL.into()),
-        expires_in_seconds: Some(device.expires_in),
-        interval_seconds: Some(interval.as_secs()),
-        message: Some("Autoriza la aplicaci√≥n con tu cuenta GitHub. El permiso se comprueba en el repositorio.".into()),
-    })
-}
-
-#[tauri::command]
-pub(super) fn poll_github_developer_login(
-    app: AppHandle,
-) -> Result<DeveloperLoginStatus, String> {
-    let developer = app.state::<GitHubDeveloper>();
-    let mut state = developer
-        .0
-        .lock()
-        .map_err(|_| "El estado de autorizaci√≥n GitHub qued√≥ bloqueado".to_string())?;
-    let pending = state
-        .pending
-        .as_mut()
-        .ok_or_else(|| "No hay una autorizaci√≥n GitHub pendiente".to_string())?;
-    let now = Instant::now();
-    if now >= pending.expires_at {
-        state.pending = None;
-        return Ok(login_status("expired", Some("El c√≥digo de GitHub venci√≥; inicia el proceso otra vez.")));
-    }
-    if now < pending.next_poll_at {
-        return Ok(pending_status(pending, None));
-    }
-    pending.next_poll_at = now + pending.interval;
-    let client_id = pending.client_id.clone();
-    let device_code = pending.device_code.clone();
-    let client = http::client().map_err(|error| error.to_string())?;
-    let response = client
-        .post(GITHUB_ACCESS_TOKEN_URL)
-        .header("Accept", "application/json")
-        .header("User-Agent", "EternalCraft-Launcher")
-        .form(&[
-            ("client_id", client_id.as_str()),
-            ("device_code", device_code.as_str()),
-            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-        ])
-        .send()
-        .map_err(|error| format!("No se pudo consultar la autorizaci√≥n GitHub: {error}"))?;
-    let token: TokenResponse = response
-        .json()
-        .map_err(|error| format!("GitHub devolvi√≥ un estado de autorizaci√≥n inv√°lido: {error}"))?;
-    match token.error.as_deref() {
-        Some("authorization_pending") => {
-            return Ok(pending_status(
-                state.pending.as_ref().expect("pending device login exists"),
-                None,
-            ));
-        }
-        Some("slow_down") => {
-            if let Some(pending) = state.pending.as_mut() {
-                pending.interval = pending.interval.saturating_add(Duration::from_secs(5));
-                pending.next_poll_at = Instant::now() + pending.interval;
-            }
-            return Ok(pending_status(
-                state.pending.as_ref().expect("pending device login exists"),
-                Some("GitHub pidi√≥ espaciar las consultas; el launcher ajust√≥ el intervalo."),
-            ));
-        }
-        Some("access_denied") => {
-            state.pending = None;
-            return Ok(login_status("denied", Some("Se rechaz√≥ la autorizaci√≥n de GitHub.")));
-        }
-        Some("expired_token") => {
-            state.pending = None;
-            return Ok(login_status("expired", Some("El c√≥digo de GitHub venci√≥; inicia el proceso otra vez.")));
-        }
-        Some(error) => {
-            state.pending = None;
-            return Ok(login_status("failed", Some(token.error_description.as_deref().unwrap_or(error))));
-        }
-        None => {}
-    }
-    let access_token = token
-        .access_token
-        .ok_or_else(|| "GitHub no devolvi√≥ un token de acceso".to_string())?;
-    let expires_at = token.expires_in.map(|seconds| Instant::now() + Duration::from_secs(seconds));
-    drop(state);
-
-    let user = match get_github_user(&access_token)
-        .and_then(|user| ensure_repository_write_access(&access_token).map(|()| user))
-    {
-        Ok(user) => user,
-        Err(message) => {
-            if let Ok(mut state) = developer.0.lock() {
-                state.pending = None;
-            }
-            return Ok(login_status("failed", Some(&message)));
-        }
-    };
-    let mut state = developer
-        .0
-        .lock()
-        .map_err(|_| "El estado de autorizaci√≥n GitHub qued√≥ bloqueado".to_string())?;
-    state.pending = None;
-    state.session = Some(GitHubSession {
-        username: user.login.clone(),
-        access_token,
-        expires_at,
-    });
-    Ok(DeveloperLoginStatus {
-        status: "authorized".into(),
-        username: Some(user.login),
-        user_code: None,
-        verification_uri: None,
-        expires_in_seconds: None,
-        interval_seconds: None,
-        message: Some("GitHub confirm√≥ permiso de escritura para EternalCraft-Launcher.".into()),
-    })
-}
-
-#[tauri::command]
-pub(super) fn github_developer_status(app: AppHandle) -> DeveloperLoginStatus {
-    let username = app.state::<GitHubDeveloper>().username();
-    DeveloperLoginStatus {
-        status: if username.is_some() { "authorized" } else { "signedOut" }.into(),
-        username,
-        user_code: None,
-        verification_uri: None,
-        expires_in_seconds: None,
-        interval_seconds: None,
-        message: None,
-    }
-}
-
-#[tauri::command]
-pub(super) fn logout_github_developer(app: AppHandle) -> Result<DeveloperLoginStatus, String> {
-    let developer = app.state::<GitHubDeveloper>();
-    let mut state = developer
-        .0
-        .lock()
-        .map_err(|_| "El estado de autorizaci√≥n GitHub qued√≥ bloqueado".to_string())?;
-    state.pending = None;
-    state.session = None;
-    state.source_directories.clear();
-    Ok(login_status("signedOut", Some("Se cerr√≥ la sesi√≥n developer de este proceso.")))
-}
-
-fn login_status(status: &str, message: Option<&str>) -> DeveloperLoginStatus {
-    DeveloperLoginStatus {
-        status: status.into(),
-        username: None,
-        user_code: None,
-        verification_uri: None,
-        expires_in_seconds: None,
-        interval_seconds: None,
-        message: message.map(str::to_string),
-    }
-}
-
-fn pending_status(
-    pending: &PendingDeviceAuthorization,
-    message: Option<&str>,
-) -> DeveloperLoginStatus {
-    DeveloperLoginStatus {
-        status: "pending".into(),
-        username: None,
-        user_code: Some(pending.user_code.clone()),
-        verification_uri: Some(GITHUB_DEVICE_VERIFICATION_URL.into()),
-        expires_in_seconds: Some(
-            pending
-                .expires_at
-                .saturating_duration_since(Instant::now())
-                .as_secs(),
-        ),
-        interval_seconds: Some(pending.interval.as_secs()),
-        message: message.map(str::to_string),
-    }
-}
-
-fn get_github_user(access_token: &str) -> Result<GitHubUser, String> {
-    let client = http::client().map_err(|error| error.to_string())?;
-    let response = client
-        .get(format!("{GITHUB_API}/user"))
-        .bearer_auth(access_token)
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .header("User-Agent", "EternalCraft-Launcher")
-        .send()
-        .map_err(|error| format!("No se pudo validar la cuenta GitHub: {error}"))?;
-    if !response.status().is_success() {
-        return Err("GitHub no pudo validar esta sesi√≥n".into());
-    }
-    response
-        .json()
-        .map_err(|error| format!("GitHub devolvi√≥ una cuenta inv√°lida: {error}"))
-}
-
-fn installation_has_contents_write(permissions: &BTreeMap<String, String>) -> bool {
-    permissions
-        .get("contents")
-        .is_some_and(|permission| permission.eq_ignore_ascii_case("write"))
-}
-
-fn repository_permissions_allow_write(permissions: Option<RepositoryPermissions>) -> bool {
-    permissions.is_some_and(|permissions| {
-        permissions.push == Some(true) || permissions.admin == Some(true)
-    })
-}
-
-fn ensure_repository_write_access(access_token: &str) -> Result<(), String> {
-    let client = http::client().map_err(|error| error.to_string())?;
-    let mut installations = Vec::new();
-    for page in 1..=10 {
-        let response = client
-            .get(format!("{GITHUB_API}/user/installations?per_page=100&page={page}"))
-            .bearer_auth(access_token)
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .header("User-Agent", "EternalCraft-Launcher")
-            .send()
-            .map_err(|error| format!("No se pudieron validar las instalaciones de la GitHub App: {error}"))?;
-        if !response.status().is_success() {
-            return Err(format!(
-                "GitHub no pudo validar la instalaci√≥n de la App ({})",
-                response.status()
-            ));
-        }
-        let result: UserInstallationsResponse = response
-            .json()
-            .map_err(|error| format!("GitHub devolvi√≥ instalaciones inv√°lidas: {error}"))?;
-        let count = result.installations.len();
-        installations.extend(result.installations);
-        if count < 100 {
-            break;
-        }
-    }
-
-    for installation in installations.into_iter().filter(|installation| {
-        installation.account.login.eq_ignore_ascii_case("Santi-PdR")
-            && installation_has_contents_write(&installation.permissions)
-    }) {
-        for page in 1..=10 {
-            let response = client
-                .get(format!(
-                    "{GITHUB_API}/user/installations/{}/repositories?per_page=100&page={page}",
-                    installation.id
-                ))
-                .bearer_auth(access_token)
-                .header("Accept", "application/vnd.github+json")
-                .header("X-GitHub-Api-Version", "2022-11-28")
-                .header("User-Agent", "EternalCraft-Launcher")
-                .send()
-                .map_err(|error| format!("No se pudo comprobar el acceso de la GitHub App al repositorio: {error}"))?;
-            if !response.status().is_success() {
-                return Err(format!(
-                    "GitHub no pudo comprobar los repositorios de la instalaci√≥n ({})",
-                    response.status()
-                ));
-            }
-            let result: InstallationRepositoriesResponse = response
-                .json()
-                .map_err(|error| format!("GitHub devolvi√≥ repositorios instalados inv√°lidos: {error}"))?;
-            let count = result.repositories.len();
-            if let Some(repository) = result.repositories.into_iter().find(|repository| {
-                repository.full_name.eq_ignore_ascii_case(PUBLISH_REPOSITORY)
-            }) {
-                if repository_permissions_allow_write(repository.permissions) {
-                    return Ok(());
-                }
-                return Err("Tu cuenta no tiene permiso de escritura en EternalCraft-Launcher".into());
-            }
-            if count < 100 {
-                break;
-            }
-        }
-    }
-
-    Err("Instala la GitHub App con permiso Contents: Read and write √∫nicamente en Santi-PdR/EternalCraft-Launcher.".into())
-}
-
-#[tauri::command]
-pub(super) fn choose_pack_source_directory(
-    app: AppHandle,
-    series_id: String,
-) -> Result<Option<PackSourcePreview>, String> {
-    let _token = app.state::<GitHubDeveloper>().access_token()?;
-    let catalog = current_catalog()?;
-    if !catalog.series.iter().any(|series| series.id == series_id) {
-        return Err("La serie solicitada no existe en el cat√°logo".into());
-    }
-    let selected = app
-        .dialog()
-        .file()
-        .set_title("Seleccionar carpeta con mods JAR oficiales")
-        .blocking_pick_folder();
-    let Some(selected) = selected else {
-        return Ok(None);
-    };
-    let path = selected
-        .into_path()
-        .map_err(|error| format!("Ruta de carpeta no v√°lida: {error}"))?;
-    let series = catalog
-        .series
-        .iter()
-        .find(|series| series.id == series_id)
-        .ok_or_else(|| "La serie solicitada no existe en el cat√°logo".to_string())?;
-    let preview = scan_pack_source(&path, &series_id, &series.minecraft_version)?;
-    let canonical_path = PathBuf::from(&preview.directory);
-    app.state::<GitHubDeveloper>()
-        .0
-        .lock()
-        .map_err(|_| "El estado developer qued√≥ bloqueado".to_string())?
-        .source_directories
-        .insert(series_id, canonical_path);
-    Ok(Some(preview))
-}
-
-#[tauri::command]
-pub(super) fn refresh_pack_source_preview(
-    app: AppHandle,
-    series_id: String,
-) -> Result<PackSourcePreview, String> {
-    let _token = app.state::<GitHubDeveloper>().access_token()?;
-    let path = app
-        .state::<GitHubDeveloper>()
-        .0
-        .lock()
-        .map_err(|_| "El estado developer qued√≥ bloqueado".to_string())?
-        .source_directories
-        .get(&series_id)
-        .cloned()
-        .ok_or_else(|| "Selecciona primero una carpeta fuente para esta serie".to_string())?;
-    let series = current_catalog()?
-        .series
-        .into_iter()
-        .find(|series| series.id == series_id)
-        .ok_or_else(|| "La serie solicitada no existe en el cat√°logo".to_string())?;
-    scan_pack_source(&path, &series_id, &series.minecraft_version)
-}
-
-#[tauri::command]
-pub(super) async fn publish_pack_release(
-    app: AppHandle,
-    series_id: String,
-    version: String,
-    confirmed_source_fingerprint: String,
-) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        publish_pack_release_sync(app, series_id, version, confirmed_source_fingerprint)
-    })
-        .await
-        .map_err(|error| format!("La tarea de publicaci√≥n se interrumpi√≥: {error}"))?
-}
-
-fn publish_pack_release_sync(
-    app: AppHandle,
-    series_id: String,
-    version: String,
-    confirmed_source_fingerprint: String,
-) -> Result<String, String> {
-    let _publish_lease = PublishLease::acquire(&app)?;
-    let access_token = app.state::<GitHubDeveloper>().access_token()?;
-    if !valid_pack_version(&version) {
-        return Err("Usa una versi√≥n estable con formato MAJOR.MINOR.PATCH, por ejemplo 1.2.0".into());
-    }
-    let catalog = current_catalog()?;
-    let series = catalog
-        .series
-        .iter()
-        .find(|series| series.id == series_id)
-        .ok_or_else(|| "La serie seleccionada no existe".to_string())?;
-    let source = app
-        .state::<GitHubDeveloper>()
-        .0
-        .lock()
-        .map_err(|_| "El estado developer qued√≥ bloqueado".to_string())?
-        .source_directories
-        .get(&series_id)
-        .cloned()
-        .ok_or_else(|| "Selecciona primero la carpeta fuente de mods de esta serie".to_string())?;
-    let source = scan_pack_source(&source, &series_id, &series.minecraft_version)?;
-    let incompatible: Vec<&str> = source
-        .files
-        .iter()
-        .filter(|file| file.minecraft_compatibility == PackCompatibilityStatus::Incompatible)
-        .map(|file| file.name.as_str())
-        .collect();
-    if !incompatible.is_empty() {
-        return Err(format!(
-            "No se puede publicar: {} declara incompatibilidad con Minecraft {}: {}",
-            incompatible.len(),
-            series.minecraft_version,
-            incompatible.join(", ")
-        ));
-    }
-    if source.source_fingerprint != confirmed_source_fingerprint {
-        return Err("La carpeta o sus JAR cambiaron desde la revisi√≥n de licencias. Vuelve a verificar la fuente y confirma otra vez.".into());
-    }
-    if source.files.len() > MAX_GITHUB_ASSETS_PER_RELEASE {
-        return Err(format!("GitHub permite hasta {MAX_GITHUB_ASSETS_PER_RELEASE} assets por release"));
-    }
-
-    let tag = format!("{series_id}-v{version}");
-    let release = get_or_create_draft_release(&access_token, &tag, &series.name)?;
-    let assets = list_release_assets(&access_token, release.id)?;
-    if !release.draft && !published_asset_names_match(&source.files, &assets) {
-        return Err(format!(
-            "El release publicado {tag} ya tiene un conjunto de mods distinto; crea una versi√≥n nueva"
-        ));
-    }
-    let mut verified_names = std::collections::BTreeSet::new();
-    let total = source.files.len();
-    for (index, source_file) in source.files.iter().enumerate() {
-        let expected_digest = format!("sha256:{}", source_file.sha256);
-        if let Some(asset) = assets.iter().find(|asset| asset.name == source_file.name) {
-            if asset.digest.as_deref() == Some(expected_digest.as_str()) {
-                verified_names.insert(source_file.name.clone());
-                emit_publish_progress(&app, &series_id, index + 1, total, &source_file.name);
-                continue;
-            }
-            if !release.draft {
-                return Err(format!("El release publicado {tag} ya contiene {} con otro hash; crea una versi√≥n nueva", source_file.name));
-            }
-            delete_release_asset(&access_token, release.id, asset.id)?;
-        }
-        if !release.draft {
-            return Err(format!("El release publicado {tag} no contiene el mod esperado {}; crea una versi√≥n nueva", source_file.name));
-        }
-        let path = Path::new(&source.directory).join(&source_file.name);
-        let current = fs::metadata(&path)
-            .map_err(|error| format!("No se pudo inspeccionar {} para subirlo: {error}", source_file.name))?;
-        if current.len() != source_file.size_bytes || sha256_file(&path)? != source_file.sha256 {
-            return Err(format!("{} cambi√≥ despu√©s de la revisi√≥n; vuelve a escanear la carpeta", source_file.name));
-        }
-        let uploaded = upload_release_asset_resumable(
-            &access_token,
-            &release.upload_url,
-            release.id,
-            &source_file.name,
-            &expected_digest,
-            &path,
-            source_file.size_bytes,
-        )?;
-        if uploaded.name != source_file.name || uploaded.digest.as_deref() != Some(expected_digest.as_str()) {
-            let _ = delete_release_asset(&access_token, release.id, uploaded.id);
-            return Err(format!("GitHub no confirm√≥ el SHA-256 esperado para {}", source_file.name));
-        }
-        verified_names.insert(source_file.name.clone());
-        emit_publish_progress(&app, &series_id, index + 1, total, &source_file.name);
-    }
-    if release.draft {
-        for asset in &assets {
-            if !verified_names.contains(&asset.name) {
-                delete_release_asset(&access_token, release.id, asset.id)?;
-            }
-        }
-    }
-
-    let manifest = Manifest {
-        schema_version: 1,
-        series_id: series_id.clone(),
-        version: version.clone(),
-        minecraft_version: series.minecraft_version.clone(),
-        loader: series.loader.clone(),
-        loader_version: series.loader_version.clone(),
-        files: source
-            .files
-            .iter()
-            .map(|file| ManifestFile {
-                path: format!("mods/{}", file.name),
-                url: format!("https://github.com/{PUBLISH_REPOSITORY}/releases/download/{tag}/{}", encode_path_component(&file.name)),
-                size_bytes: file.size_bytes,
-                sha256: file.sha256.clone(),
-            })
-            .collect(),
-    };
-    let manifest_bytes = serde_json::to_vec_pretty(&manifest)
-        .map_err(|error| format!("No se pudo generar el manifiesto: {error}"))?;
-    if release.draft {
-        publish_github_release(&access_token, release.id, &series.name, &version)?;
-    }
-
-    // Publish the release assets before advancing the manifest pointer. Existing clients
-    // keep resolving the previous complete version while the new assets are not yet public.
-    let manifest_path = format!("packs/{series_id}/manifest.json");
-    let current_manifest = get_repository_file(&access_token, &manifest_path)?
-        .map(|file| file.content.ok_or_else(|| format!("GitHub no devolvi√≥ el manifiesto {manifest_path}")))
-        .transpose()?
-        .map(|content| base64_decode(&content))
-        .transpose()?;
-    if should_advance_manifest_pointer(current_manifest.as_deref(), &manifest_bytes)? {
-        put_repository_file(&access_token, &manifest_path, &manifest_bytes, &format!("Publish {} {version} manifest", series.name))?;
-    }
-    update_catalog_status(&access_token, &series_id)?;
-    super::mark_runtime_series_available(&series_id)?;
-    emit_publish_progress(&app, &series_id, total, total, "Publicaci√≥n verificada");
-    Ok(format!("Release {tag} publicado: {total} mods, {}. La serie ya est√° disponible para el launcher.", format_bytes(source.total_bytes)))
-}
-
-fn valid_pack_version(version: &str) -> bool {
-    let parts: Vec<&str> = version.split('.').collect();
-    parts.len() == 3
-        && parts.iter().all(|part| {
-            !part.is_empty()
-                && part.len() <= 6
-                && part.bytes().all(|byte| byte.is_ascii_digit())
-                && (*part == "0" || !part.starts_with('0'))
-        })
-}
-
-fn emit_publish_progress(app: &AppHandle, series_id: &str, completed: usize, total: usize, message: &str) {
-    let _ = app.emit("pack-publish-progress", PackPublishProgress {
-        series_id: series_id.to_string(),
-        completed_files: completed,
-        total_files: total,
-        message: message.to_string(),
-    });
-}
-
-fn published_asset_names_match(source: &[PackSourceFile], assets: &[GitHubReleaseAsset]) -> bool {
-    let source_names: BTreeSet<&str> = source.iter().map(|file| file.name.as_str()).collect();
-    let asset_names: BTreeSet<&str> = assets.iter().map(|asset| asset.name.as_str()).collect();
-    source_names == asset_names
-}
-
-fn should_advance_manifest_pointer(existing: Option<&[u8]>, expected: &[u8]) -> Result<bool, String> {
-    let expected: serde_json::Value = serde_json::from_slice(expected)
-        .map_err(|error| format!("Manifiesto esperado inv√°lido: {error}"))?;
-    let target_version = expected["version"].as_str()
-        .ok_or_else(|| "El manifiesto esperado no contiene versi√≥n".to_string())?;
-    let target = parse_pack_version(target_version)
-        .ok_or_else(|| "La versi√≥n del manifiesto esperado no es SemVer estable".to_string())?;
-    let Some(existing) = existing else {
-        return Ok(true);
-    };
-    let existing: serde_json::Value = serde_json::from_slice(existing)
-        .map_err(|error| format!("El manifiesto actual no es JSON v√°lido: {error}"))?;
-    if existing == expected {
-        return Ok(false);
-    }
-    let current_version = existing["version"].as_str()
-        .ok_or_else(|| "El manifiesto actual no contiene versi√≥n; no se reemplaz√≥".to_string())?;
-    let current = parse_pack_version(current_version)
-        .ok_or_else(|| "El manifiesto actual no tiene una versi√≥n estable v√°lida; no se reemplaz√≥".to_string())?;
-    match target.cmp(&current) {
-        std::cmp::Ordering::Greater => Ok(true),
-        std::cmp::Ordering::Equal => Err(format!(
-            "La versi√≥n {target_version} ya tiene un manifiesto distinto; usa una versi√≥n nueva"
-        )),
-        std::cmp::Ordering::Less => Err(format!(
-            "La versi√≥n {target_version} es anterior al manifiesto actual {current_version}; no se permite retroceder"
-        )),
-    }
-}
-
-fn parse_pack_version(version: &str) -> Option<(u32, u32, u32)> {
-    if !valid_pack_version(version) {
-        return None;
-    }
-    let mut parts = version.split('.').map(str::parse::<u32>);
-    Some((parts.next()?.ok()?, parts.next()?.ok()?, parts.next()?.ok()?))
-}
-
-fn github_json<T: for<'de> Deserialize<'de>>(response: reqwest::blocking::Response, context: &str) -> Result<T, String> {
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().unwrap_or_default();
-        return Err(format!("{context} fall√≥ ({status}): {}", body.chars().take(500).collect::<String>()));
-    }
-    response.json().map_err(|error| format!("{context}: respuesta inv√°lida de GitHub: {error}"))
-}
-
-fn get_or_create_draft_release(token: &str, tag: &str, series_name: &str) -> Result<GitHubRelease, String> {
-    let client = http::client().map_err(|error| error.to_string())?;
-    let response = client.get(format!("{GITHUB_API}/repos/{PUBLISH_REPOSITORY}/releases/tags/{tag}"))
-        .bearer_auth(token).header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28").header("User-Agent", "EternalCraft-Launcher")
-        .send().map_err(|error| format!("No se pudo consultar el release {tag}: {error}"))?;
-    if response.status().is_success() {
-        let release: GitHubRelease = github_json(response, "Consultar release")?;
-        validate_upload_url(&release.upload_url, release.id)?;
-        return Ok(release);
-    }
-    if response.status().as_u16() != 404 {
-        let status = response.status();
-        let body = response.text().unwrap_or_default();
-        return Err(format!("No se pudo consultar el release ({status}): {}", body.chars().take(400).collect::<String>()));
-    }
-    let response = client.post(format!("{GITHUB_API}/repos/{PUBLISH_REPOSITORY}/releases"))
-        .bearer_auth(token).header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28").header("User-Agent", "EternalCraft-Launcher")
-        .json(&serde_json::json!({"tag_name": tag, "name": format!("{series_name} {tag}"), "body": "Publicado por EternalCraft Launcher Developer.", "draft": true, "prerelease": false}))
-        .send().map_err(|error| format!("No se pudo crear el borrador {tag}: {error}"))?;
-    let release: GitHubRelease = github_json(response, "Crear release borrador")?;
-    validate_upload_url(&release.upload_url, release.id)?;
-    Ok(release)
-}
-
-fn validate_upload_url(url: &str, release_id: u64) -> Result<(), String> {
-    let expected = format!("https://uploads.github.com/repos/{PUBLISH_REPOSITORY}/releases/{release_id}/assets");
-    let suffix = url.strip_prefix(&expected).unwrap_or_default();
-    if suffix != "{?name,label}" && !suffix.is_empty() {
-        return Err("GitHub devolvi√≥ una URL de carga inesperada; se cancel√≥ por seguridad".into());
-    }
-    if !url.starts_with(&expected) { return Err("GitHub devolvi√≥ una URL de carga inesperada; se cancel√≥ por seguridad".into()); }
-    Ok(())
-}
-
-fn list_release_assets(token: &str, release_id: u64) -> Result<Vec<GitHubReleaseAsset>, String> {
-    let client = http::client().map_err(|error| error.to_string())?;
-    let mut assets = Vec::new();
-    for page in 1..=10 {
-        let response = client.get(format!("{GITHUB_API}/repos/{PUBLISH_REPOSITORY}/releases/{release_id}/assets?per_page=100&page={page}"))
-            .bearer_auth(token).header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28").header("User-Agent", "EternalCraft-Launcher")
-            .send().map_err(|error| format!("No se pudieron consultar los archivos del release: {error}"))?;
-        let page_assets: Vec<GitHubReleaseAsset> = github_json(response, "Consultar assets del release")?;
-        let count = page_assets.len();
-        assets.extend(page_assets);
-        if count < 100 { return Ok(assets); }
-    }
-    Err("El release excede el l√≠mite de 1000 assets soportado".into())
-}
-
-fn delete_release_asset(token: &str, release_id: u64, asset_id: u64) -> Result<(), String> {
-    let client = http::client().map_err(|error| error.to_string())?;
-    let response = client.delete(format!("{GITHUB_API}/repos/{PUBLISH_REPOSITORY}/releases/assets/{asset_id}"))
-        .bearer_auth(token).header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28").header("User-Agent", "EternalCraft-Launcher")
-        .send().map_err(|error| format!("No se pudo reemplazar un asset del release {release_id}: {error}"))?;
-    if response.status().is_success() { Ok(()) } else { Err(format!("GitHub rechaz√≥ retirar el asset {asset_id} ({})", response.status())) }
-}
-
-struct AssetUploadFailure {
-    message: String,
-    retryable: bool,
-}
-
-fn retryable_upload_status(status: reqwest::StatusCode) -> bool {
-    status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
-}
-
-fn upload_release_asset_once(
-    token: &str,
-    upload_url: &str,
-    name: &str,
-    path: &Path,
-    size: u64,
-) -> Result<GitHubReleaseAsset, AssetUploadFailure> {
-    let url = format!(
-        "{}?name={}",
-        upload_url.split('{').next().unwrap_or(upload_url),
-        encode_path_component(name)
-    );
-    let file = fs::File::open(path).map_err(|error| AssetUploadFailure {
-        message: format!("No se pudo abrir {name} para subirlo: {error}"),
-        retryable: false,
-    })?;
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(20 * 60))
-        .user_agent("EternalCraft-Launcher")
-        .build()
-        .map_err(|error| AssetUploadFailure {
-            message: format!("No se pudo preparar la subida de {name}: {error}"),
-            retryable: false,
-        })?;
-    let response = client
-        .put(url)
-        .bearer_auth(token)
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .header("User-Agent", "EternalCraft-Launcher")
-        .header("Content-Type", "application/java-archive")
-        .header("Content-Length", size.to_string())
-        .body(reqwest::blocking::Body::new(file))
-        .send()
-        .map_err(|error| AssetUploadFailure {
-            message: format!("No se pudo subir {name}: {error}"),
-            retryable: error.is_timeout() || error.is_connect(),
-        })?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().unwrap_or_default();
-        return Err(AssetUploadFailure {
-            message: format!(
-                "Subir {name} fall√≥ ({status}): {}",
-                body.chars().take(500).collect::<String>()
-            ),
-            retryable: retryable_upload_status(status),
-        });
-    }
-    response.json().map_err(|error| AssetUploadFailure {
-        message: format!("GitHub devolvi√≥ una respuesta inv√°lida al subir {name}: {error}"),
-        retryable: true,
-    })
-}
-
-fn upload_release_asset_resumable(
-    token: &str,
-    upload_url: &str,
-    release_id: u64,
-    name: &str,
-    expected_digest: &str,
-    path: &Path,
-    size: u64,
-) -> Result<GitHubReleaseAsset, String> {
-    const MAX_ATTEMPTS: usize = 3;
-    let mut last_error = String::new();
-    for attempt in 1..=MAX_ATTEMPTS {
-        match upload_release_asset_once(token, upload_url, name, path, size) {
-            Ok(asset)
-                if asset.name == name && asset.digest.as_deref() == Some(expected_digest) =>
-            {
-                return Ok(asset);
-            }
-            Ok(asset) => {
-                let _ = delete_release_asset(token, release_id, asset.id);
-                return Err(format!("GitHub no confirm√≥ el SHA-256 esperado para {name}"));
-            }
-            Err(failure) => {
-                last_error = failure.message;
-                match list_release_assets(token, release_id) {
-                    Ok(assets) => {
-                        if let Some(asset) = assets.iter().find(|asset| {
-                            asset.name == name && asset.digest.as_deref() == Some(expected_digest)
-                        }) {
-                            return Ok(GitHubReleaseAsset {
-                                id: asset.id,
-                                name: asset.name.clone(),
-                                digest: asset.digest.clone(),
-                            });
-                        }
-                        let mut removed_stale_asset = false;
-                        for asset in assets.iter().filter(|asset| asset.name == name) {
-                            delete_release_asset(token, release_id, asset.id)?;
-                            removed_stale_asset = true;
-                        }
-                        if !failure.retryable && !removed_stale_asset {
-                            return Err(last_error);
-                        }
-                        if attempt == MAX_ATTEMPTS {
-                            break;
-                        }
-                    }
-                    Err(verify_error) if !failure.retryable || attempt == MAX_ATTEMPTS => {
-                        return Err(format!(
-                            "{last_error}. No se pudo confirmar si GitHub acept√≥ el archivo: {verify_error}"
-                        ));
-                    }
-                    Err(_) => {}
-                }
-                if attempt < MAX_ATTEMPTS {
-                    std::thread::sleep(Duration::from_secs(2_u64.pow(attempt as u32)));
-                }
-            }
-        }
-    }
-    Err(format!(
-        "No se pudo confirmar la carga de {name} despu√©s de {MAX_ATTEMPTS} intentos: {last_error}"
-    ))
-}
-
-fn publish_github_release(token: &str, release_id: u64, series_name: &str, version: &str) -> Result<(), String> {
-    let client = http::client().map_err(|error| error.to_string())?;
-    let response = client.patch(format!("{GITHUB_API}/repos/{PUBLISH_REPOSITORY}/releases/{release_id}"))
-        .bearer_auth(token).header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28").header("User-Agent", "EternalCraft-Launcher")
-        .json(&serde_json::json!({"draft": false, "name": format!("{series_name} {version}"), "body": "Versi√≥n oficial publicada por EternalCraft Launcher Developer."}))
-        .send().map_err(|error| format!("No se pudo publicar el release: {error}"))?;
-    let release: GitHubRelease = github_json(response, "Publicar release")?;
-    if release.draft { return Err("GitHub no confirm√≥ la publicaci√≥n del release".into()); }
-    Ok(())
-}
-
-fn put_repository_file(token: &str, path: &str, bytes: &[u8], message: &str) -> Result<(), String> {
-    let endpoint = format!("{GITHUB_API}/repos/{PUBLISH_REPOSITORY}/contents/{path}");
-    let current = get_repository_file(token, path)?;
-    let sha = current.map(|content| content.sha);
-    let client = http::client().map_err(|error| error.to_string())?;
-    let mut body = serde_json::json!({"message": message, "content": base64_encode(bytes)});
-    if let Some(sha) = sha { body["sha"] = serde_json::Value::String(sha); }
-    let response = client.put(endpoint).bearer_auth(token).header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28").header("User-Agent", "EternalCraft-Launcher")
-        .json(&body).send().map_err(|error| format!("No se pudo guardar {path} en GitHub: {error}"))?;
-    if response.status().is_success() { Ok(()) }
-    else { Err(format!("GitHub rechaz√≥ actualizar {path} ({}): {}", response.status(), response.text().unwrap_or_default().chars().take(400).collect::<String>())) }
-}
-
-fn get_repository_file(token: &str, path: &str) -> Result<Option<GitHubContentResponse>, String> {
-    let client = http::client().map_err(|error| error.to_string())?;
-    let response = client.get(format!("{GITHUB_API}/repos/{PUBLISH_REPOSITORY}/contents/{path}"))
-        .bearer_auth(token).header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28").header("User-Agent", "EternalCraft-Launcher")
-        .send().map_err(|error| format!("No se pudo leer {path} en GitHub: {error}"))?;
-    if response.status().is_success() {
-        github_json(response, &format!("Leer {path}")).map(Some)
-    } else if response.status().as_u16() == 404 {
-        Ok(None)
-    } else {
-        Err(format!("GitHub no pudo leer {path} ({})", response.status()))
-    }
-}
-
-fn update_catalog_status(token: &str, series_id: &str) -> Result<(), String> {
-    let path = "resources/series/catalog.json";
-    let client = http::client().map_err(|error| error.to_string())?;
-    let response = client.get(format!("{GITHUB_API}/repos/{PUBLISH_REPOSITORY}/contents/{path}"))
-        .bearer_auth(token).header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28").header("User-Agent", "EternalCraft-Launcher")
-        .send().map_err(|error| format!("No se pudo leer el cat√°logo remoto: {error}"))?;
-    let encoded: GitHubContentResponse = github_json(response, "Cargar cat√°logo remoto")?;
-    let decoded = base64_decode(encoded.content.as_deref().ok_or_else(|| "GitHub no devolvi√≥ el cat√°logo codificado".to_string())?)?;
-    let mut catalog: serde_json::Value = serde_json::from_slice(&decoded).map_err(|error| format!("El cat√°logo remoto no es JSON v√°lido: {error}"))?;
-    let series = catalog["series"].as_array_mut().ok_or_else(|| "El cat√°logo remoto no tiene una lista de series".to_string())?;
-    let entry = series.iter_mut().find(|entry| entry["id"].as_str() == Some(series_id))
-        .ok_or_else(|| format!("La serie {series_id} ya no existe en el cat√°logo remoto"))?;
-    entry["packStatus"] = serde_json::Value::String("available".into());
-    let bytes = serde_json::to_vec_pretty(&catalog).map_err(|error| error.to_string())?;
-    put_repository_file(token, path, &bytes, &format!("Enable {series_id} official pack"))?;
-    Ok(())
-}
-
-fn encode_path_component(value: &str) -> String {
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-            encoded.push(byte as char);
-        } else {
-            encoded.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    encoded
-}
-
-fn base64_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let a = chunk[0];
-        let b = *chunk.get(1).unwrap_or(&0);
-        let c = *chunk.get(2).unwrap_or(&0);
-        output.push(TABLE[(a >> 2) as usize] as char);
-        output.push(TABLE[(((a & 3) << 4) | (b >> 4)) as usize] as char);
-        output.push(if chunk.len() > 1 { TABLE[(((b & 15) << 2) | (c >> 6)) as usize] as char } else { '=' });
-        output.push(if chunk.len() > 2 { TABLE[(c & 63) as usize] as char } else { '=' });
-    }
-    output
-}
-
-fn base64_decode(encoded: &str) -> Result<Vec<u8>, String> {
-    let bytes: Vec<u8> = encoded.bytes().filter(|byte| !byte.is_ascii_whitespace()).collect();
-    if bytes.len() % 4 != 0 { return Err("GitHub devolvi√≥ base64 incompleto".into()); }
-    let value = |byte: u8| -> Option<u8> {
-        match byte { b'A'..=b'Z' => Some(byte - b'A'), b'a'..=b'z' => Some(byte - b'a' + 26), b'0'..=b'9' => Some(byte - b'0' + 52), b'+' => Some(62), b'/' => Some(63), _ => None }
-    };
-    let mut output = Vec::with_capacity(bytes.len() / 4 * 3);
-    for chunk in bytes.chunks_exact(4) {
-        let a = value(chunk[0]).ok_or_else(|| "GitHub devolvi√≥ base64 inv√°lido".to_string())?;
-        let b = value(chunk[1]).ok_or_else(|| "GitHub devolvi√≥ base64 inv√°lido".to_string())?;
-        let c = if chunk[2] == b'=' { 0 } else { value(chunk[2]).ok_or_else(|| "GitHub devolvi√≥ base64 inv√°lido".to_string())? };
-        let d = if chunk[3] == b'=' { 0 } else { value(chunk[3]).ok_or_else(|| "GitHub devolvi√≥ base64 inv√°lido".to_string())? };
-        output.push((a << 2) | (b >> 4));
-        if chunk[2] != b'=' { output.push((b << 4) | (c >> 2)); }
-        if chunk[3] != b'=' { output.push((c << 6) | d); }
-    }
-    Ok(output)
-}
-
-fn format_bytes(bytes: u64) -> String {
-    if bytes < 1024 * 1024 { format!("{} KiB", bytes / 1024) }
-    else { format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0)) }
-}
-
-fn scan_pack_source(
-    path: &Path,
-    series_id: &str,
-    minecraft_version: &str,
-) -> Result<PackSourcePreview, String> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| format!("No se pudo inspeccionar la carpeta elegida: {error}"))?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err("La fuente debe ser una carpeta real, no un enlace simb√≥lico".into());
-    }
-    let directory = path
-        .canonicalize()
-        .map_err(|error| format!("No se pudo resolver la carpeta fuente: {error}"))?;
-    if directory
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.eq_ignore_ascii_case("personales"))
-    {
-        return Err("No se puede publicar una carpeta llamada personales como pack oficial".into());
-    }
-
-    let mut files = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
-    let mut total_bytes = 0_u64;
-    for entry in fs::read_dir(&directory)
-        .map_err(|error| format!("No se pudo leer la carpeta fuente: {error}"))?
-    {
-        let entry = entry.map_err(|error| format!("No se pudo leer un elemento de la fuente: {error}"))?;
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("No se pudo inspeccionar un elemento de la fuente: {error}"))?;
-        if !file_type.is_file() {
-            continue;
-        }
-        let file_name = entry.file_name();
-        let Some(name) = file_name.to_str() else { continue };
-        if !name.to_ascii_lowercase().ends_with(".jar") {
-            continue;
-        }
-        if !valid_official_asset_name(name) {
-            return Err(format!("El nombre de archivo no es compatible con Forge/GitHub: {name}"));
-        }
-        if !seen.insert(name.to_ascii_lowercase()) {
-            return Err(format!("Hay nombres de mod duplicados sin distinguir may√∫sculas: {name}"));
-        }
-        let jar_path = entry.path();
-        let before = entry
-            .metadata()
-            .map_err(|error| format!("No se pudo leer el tama√±o de {name}: {error}"))?;
-        if before.len() == 0 || before.len() > MAX_SOURCE_JAR_BYTES {
-            return Err(format!("El mod {name} est√° vac√≠o o supera 256 MiB"));
-        }
-        total_bytes = total_bytes
-            .checked_add(before.len())
-            .ok_or_else(|| "El tama√±o total de los mods excede 4 GiB".to_string())?;
-        if total_bytes > MAX_SOURCE_PACK_BYTES {
-            return Err("El tama√±o total de los mods supera 4 GiB".into());
-        }
-        validate_forge_mod_archive(&jar_path)
-            .map_err(|error| format!("{name}: {error}"))?;
-        let license = read_pack_license(&jar_path);
-        let license_status = pack_license_status(license.as_deref());
-        let (minecraft_compatibility, minecraft_version_range) =
-            read_pack_minecraft_compatibility(&jar_path, minecraft_version);
-        let digest = sha256_file(&jar_path)?;
-        let after = fs::metadata(&jar_path)
-            .map_err(|error| format!("No se pudo verificar el origen de {name}: {error}"))?;
-        if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
-            return Err(format!("El archivo {name} cambi√≥ mientras se verificaba"));
-        }
-        files.push(PackSourceFile {
-            name: name.to_string(),
-            size_bytes: before.len(),
-            sha256: digest,
-            license,
-            license_status,
-            minecraft_compatibility,
-            minecraft_version_range,
-        });
-    }
-    files.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
-    if files.is_empty() {
-        return Err("La carpeta elegida no contiene archivos JAR oficiales en su nivel ra√≠z".into());
-    }
-    let source_fingerprint = pack_source_fingerprint(&files);
-    Ok(PackSourcePreview {
-        series_id: series_id.to_string(),
-        directory: directory.to_string_lossy().into_owned(),
-        files,
-        total_bytes,
-        source_fingerprint,
-    })
-}
-
-fn read_pack_minecraft_compatibility(
-    path: &Path,
-    target_version: &str,
-) -> (PackCompatibilityStatus, Option<String>) {
-    let unknown = (PackCompatibilityStatus::Unknown, None);
-    let Some(contents) = read_forge_mod_metadata(path) else {
-        return unknown;
-    };
-    let Ok(document) = toml::from_str::<toml::Value>(&contents) else {
-        return unknown;
-    };
-    let Some(dependencies) = document.get("dependencies").and_then(toml::Value::as_table) else {
-        return unknown;
-    };
-
-    let mut found_minecraft_dependency = false;
-    let mut reported_range = None;
-    for entries in dependencies.values().filter_map(toml::Value::as_array) {
-        for dependency in entries {
-            let Some(table) = dependency.as_table() else { continue };
-            if !table
-                .get("modId")
-                .and_then(toml::Value::as_str)
-                .is_some_and(|id| id.eq_ignore_ascii_case("minecraft"))
-            {
-                continue;
-            }
-            found_minecraft_dependency = true;
-            let Some(range) = table
-                .get("versionRange")
-                .and_then(toml::Value::as_str)
-                .map(str::trim)
-            else {
-                continue;
-            };
-            if range.is_empty() {
-                continue;
-            }
-            reported_range = Some(range.to_string());
-            match maven_version_range_contains(range, target_version) {
-                Some(true) => {}
-                Some(false) => {
-                    return (PackCompatibilityStatus::Incompatible, reported_range);
-                }
-                None => return (PackCompatibilityStatus::Unknown, reported_range),
-            }
-        }
-    }
-    if found_minecraft_dependency {
-        (PackCompatibilityStatus::Compatible, reported_range)
-    } else {
-        unknown
-    }
-}
-
-fn read_forge_mod_metadata(path: &Path) -> Option<String> {
-    let file = fs::File::open(path).ok()?;
-    let mut archive = zip::ZipArchive::new(file).ok()?;
-    let index = archive
-        .file_names()
-        .position(|name| name.eq_ignore_ascii_case("META-INF/mods.toml"))?;
-    let mut metadata = archive.by_index(index).ok()?;
-    let mut contents = String::new();
-    metadata
-        .by_ref()
-        .take(256 * 1024)
-        .read_to_string(&mut contents)
-        .ok()?;
-    Some(contents)
-}
-
-fn maven_version_range_contains(range: &str, target: &str) -> Option<bool> {
-    let target = numeric_version_parts(target)?;
-    let mut remaining = range.trim();
-    if remaining.is_empty() {
-        return None;
-    }
-    let mut matched = false;
-    while !remaining.is_empty() {
-        let opening = remaining.chars().next()?;
-        if opening != '[' && opening != '(' {
-            return None;
-        }
-        let closing_index = remaining.find(|character| character == ')' || character == ']')?;
-        let closing = remaining[closing_index..].chars().next()?;
-        let body = &remaining[1..closing_index];
-        if let Some((lower, upper)) = body.split_once(',') {
-            let lower = if lower.trim().is_empty() {
-                None
-            } else {
-                Some(numeric_version_parts(lower.trim())?)
-            };
-            let upper = if upper.trim().is_empty() {
-                None
-            } else {
-                Some(numeric_version_parts(upper.trim())?)
-            };
-            let above_lower = lower.as_ref().is_none_or(|bound| {
-                let comparison = compare_numeric_versions(&target, bound);
-                comparison.is_gt() || comparison.is_eq() && opening == '['
-            });
-            let below_upper = upper.as_ref().is_none_or(|bound| {
-                let comparison = compare_numeric_versions(&target, bound);
-                comparison.is_lt() || comparison.is_eq() && closing == ']'
-            });
-            matched |= above_lower && below_upper;
-        } else {
-            if opening != '[' || closing != ']' {
-                return None;
-            }
-            let exact = numeric_version_parts(body.trim())?;
-            matched |= compare_numeric_versions(&target, &exact).is_eq();
-        }
-        remaining = remaining[closing_index + 1..].trim_start();
-        if remaining.is_empty() {
-            break;
-        }
-        remaining = remaining.strip_prefix(',')?.trim_start();
-    }
-    Some(matched)
-}
-
-fn numeric_version_parts(version: &str) -> Option<Vec<u64>> {
-    let parts: Vec<u64> = version
-        .split('.')
-        .map(str::parse::<u64>)
-        .collect::<Result<_, _>>()
-        .ok()?;
-    (!parts.is_empty()).then_some(parts)
-}
-
-fn compare_numeric_versions(left: &[u64], right: &[u64]) -> std::cmp::Ordering {
-    let part_count = left.len().max(right.len());
-    (0..part_count)
-        .map(|index| left.get(index).copied().unwrap_or(0).cmp(&right.get(index).copied().unwrap_or(0)))
-        .find(|ordering| !ordering.is_eq())
-        .unwrap_or(std::cmp::Ordering::Equal)
-}
-
-fn pack_source_fingerprint(files: &[PackSourceFile]) -> String {
-    let mut hasher = sha2::Sha256::new();
-    let mut sorted_files: Vec<&PackSourceFile> = files.iter().collect();
-    sorted_files.sort_by(|left, right| {
-        left.name
-            .to_ascii_lowercase()
-            .cmp(&right.name.to_ascii_lowercase())
-    });
-    for file in sorted_files {
-        hasher.update(file.name.to_ascii_lowercase().as_bytes());
-        hasher.update([0]);
-        hasher.update(file.sha256.as_bytes());
-        hasher.update([0]);
-    }
-    format!("{:x}", hasher.finalize())
-}
-
-fn read_pack_license(path: &Path) -> Option<String> {
-    let contents = read_forge_mod_metadata(path)?;
-    let document: toml::Value = toml::from_str(&contents).ok()?;
-    document
-        .get("license")
-        .and_then(toml::Value::as_str)
-        .map(str::trim)
-        .filter(|license| !license.is_empty())
-        .map(str::to_string)
-}
-
-fn pack_license_status(license: Option<&str>) -> PackLicenseStatus {
-    let Some(license) = license.map(str::trim).filter(|value| !value.is_empty()) else {
-        return PackLicenseStatus::Unknown;
-    };
-    let normalized = license.to_ascii_lowercase();
-    let words: Vec<&str> = normalized
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .collect();
-    let has_arr_marker = words.contains(&"arr");
-    if normalized.contains("all rights reserved")
-        || normalized.replace('-', " ").contains("all rights reserved")
-        || normalized.contains("noncommercial")
-        || normalized.contains("non-commercial")
-        || normalized.contains("by-nc")
-        || normalized.contains("by nc")
-        || normalized.contains("protective")
-        || has_arr_marker
-    {
-        return PackLicenseStatus::PermissionRequired;
-    }
-    let recognized = words.contains(&"mit")
-        || words.contains(&"apache")
-        || words.contains(&"bsd")
-        || words.iter().any(|word| word.starts_with("lgpl"))
-        || words.iter().any(|word| word.starts_with("gpl"))
-        || words.iter().any(|word| word.starts_with("mpl"))
-        || words.contains(&"unlicense")
-        || words.contains(&"academic") && words.contains(&"license")
-        || words.contains(&"lesser")
-            && words.contains(&"general")
-            && words.contains(&"public")
-            && words.contains(&"license")
-        || words.contains(&"general")
-            && words.contains(&"public")
-            && words.contains(&"license");
-    if recognized {
-        PackLicenseStatus::Recognized
-    } else {
-        PackLicenseStatus::Unknown
-    }
-}
-
-fn valid_official_asset_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 180
-        && name.to_ascii_lowercase().ends_with(".jar")
-        && !name.starts_with('.')
-        && !name.starts_with(' ')
-        && !name.ends_with(' ')
-        && !name.ends_with('.')
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b" ._+-()[]'".contains(&byte))
-}
-
-fn sha256_file(path: &Path) -> Result<String, String> {
-    let mut file = fs::File::open(path)
-        .map_err(|error| format!("No se pudo abrir {} para calcular SHA-256: {error}", path.display()))?;
-    let mut hasher = sha2::Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|error| format!("No se pudo calcular SHA-256 de {}: {error}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn write_forge_jar(path: &Path) {
-        use std::io::Write;
-        let file = fs::File::create(path).unwrap();
-        let mut archive = zip::ZipWriter::new(file);
-        archive
-            .start_file("META-INF/mods.toml", zip::write::SimpleFileOptions::default())
-            .unwrap();
-        archive
-            .write_all(b"modLoader=\"javafml\"\nlicense=\"MIT\"\n")
-            .unwrap();
-        archive.finish().unwrap();
-    }
-
-    fn temporary_directory(label: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "eternalcraft-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&path).unwrap();
-        path
-    }
-
-    #[test]
-    fn concurrent_pack_publications_are_serialized_for_catalog_consistency() {
-        let mut active = false;
-        assert!(reserve_publish(&mut active));
-        assert!(!reserve_publish(&mut active));
-        active = false;
-        assert!(reserve_publish(&mut active));
-    }
-
-    #[test]
-    fn published_release_asset_set_must_match_the_source_exactly() {
-        let source = vec![
-            PackSourceFile {
-                name: "alpha.jar".into(),
-                size_bytes: 10,
-                sha256: "a".repeat(64),
-                license: Some("MIT".into()),
-                license_status: PackLicenseStatus::Recognized,
-                minecraft_compatibility: PackCompatibilityStatus::Unknown,
-                minecraft_version_range: None,
-            },
-            PackSourceFile {
-                name: "beta.jar".into(),
-                size_bytes: 20,
-                sha256: "b".repeat(64),
-                license: Some("MIT".into()),
-                license_status: PackLicenseStatus::Recognized,
-                minecraft_compatibility: PackCompatibilityStatus::Unknown,
-                minecraft_version_range: None,
-            },
-        ];
-        let complete = vec![
-            GitHubReleaseAsset { id: 2, name: "beta.jar".into(), digest: None },
-            GitHubReleaseAsset { id: 1, name: "alpha.jar".into(), digest: None },
-        ];
-        assert!(published_asset_names_match(&source, &complete));
-        assert!(!published_asset_names_match(&source, &complete[..1]));
-        let with_stale_asset = [complete.as_slice(), &[GitHubReleaseAsset { id: 3, name: "retired.jar".into(), digest: None }]].concat();
-        assert!(!published_asset_names_match(&source, &with_stale_asset));
-    }
-
-    #[test]
-    fn pack_source_fingerprint_changes_when_a_mod_changes_and_is_order_independent() {
-        let first = PackSourceFile {
-            name: "Alpha.jar".into(),
-            size_bytes: 10,
-            sha256: "a".repeat(64),
-            license: Some("MIT".into()),
-            license_status: PackLicenseStatus::Recognized,
-            minecraft_compatibility: PackCompatibilityStatus::Unknown,
-            minecraft_version_range: None,
-        };
-        let second = PackSourceFile {
-            name: "beta.jar".into(),
-            size_bytes: 20,
-            sha256: "b".repeat(64),
-            license: Some("MIT".into()),
-            license_status: PackLicenseStatus::Recognized,
-            minecraft_compatibility: PackCompatibilityStatus::Unknown,
-            minecraft_version_range: None,
-        };
-        let original = pack_source_fingerprint(&[first.clone(), second.clone()]);
-        assert_eq!(original.len(), 64);
-        assert_eq!(original, pack_source_fingerprint(&[second.clone(), first.clone()]));
-        let changed = PackSourceFile {
-            sha256: "c".repeat(64),
-            ..first
-        };
-        assert_ne!(original, pack_source_fingerprint(&[changed, second]));
-    }
-
-    #[test]
-    fn manifest_pointer_only_advances_after_a_new_complete_release() {
-        let expected = br#"{"seriesId":"siege","version":"1.2.0","files":[{"path":"mods/a.jar","sha256":"abc"}]}"#;
-        let same = br#"{
-            "seriesId": "siege",
-            "version": "1.2.0",
-            "files": [{"path": "mods/a.jar", "sha256": "abc"}]
-        }"#;
-        let same_version_changed = br#"{"seriesId":"siege","version":"1.2.0","files":[]}"#;
-        let older = br#"{"seriesId":"siege","version":"1.1.9","files":[]}"#;
-        let newer = br#"{"seriesId":"siege","version":"1.3.0","files":[]}"#;
-        assert!(should_advance_manifest_pointer(None, expected).unwrap());
-        assert!(!should_advance_manifest_pointer(Some(same), expected).unwrap());
-        assert!(should_advance_manifest_pointer(Some(older), expected).unwrap());
-        assert!(should_advance_manifest_pointer(Some(same_version_changed), expected).is_err());
-        assert!(should_advance_manifest_pointer(Some(newer), expected).is_err());
-        assert!(should_advance_manifest_pointer(Some(b"not json"), expected).is_err());
-    }
-
-    #[test]
-    fn pack_versions_compare_numerically() {
-        assert_eq!(parse_pack_version("1.10.0"), Some((1, 10, 0)));
-        assert!(parse_pack_version("1.2.3-beta").is_none());
-    }
-
-    #[test]
-    fn pack_license_review_flags_restricted_and_unknown_metadata() {
-        assert_eq!(pack_license_status(Some("MIT")), PackLicenseStatus::Recognized);
-        assert_eq!(pack_license_status(Some("LGPL-3.0")), PackLicenseStatus::Recognized);
-        assert_eq!(pack_license_status(Some("All Rights Reserved")), PackLicenseStatus::PermissionRequired);
-        assert_eq!(pack_license_status(Some("All-Rights-Reserved")), PackLicenseStatus::PermissionRequired);
-        assert_eq!(
-            pack_license_status(Some("MIT License, Art Resources: All Rights Reserved.")),
-            PackLicenseStatus::PermissionRequired
-        );
-        assert_eq!(pack_license_status(Some("ARR")), PackLicenseStatus::PermissionRequired);
-        assert_eq!(pack_license_status(Some("CC BY-NC-ND 4.0")), PackLicenseStatus::PermissionRequired);
-        assert_eq!(pack_license_status(Some("Not specified")), PackLicenseStatus::Unknown);
-        assert_eq!(pack_license_status(Some("AGNYA License")), PackLicenseStatus::Unknown);
-        assert_eq!(pack_license_status(None), PackLicenseStatus::Unknown);
-    }
-
-    #[test]
-    fn minecraft_metadata_ranges_match_series_version_and_fail_closed() {
-        assert_eq!(
-            maven_version_range_contains("[1.20,1.21)", "1.20.1"),
-            Some(true)
-        );
-        assert_eq!(
-            maven_version_range_contains("[1.20.2,1.21)", "1.20.1"),
-            Some(false)
-        );
-        assert_eq!(
-            maven_version_range_contains("(1.20.1,1.20.2]", "1.20.1"),
-            Some(false)
-        );
-        assert_eq!(
-            maven_version_range_contains("[1.20.1]", "1.20.1"),
-            Some(true)
-        );
-        assert_eq!(
-            maven_version_range_contains("[1.20.1,1.20.2),[1.20.4,1.21)", "1.20.4"),
-            Some(true)
-        );
-        assert_eq!(
-            maven_version_range_contains("[1.20],[1.20.1]", "1.20.1"),
-            Some(true)
-        );
-        assert_eq!(maven_version_range_contains("1.20.1", "1.20.1"), None);
-        assert_eq!(maven_version_range_contains("not-a-range", "1.20.1"), None);
-    }
-
-    #[test]
-    fn pack_source_reports_minecraft_compatibility_from_forge_metadata() {
-        use std::io::Write;
-
-        let source = temporary_directory("developer-pack-minecraft-range");
-        let file = fs::File::create(source.join("Compatible.jar")).unwrap();
-        let mut archive = zip::ZipWriter::new(file);
-        archive
-            .start_file("META-INF/mods.toml", zip::write::SimpleFileOptions::default())
-            .unwrap();
-        archive
-            .write_all(
-                b"modLoader=\"javafml\"\nlicense=\"MIT\"\n[[dependencies.example]]\nmodId=\"minecraft\"\nmandatory=true\nversionRange=\"[1.20.2,1.21)\"\n",
-            )
-            .unwrap();
-        archive.finish().unwrap();
-
-        let file = fs::File::create(source.join("Review.jar")).unwrap();
-        let mut archive = zip::ZipWriter::new(file);
-        archive
-            .start_file("META-INF/mods.toml", zip::write::SimpleFileOptions::default())
-            .unwrap();
-        archive
-            .write_all(
-                b"modLoader=\"javafml\"\nlicense=\"MIT\"\n[[dependencies.example]]\nmodId=\"minecraft\"\nmandatory=true\nversionRange=\">=1.20.1 <1.21\"\n",
-            )
-            .unwrap();
-        archive.finish().unwrap();
-
-        let file = fs::File::create(source.join("Unrestricted.jar")).unwrap();
-        let mut archive = zip::ZipWriter::new(file);
-        archive
-            .start_file("META-INF/mods.toml", zip::write::SimpleFileOptions::default())
-            .unwrap();
-        archive
-            .write_all(
-                b"modLoader=\"javafml\"\nlicense=\"MIT\"\n[[dependencies.example]]\nmodId=\"minecraft\"\nmandatory=true\nversionRange=\"\"\n",
-            )
-            .unwrap();
-        archive.finish().unwrap();
-
-        let preview = scan_pack_source(&source, "siege", "1.20.1").unwrap();
-        let incompatible = preview.files.iter().find(|file| file.name == "Compatible.jar").unwrap();
-        assert_eq!(incompatible.minecraft_compatibility, PackCompatibilityStatus::Incompatible);
-        assert_eq!(incompatible.minecraft_version_range.as_deref(), Some("[1.20.2,1.21)"));
-        let review = preview.files.iter().find(|file| file.name == "Review.jar").unwrap();
-        assert_eq!(review.minecraft_compatibility, PackCompatibilityStatus::Unknown);
-        assert_eq!(review.minecraft_version_range.as_deref(), Some(">=1.20.1 <1.21"));
-        let unrestricted = preview.files.iter().find(|file| file.name == "Unrestricted.jar").unwrap();
-        assert_eq!(unrestricted.minecraft_compatibility, PackCompatibilityStatus::Compatible);
-        assert_eq!(unrestricted.minecraft_version_range, None);
-
-        fs::remove_dir_all(source).unwrap();
-    }
-
-    #[test]
-    fn release_upload_retry_policy_retries_throttling_and_server_errors_only() {
-        assert!(retryable_upload_status(reqwest::StatusCode::TOO_MANY_REQUESTS));
-        assert!(retryable_upload_status(reqwest::StatusCode::BAD_GATEWAY));
-        assert!(retryable_upload_status(reqwest::StatusCode::INTERNAL_SERVER_ERROR));
-        assert!(!retryable_upload_status(reqwest::StatusCode::FORBIDDEN));
-        assert!(!retryable_upload_status(reqwest::StatusCode::UNPROCESSABLE_ENTITY));
-    }
-
-    #[test]
-    fn github_developer_access_requires_contents_write_permission() {
-        let mut permissions = BTreeMap::new();
-        permissions.insert("contents".into(), "write".into());
-        assert!(installation_has_contents_write(&permissions));
-        permissions.insert("contents".into(), "read".into());
-        assert!(!installation_has_contents_write(&permissions));
-        assert!(!installation_has_contents_write(&BTreeMap::new()));
-    }
-
-    #[test]
-    fn github_developer_access_requires_user_write_on_installed_repository() {
-        assert!(repository_permissions_allow_write(Some(RepositoryPermissions {
-            push: Some(true),
-            admin: Some(false),
-        })));
-        assert!(repository_permissions_allow_write(Some(RepositoryPermissions {
-            push: Some(false),
-            admin: Some(true),
-        })));
-        assert!(!repository_permissions_allow_write(Some(RepositoryPermissions {
-            push: Some(false),
-            admin: Some(false),
-        })));
-        assert!(!repository_permissions_allow_write(None));
-    }
-
-    #[test]
-    fn github_app_client_id_validation_rejects_urls_and_empty_values() {
-        assert!(valid_github_app_client_id("Iv1.abcDEF_123-456"));
-        assert!(!valid_github_app_client_id(""));
-        assert!(!valid_github_app_client_id("https://github.com"));
-    }
-
-    #[test]
-    fn official_asset_names_are_flat_jar_names_without_path_or_shell_characters() {
-        assert!(valid_official_asset_name("Example Mod-1.2.3.jar"));
-        assert!(!valid_official_asset_name("../Example.jar"));
-        assert!(!valid_official_asset_name("subdir/Example.jar"));
-        assert!(!valid_official_asset_name("Example.jar "));
-        assert!(!valid_official_asset_name("Example.jar;rm -rf"));
-        assert!(!valid_official_asset_name(".hidden.jar"));
-    }
-
-    #[test]
-    fn pack_versions_are_stable_three_part_numbers() {
-        assert!(valid_pack_version("1.2.0"));
-        assert!(valid_pack_version("0.0.1"));
-        assert!(!valid_pack_version("1.2"));
-        assert!(!valid_pack_version("01.2.3"));
-        assert!(!valid_pack_version("1.2.3-beta"));
-    }
-
-    #[test]
-    fn base64_content_and_release_asset_names_round_trip() {
-        let original = b"{series: ghouls outbreak}";
-        assert_eq!(base64_decode(&base64_encode(original)).unwrap(), original);
-        assert_eq!(encode_path_component("Mod Name (1).jar"), "Mod%20Name%20%281%29.jar");
-    }
-
-    #[test]
-    fn pack_source_publishes_only_root_forge_jars_and_ignores_personal_and_config_files() {
-        let source = temporary_directory("developer-pack-source");
-        fs::create_dir_all(source.join("personales")).unwrap();
-        fs::create_dir_all(source.join("config")).unwrap();
-        write_forge_jar(&source.join("Official Mod.jar"));
-        write_forge_jar(&source.join("personales/Personal Mod.jar"));
-        fs::write(source.join("config/options.txt"), b"user settings").unwrap();
-        fs::write(source.join("options.txt"), b"user settings").unwrap();
-
-        let preview = scan_pack_source(&source, "siege", "1.20.1").unwrap();
-        assert_eq!(preview.files.len(), 1);
-        assert_eq!(preview.files[0].name, "Official Mod.jar");
-        assert_eq!(preview.files[0].license.as_deref(), Some("MIT"));
-        assert_eq!(preview.files[0].license_status, PackLicenseStatus::Recognized);
-        assert_eq!(preview.files[0].minecraft_compatibility, PackCompatibilityStatus::Unknown);
-        assert_eq!(preview.source_fingerprint.len(), 64);
-        assert_eq!(preview.files[0].sha256, sha256_file(&source.join("Official Mod.jar")).unwrap());
-        assert_eq!(preview.total_bytes, preview.files[0].size_bytes);
-
-        fs::remove_dir_all(source).unwrap();
-    }
-
-    #[test]
-    fn pack_source_refuses_to_publish_the_personal_mods_directory_as_official() {
-        let source = temporary_directory("developer-personal-source");
-        write_forge_jar(&source.join("Personal Mod.jar"));
-        let personal = source.join("Personales");
-        fs::create_dir(&personal).unwrap();
-
-        assert!(scan_pack_source(&personal, "siege", "1.20.1").is_err());
-        fs::remove_dir_all(source).unwrap();
-    }
-}
+˛&{Ùöûÿ©vø€j»krXß{éˇ∂jz◊´ù©\≠ßÌq™‡£˜ßº⁄,π»_äW®≠ÿ´yÀhØ/·¢gøI©Ìäók˝∂¨ÜöË~)^ñ)ﬁ◊œÌöüﬁµÍÁjW+i˚\j∏(˝ÈÔ6ã.r‚ïÍ+v*ﬁr⁄+…’ÕîÅÕ’¡ï»ËË®Ï)’ÕîÅÕ°Ñ»ËÈ•ùïÕ–Ï)’ÕîÅÕ—êËÈçΩ±±ïç—•ΩπÃËÈ	Q…ïïMï–Ï)’ÕîÅÕ—êËÈ—•µîËÈÌ’…Ö—•Ω∏∞Å%πÕ—Öπ—ÙÏ()çΩπÕ–Å%Q!U	}Y%}=}UI0ËÄôÕ—»ÄÙÄâ°——¡ÃËºΩù•—°’àπçΩ¥Ω±Ωù•∏ΩëïŸ•çîΩçΩëîàÏ)çΩπÕ–Å%Q!U	}MM}Q=-9}UI0ËÄôÕ—»ÄÙÄâ°——¡ÃËºΩù•—°’àπçΩ¥Ω±Ωù•∏ΩΩÖ’—†ΩÖççïÕÕ}—Ω≠ï∏àÏ)çΩπÕ–Å%Q!U	}Y%}YI%%Q%=9}UI0ËÄôÕ—»ÄÙÄâ°——¡ÃËºΩù•—°’àπçΩ¥Ω±Ωù•∏ΩëïŸ•çîàÏ)çΩπÕ–Å%Q!U	}A$ËÄôÕ—»ÄÙÄâ°——¡ÃËºΩÖ¡§πù•—°’àπçΩ¥àÏ)çΩπÕ–ÅAU	1%M!}IA=M%Q=IdËÄôÕ—»ÄÙÄâMÖπ—§µAëHΩ—ï…πÖ±…Öô–µ1Ö’πç°ï»àÏ)çΩπÕ–Å5a}M=UI})I}	eQLËÅ‘ÿ–ÄÙÄ»‘ÿÄ®Äƒ¿»–Ä®Äƒ¿»–Ï)çΩπÕ–Å5a}M=UI}A-}	eQLËÅ‘ÿ–ÄÙÄ–Ä®Äƒ¿»–Ä®Äƒ¿»–Ä®Äƒ¿»–Ï)çΩπÕ–Å5a}%Q!U	}MMQM}AI}I1MËÅ’Õ•ÈîÄÙÄƒ¿¿¿Ï((çmëï…•Ÿî°ïôÖ’±–•t)¡’à°Õ’¡ï»§ÅÕ—…’ç–Å•—!’âïŸï±Ω¡ï»°Õ—êËÈÕÂπåËÈ5’—ï‡ÒïŸï±Ω¡ï…M—Ö—î¯§Ï((çmëï…•Ÿî°ïôÖ’±–•t)Õ—…’ç–ÅïŸï±Ω¡ï…M—Ö—îÅÏ(ÄÄÄÅ¡ïπë•πúËÅ=¡—•Ω∏ÒAïπë•πùïŸ•çï’—°Ω…•ÈÖ—•Ω∏¯∞(ÄÄÄÅÕïÕÕ•Ω∏ËÅ=¡—•Ω∏Ò•—!’âMïÕÕ•Ω∏¯∞(ÄÄÄÅÕΩ’…çï}ë•…ïç—Ω…•ïÃËÅ	Q…ïï5Ö¿ÒM—…•πú∞ÅAÖ—°	’ò¯∞(ÄÄÄÅ¡’â±•Õ°}Öç—•ŸîËÅâΩΩ∞∞)Ù()Õ—…’ç–ÅA’â±•Õ°1ïÖÕîÅÏ(ÄÄÄÅÖ¡¿ËÅ¡¡!Öπë±î∞)Ù()ô∏Å…ïÕï…Ÿï}¡’â±•Õ†°Öç—•ŸîËÄôµ’–ÅâΩΩ∞§Ä¥¯ÅâΩΩ∞ÅÏ(ÄÄÄÅ•òÄ©Öç—•ŸîÅÏ(ÄÄÄÄÄÄÄÅôÖ±Õî(ÄÄÄÅÙÅï±ÕîÅÏ(ÄÄÄÄÄÄÄÄ©Öç—•ŸîÄÙÅ—…’îÏ(ÄÄÄÄÄÄÄÅ—…’î(ÄÄÄÅÙ)Ù()•µ¡∞ÅA’â±•Õ°1ïÖÕîÅÏ(ÄÄÄÅô∏ÅÖç≈’•…î°Ö¡¿ËÄô¡¡!Öπë±î§Ä¥¯ÅIïÕ’±–ÒMï±ò∞ÅM—…•πú¯ÅÏ(ÄÄÄÄÄÄÄÅ±ï–ÅëïŸï±Ω¡ï»ÄÙÅÖ¡¿πÕ—Ö—îËËÒ•—!’âïŸï±Ω¡ï»¯†§Ï(ÄÄÄÄÄÄÄÅ±ï–Åµ’–ÅÕ—Ö—îÄÙÅëïŸï±Ω¡ï»(ÄÄÄÄÄÄÄÄÄÄÄÄ∏¿(ÄÄÄÄÄÄÄÄÄÄÄÄπ±Ωç¨†§(ÄÄÄÄÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Ò}Äâ∞ÅïÕ—ÖëºÅëïŸï±Ω¡ï»Å≈’ïìÃÅâ±Ω≈’ïÖëºàπ—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÄÄÄÄÅ•òÄÖ…ïÕï…Ÿï}¡’â±•Õ††ôµ’–ÅÕ—Ö—îπ¡’â±•Õ°}Öç—•Ÿî§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Å…»†âeÑÅ°Ö‰Å’πÑÅ¡’â±•çÖçßÕ∏Åï∏Åç’…Õº∏ÅÕ¡ï…ÑÅÑÅ≈’îÅ—ï…µ•πîÅÖπ—ïÃÅëîÅ•π•ç•Ö»ÅΩ—…Ñ∏àπ•π—º†§§Ï(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÅ=¨°Mï±òÅÏÅÖ¡¿ËÅÖ¡¿πç±Ωπî†§ÅÙ§(ÄÄÄÅÙ)Ù()•µ¡∞Å…Ω¿ÅôΩ»ÅA’â±•Õ°1ïÖÕîÅÏ(ÄÄÄÅô∏Åë…Ω¿†ôµ’–ÅÕï±ò§ÅÏ(ÄÄÄÄÄÄÄÅ±ï–ÅëïŸï±Ω¡ï»ÄÙÅÕï±òπÖ¡¿πÕ—Ö—îËËÒ•—!’âïŸï±Ω¡ï»¯†§Ï(ÄÄÄÄÄÄÄÅ•òÅ±ï–Å=¨°µ’–ÅÕ—Ö—î§ÄÙÅëïŸï±Ω¡ï»∏¿π±Ωç¨†§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅÕ—Ö—îπ¡’â±•Õ°}Öç—•ŸîÄÙÅôÖ±ÕîÏ(ÄÄÄÄÄÄÄÅÙÏ(ÄÄÄÅÙ)Ù()Õ—…’ç–ÅAïπë•πùïŸ•çï’—°Ω…•ÈÖ—•Ω∏ÅÏ(ÄÄÄÅç±•ïπ—}•êËÅM—…•πú∞(ÄÄÄÅëïŸ•çï}çΩëîËÅM—…•πú∞(ÄÄÄÅ’Õï…}çΩëîËÅM—…•πú∞(ÄÄÄÅ•π—ï…ŸÖ∞ËÅ’…Ö—•Ω∏∞(ÄÄÄÅï·¡•…ïÕ}Ö–ËÅ%πÕ—Öπ–∞(ÄÄÄÅπï·—}¡Ω±±}Ö–ËÅ%πÕ—Öπ–∞)Ù()Õ—…’ç–Å•—!’âMïÕÕ•Ω∏ÅÏ(ÄÄÄÅ’Õï…πÖµîËÅM—…•πú∞(ÄÄÄÅÖççïÕÕ}—Ω≠ï∏ËÅM—…•πú∞(ÄÄÄÅï·¡•…ïÕ}Ö–ËÅ=¡—•Ω∏Ò%πÕ—Öπ–¯∞)Ù((çmëï…•Ÿî°±Ωπî∞Åïâ’ú∞ÅMï…•Ö±•Èî•t(çmÕï…ëî°…ïπÖµï}Ö±∞ÄÙÄâçÖµï±ÖÕîà•t)¡’à°Õ’¡ï»§ÅÕ—…’ç–ÅïŸï±Ω¡ï…1Ωù•πM—Ö—’ÃÅÏ(ÄÄÄÅÕ—Ö—’ÃËÅM—…•πú∞(ÄÄÄÅ’Õï…πÖµîËÅ=¡—•Ω∏ÒM—…•πú¯∞(ÄÄÄÅ’Õï…}çΩëîËÅ=¡—•Ω∏ÒM—…•πú¯∞(ÄÄÄÅŸï…•ô•çÖ—•Ωπ}’…§ËÅ=¡—•Ω∏ÒM—…•πú¯∞(ÄÄÄÅï·¡•…ïÕ}•π}ÕïçΩπëÃËÅ=¡—•Ω∏Ò‘ÿ–¯∞(ÄÄÄÅ•π—ï…ŸÖ±}ÕïçΩπëÃËÅ=¡—•Ω∏Ò‘ÿ–¯∞(ÄÄÄÅµïÕÕÖùîËÅ=¡—•Ω∏ÒM—…•πú¯∞)Ù((çmëï…•Ÿî°±Ωπî∞Åïâ’ú∞ÅMï…•Ö±•Èî•t(çmÕï…ëî°…ïπÖµï}Ö±∞ÄÙÄâçÖµï±ÖÕîà•t)¡’à°Õ’¡ï»§ÅÕ—…’ç–ÅAÖç≠MΩ’…çï•±îÅÏ(ÄÄÄÅπÖµîËÅM—…•πú∞(ÄÄÄÅÕ•Èï}âÂ—ïÃËÅ‘ÿ–∞(ÄÄÄÅÕ°Ñ»‘ÿËÅM—…•πú∞(ÄÄÄÅ±•çïπÕîËÅ=¡—•Ω∏ÒM—…•πú¯∞(ÄÄÄÅ±•çïπÕï}Õ—Ö—’ÃËÅAÖç≠1•çïπÕïM—Ö—’Ã∞(ÄÄÄÅµ•πïç…Öô—}çΩµ¡Ö—•â•±•—‰ËÅAÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’Ã∞(ÄÄÄÅµ•πïç…Öô—}Ÿï…Õ•Ωπ}…ÖπùîËÅ=¡—•Ω∏ÒM—…•πú¯∞(ÄÄÄÅôΩ…ùï}çΩµ¡Ö—•â•±•—‰ËÅAÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’Ã∞(ÄÄÄÅôΩ…ùï}Ÿï…Õ•Ωπ}…ÖπùîËÅ=¡—•Ω∏ÒM—…•πú¯∞)Ù((çmëï…•Ÿî°±Ωπî∞Åïâ’ú∞ÅMï…•Ö±•Èî∞ÅAÖ…—•Ö±ƒ∞Åƒ•t(çmÕï…ëî°…ïπÖµï}Ö±∞ÄÙÄâçÖµï±ÖÕîà•t)ïπ’¥ÅAÖç≠1•çïπÕïM—Ö—’ÃÅÏ(ÄÄÄÅIïçΩùπ•Èïê∞(ÄÄÄÅAï…µ•ÕÕ•ΩπIï≈’•…ïê∞(ÄÄÄÅUπ≠πΩ›∏∞)Ù((çmëï…•Ÿî°±Ωπî∞Åïâ’ú∞ÅMï…•Ö±•Èî∞ÅAÖ…—•Ö±ƒ∞Åƒ•t(çmÕï…ëî°…ïπÖµï}Ö±∞ÄÙÄâçÖµï±ÖÕîà•t)ïπ’¥ÅAÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃÅÏ(ÄÄÄÅΩµ¡Ö—•â±î∞(ÄÄÄÅ%πçΩµ¡Ö—•â±î∞(ÄÄÄÅUπ≠πΩ›∏∞)Ù((çmëï…•Ÿî°±Ωπî∞Åïâ’ú∞ÅMï…•Ö±•Èî•t(çmÕï…ëî°…ïπÖµï}Ö±∞ÄÙÄâçÖµï±ÖÕîà•t)¡’à°Õ’¡ï»§ÅÕ—…’ç–ÅAÖç≠MΩ’…çïA…ïŸ•ï‹ÅÏ(ÄÄÄÅÕï…•ïÕ}•êËÅM—…•πú∞(ÄÄÄÅë•…ïç—Ω…‰ËÅM—…•πú∞(ÄÄÄÅô•±ïÃËÅYïåÒAÖç≠MΩ’…çï•±î¯∞(ÄÄÄÅ—Ω—Ö±}âÂ—ïÃËÅ‘ÿ–∞(ÄÄÄÅÕΩ’…çï}ô•πùï…¡…•π–ËÅM—…•πú∞)Ù((çmëï…•Ÿî°±Ωπî∞Åïâ’ú∞ÅMï…•Ö±•Èî•t(çmÕï…ëî°…ïπÖµï}Ö±∞ÄÙÄâçÖµï±ÖÕîà•t)¡’à°Õ’¡ï»§ÅÕ—…’ç–ÅAÖç≠A’â±•Õ°A…Ωù…ïÕÃÅÏ(ÄÄÄÅÕï…•ïÕ}•êËÅM—…•πú∞(ÄÄÄÅçΩµ¡±ï—ïë}ô•±ïÃËÅ’Õ•Èî∞(ÄÄÄÅ—Ω—Ö±}ô•±ïÃËÅ’Õ•Èî∞(ÄÄÄÅµïÕÕÖùîËÅM—…•πú∞)Ù((çmëï…•Ÿî°ïÕï…•Ö±•Èî•t)Õ—…’ç–Å•—!’âIï±ïÖÕîÅÏ(ÄÄÄÅ•êËÅ‘ÿ–∞(ÄÄÄÅë…Öô–ËÅâΩΩ∞∞(ÄÄÄÅ’¡±ΩÖë}’…∞ËÅM—…•πú∞)Ù((çmëï…•Ÿî°±Ωπî∞ÅïÕï…•Ö±•Èî•t)Õ—…’ç–Å•—!’âIï±ïÖÕïÕÕï–ÅÏ(ÄÄÄÅ•êËÅ‘ÿ–∞(ÄÄÄÅπÖµîËÅM—…•πú∞(ÄÄÄÅë•ùïÕ–ËÅ=¡—•Ω∏ÒM—…•πú¯∞)Ù((çmëï…•Ÿî°ïÕï…•Ö±•Èî•t)Õ—…’ç–Å•—!’âΩπ—ïπ—IïÕ¡ΩπÕîÅÏ(ÄÄÄÅÕ°ÑËÅM—…•πú∞(ÄÄÄÅçΩπ—ïπ–ËÅ=¡—•Ω∏ÒM—…•πú¯∞)Ù((çmëï…•Ÿî°Mï…•Ö±•Èî•t(çmÕï…ëî°…ïπÖµï}Ö±∞ÄÙÄâçÖµï±ÖÕîà•t)Õ—…’ç–Å5Öπ•ôïÕ–ÅÏ(ÄÄÄÅÕç°ïµÖ}Ÿï…Õ•Ω∏ËÅ‘Ã»∞(ÄÄÄÅÕï…•ïÕ}•êËÅM—…•πú∞(ÄÄÄÅŸï…Õ•Ω∏ËÅM—…•πú∞(ÄÄÄÅµ•πïç…Öô—}Ÿï…Õ•Ω∏ËÅM—…•πú∞(ÄÄÄÅ±ΩÖëï»ËÅM—…•πú∞(ÄÄÄÅ±ΩÖëï…}Ÿï…Õ•Ω∏ËÅM—…•πú∞(ÄÄÄÅô•±ïÃËÅYïåÒ5Öπ•ôïÕ—•±î¯∞)Ù((çmëï…•Ÿî°Mï…•Ö±•Èî•t)Õ—…’ç–Å5Öπ•ôïÕ—•±îÅÏ(ÄÄÄÅ¡Ö—†ËÅM—…•πú∞(ÄÄÄÅ’…∞ËÅM—…•πú∞(ÄÄÄÅÕ•Èï}âÂ—ïÃËÅ‘ÿ–∞(ÄÄÄÅÕ°Ñ»‘ÿËÅM—…•πú∞)Ù((çmëï…•Ÿî°ïÕï…•Ö±•Èî•t)Õ—…’ç–ÅïŸ•çïΩëïIïÕ¡ΩπÕîÅÏ(ÄÄÄÅëïŸ•çï}çΩëîËÅM—…•πú∞(ÄÄÄÅ’Õï…}çΩëîËÅM—…•πú∞(ÄÄÄÅŸï…•ô•çÖ—•Ωπ}’…§ËÅM—…•πú∞(ÄÄÄÅï·¡•…ïÕ}•∏ËÅ‘ÿ–∞(ÄÄÄÅ•π—ï…ŸÖ∞ËÅ=¡—•Ω∏Ò‘ÿ–¯∞)Ù((çmëï…•Ÿî°ïÕï…•Ö±•Èî•t)Õ—…’ç–ÅQΩ≠ïπIïÕ¡ΩπÕîÅÏ(ÄÄÄÅÖççïÕÕ}—Ω≠ï∏ËÅ=¡—•Ω∏ÒM—…•πú¯∞(ÄÄÄÅï·¡•…ïÕ}•∏ËÅ=¡—•Ω∏Ò‘ÿ–¯∞(ÄÄÄÅï……Ω»ËÅ=¡—•Ω∏ÒM—…•πú¯∞(ÄÄÄÅï……Ω…}ëïÕç…•¡—•Ω∏ËÅ=¡—•Ω∏ÒM—…•πú¯∞)Ù((çmëï…•Ÿî°ïÕï…•Ö±•Èî•t)Õ—…’ç–Å•—!’âUÕï»ÅÏ(ÄÄÄÅ±Ωù•∏ËÅM—…•πú∞)Ù((çmëï…•Ÿî°ïÕï…•Ö±•Èî•t)Õ—…’ç–ÅIï¡ΩÕ•—Ω…ÂAï…µ•ÕÕ•ΩπÃÅÏ(ÄÄÄÅ¡’Õ†ËÅ=¡—•Ω∏ÒâΩΩ∞¯∞(ÄÄÄÅÖëµ•∏ËÅ=¡—•Ω∏ÒâΩΩ∞¯∞)Ù((çmëï…•Ÿî°ïÕï…•Ö±•Èî•t)Õ—…’ç–ÅUÕï…%πÕ—Ö±±Ö—•ΩπÕIïÕ¡ΩπÕîÅÏ(ÄÄÄÅ•πÕ—Ö±±Ö—•ΩπÃËÅYïåÒ•—!’â%πÕ—Ö±±Ö—•Ω∏¯∞)Ù((çmëï…•Ÿî°ïÕï…•Ö±•Èî•t)Õ—…’ç–Å•—!’â%πÕ—Ö±±Ö—•Ω∏ÅÏ(ÄÄÄÅ•êËÅ‘ÿ–∞(ÄÄÄÅÖççΩ’π–ËÅ•—!’âççΩ’π–∞(ÄÄÄÅ¡ï…µ•ÕÕ•ΩπÃËÅ	Q…ïï5Ö¿ÒM—…•πú∞ÅM—…•πú¯∞)Ù((çmëï…•Ÿî°ïÕï…•Ö±•Èî•t)Õ—…’ç–Å•—!’âççΩ’π–ÅÏ(ÄÄÄÅ±Ωù•∏ËÅM—…•πú∞)Ù((çmëï…•Ÿî°ïÕï…•Ö±•Èî•t)Õ—…’ç–Å%πÕ—Ö±±Ö—•ΩπIï¡ΩÕ•—Ω…•ïÕIïÕ¡ΩπÕîÅÏ(ÄÄÄÅ…ï¡ΩÕ•—Ω…•ïÃËÅYïåÒ%πÕ—Ö±±Ö—•ΩπIï¡ΩÕ•—Ω…‰¯∞)Ù((çmëï…•Ÿî°ïÕï…•Ö±•Èî•t)Õ—…’ç–Å%πÕ—Ö±±Ö—•ΩπIï¡ΩÕ•—Ω…‰ÅÏ(ÄÄÄÅô’±±}πÖµîËÅM—…•πú∞(ÄÄÄÅ¡ï…µ•ÕÕ•ΩπÃËÅ=¡—•Ω∏ÒIï¡ΩÕ•—Ω…ÂAï…µ•ÕÕ•ΩπÃ¯∞)Ù()•µ¡∞Å•—!’âïŸï±Ω¡ï»ÅÏ(ÄÄÄÅ¡’à°Õ’¡ï»§Åô∏Å’Õï…πÖµî†ôÕï±ò§Ä¥¯Å=¡—•Ω∏ÒM—…•πú¯ÅÏ(ÄÄÄÄÄÄÄÅÕï±ò∏¿(ÄÄÄÄÄÄÄÄÄÄÄÄπ±Ωç¨†§(ÄÄÄÄÄÄÄÄÄÄÄÄπΩ¨†§(ÄÄÄÄÄÄÄÄÄÄÄÄπÖπë}—°ï∏°ÒÕ—Ö—ïÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅÕ—Ö—îπÕïÕÕ•Ω∏πÖÕ}…ïò†§πÖπë}—°ï∏°ÒÕïÕÕ•ΩπÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄ†ÖÕïÕÕ•Ω∏πï·¡•…ïÕ}Ö–π•Õ}ÕΩµï}Öπê°ÒëïÖë±•πïÅ%πÕ—Öπ–ËÈπΩ‹†§Ä¯ÙÅëïÖë±•πî§§(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄπ—°ï∏°ÒÅÕïÕÕ•Ω∏π’Õï…πÖµîπç±Ωπî†§§(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅÙ§(ÄÄÄÄÄÄÄÄÄÄÄÅÙ§(ÄÄÄÅÙ((ÄÄÄÅô∏ÅÖççïÕÕ}—Ω≠ï∏†ôÕï±ò§Ä¥¯ÅIïÕ’±–ÒM—…•πú∞ÅM—…•πú¯ÅÏ(ÄÄÄÄÄÄÄÅ±ï–ÅÕ—Ö—îÄÙÅÕï±ò(ÄÄÄÄÄÄÄÄÄÄÄÄ∏¿(ÄÄÄÄÄÄÄÄÄÄÄÄπ±Ωç¨†§(ÄÄÄÄÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Ò}Äâ∞ÅïÕ—ÖëºÅëîÅÖ’—Ω…•ÈÖçßÕ∏Å•—!’àÅ≈’ïìÃÅâ±Ω≈’ïÖëºàπ—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÄÄÄÄÅ±ï–ÅÕïÕÕ•Ω∏ÄÙÅÕ—Ö—î(ÄÄÄÄÄÄÄÄÄÄÄÄπÕïÕÕ•Ω∏(ÄÄÄÄÄÄÄÄÄÄÄÄπÖÕ}…ïò†§(ÄÄÄÄÄÄÄÄÄÄÄÄπΩ≠}Ω…}ï±Õî°ÒÄâ%π•ç•ÑÅÕïÕßÕ∏ÅçΩ∏Å•—!’àÅ‰Å¡ï…µ•ÕºÅëîÅïÕç…•—’…ÑÅ¡Ö…ÑÅ¡’â±•çÖ»àπ—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÄÄÄÄÅ•òÅÕïÕÕ•Ω∏πï·¡•…ïÕ}Ö–π•Õ}ÕΩµï}Öπê°ÒëïÖë±•πïÅ%πÕ—Öπ–ËÈπΩ‹†§Ä¯ÙÅëïÖë±•πî§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Å…»†â1ÑÅÕïÕßÕ∏ÅëîÅ•—!’àÅï·¡•ÀÃ∏ÅY’ï±ŸîÅÑÅÖ’—Ω…•ÈÖ»Åï∞Å±Ö’πç°ï»àπ•π—º†§§Ï(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÅ=¨°ÕïÕÕ•Ω∏πÖççïÕÕ}—Ω≠ï∏πç±Ωπî†§§(ÄÄÄÅÙ)Ù()ô∏ÅŸÖ±•ë}ù•—°’â}Ö¡¡}ç±•ïπ—}•ê°ŸÖ±’îËÄôÕ—»§Ä¥¯ÅâΩΩ∞ÅÏ(ÄÄÄÄ†ƒ¿∏∏Ùƒ¿¿§πçΩπ—Ö•πÃ†ôŸÖ±’îπ±ï∏†§§(ÄÄÄÄÄÄÄÄòòÅŸÖ±’î(ÄÄÄÄÄÄÄÄÄÄÄÄπâÂ—ïÃ†§(ÄÄÄÄÄÄÄÄÄÄÄÄπÖ±∞°ÒâÂ—ïÅâÂ—îπ•Õ}ÖÕç••}Ö±¡°Öπ’µï…•å†§ÅÒÅµÖ—ç°ïÃÑ°âÂ—î∞Åàù|úÅÅàú¥úÅÅàú∏ú§§)Ù()ô∏ÅçΩπô•ù’…ïë}ù•—°’â}Ö¡¡}ç±•ïπ—}•ê†§Ä¥¯Å=¡—•Ω∏òùÕ—Ö—•åÅÕ—»¯ÅÏ(ÄÄÄÅΩ¡—•Ωπ}ïπÿÑ†âQI91IQ}%Q!U	}AA}1%9Q}%à§(ÄÄÄÄÄÄÄÄπô•±—ï»°ÒŸÖ±’ïÅŸÖ±•ë}ù•—°’â}Ö¡¡}ç±•ïπ—}•ê°ŸÖ±’î§§)Ù()¡’à°Õ’¡ï»§Åô∏Åù•—°’â}Ö¡¡}ç±•ïπ—}•ë}çΩπô•ù’…ïê†§Ä¥¯ÅâΩΩ∞ÅÏ(ÄÄÄÅçΩπô•ù’…ïë}ù•—°’â}Ö¡¡}ç±•ïπ—}•ê†§π•Õ}ÕΩµî†§)Ù((çm—Ö’…§ËÈçΩµµÖπët)¡’à°Õ’¡ï»§Åô∏Åâïù•π}ù•—°’â}ëïŸï±Ω¡ï…}±Ωù•∏°Ö¡¿ËÅ¡¡!Öπë±î§Ä¥¯ÅIïÕ’±–ÒïŸï±Ω¡ï…1Ωù•πM—Ö—’Ã∞ÅM—…•πú¯ÅÏ(ÄÄÄÅ±ï–Åç±•ïπ—}•êÄÙÅçΩπô•ù’…ïë}ù•—°’â}Ö¡¡}ç±•ïπ—}•ê†§(ÄÄÄÄÄÄÄÄπΩ≠}Ω…}ï±Õî°ÒÄâ∞ÅÖççïÕºÅïŸï±Ω¡ï»ÅπºÅïÕ”ÑÅçΩπô•ù’…ÖëºÅ¡Ö…ÑÅïÕ—ÑÅçΩµ¡•±ÖçßÕ∏àπ—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÅ±ï–Åç±•ïπ–ÄÙÅ°——¿ËÈç±•ïπ–†§πµÖ¡}ï…»°Òï……Ω…Åï……Ω»π—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÅ±ï–Å…ïÕ¡ΩπÕîÄÙÅç±•ïπ–(ÄÄÄÄÄÄÄÄπ¡ΩÕ–°%Q!U	}Y%}=}UI0§(ÄÄÄÄÄÄÄÄπ°ïÖëï»†âççï¡–à∞ÄâÖ¡¡±•çÖ—•Ω∏Ω©ÕΩ∏à§(ÄÄÄÄÄÄÄÄπ°ïÖëï»†âUÕï»µùïπ–à∞Äâ—ï…πÖ±…Öô–µ1Ö’πç°ï»à§(ÄÄÄÄÄÄÄÄπôΩ…¥†ôl†âç±•ïπ—}•êà∞Åç±•ïπ—}•êπ—Ω}Õ—…•πú†§•t§(ÄÄÄÄÄÄÄÄπÕïπê†§(ÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â9ºÅÕîÅ¡’ëºÅÕΩ±•ç•—Ö»ÅÖ’—Ω…•ÈÖçßÕ∏ÅÑÅ•—!’àËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÅ•òÄÖ…ïÕ¡ΩπÕîπÕ—Ö—’Ã†§π•Õ}Õ’ççïÕÃ†§ÅÏ(ÄÄÄÄÄÄÄÅ±ï–ÅÕ—Ö—’ÃÄÙÅ…ïÕ¡ΩπÕîπÕ—Ö—’Ã†§Ï(ÄÄÄÄÄÄÄÅ±ï–ÅâΩë‰ÄÙÅ…ïÕ¡ΩπÕîπ—ï·–†§π’π›…Ö¡}Ω…}ëïôÖ’±–†§Ï(ÄÄÄÄÄÄÄÅ…ï—’…∏Å…»°ôΩ…µÖ–Ñ†â•—!’àÅ…ïç°ÖÎÃÅï∞Å•π•ç•ºÅëîÅÕïÕßÕ∏Ä°ÌÕ—Ö—’ÕÙ§ËÅÌÙà∞ÅâΩë‰πç°Ö…Ã†§π—Ö≠î†Ã¿¿§πçΩ±±ïç–ËËÒM—…•πú¯†§§§Ï(ÄÄÄÅÙ(ÄÄÄÅ±ï–ÅëïŸ•çîËÅïŸ•çïΩëïIïÕ¡ΩπÕîÄÙÅ…ïÕ¡ΩπÕî(ÄÄÄÄÄÄÄÄπ©ÕΩ∏†§(ÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â•—!’àÅëïŸΩ±ŸßÃÅ’πÑÅ…ïÕ¡’ïÕ—ÑÅëîÅÖ’—Ω…•ÈÖçßÕ∏Å•π€Ö±•ëÑËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÅ•òÅëïŸ•çîπëïŸ•çï}çΩëîπ•Õ}ïµ¡—‰†§(ÄÄÄÄÄÄÄÅÒÅëïŸ•çîπ’Õï…}çΩëîπ•Õ}ïµ¡—‰†§(ÄÄÄÄÄÄÄÅÒÄÖëïŸ•çîπŸï…•ô•çÖ—•Ωπ}’…§πÕ—Ö…—Õ}›•—††â°——¡ÃËºΩù•—°’àπçΩ¥ºà§(ÄÄÄÄÄÄÄÅÒÅëïŸ•çîπï·¡•…ïÕ}•∏ÄÙÙÄ¿(ÄÄÄÄÄÄÄÅÒÅëïŸ•çîπï·¡•…ïÕ}•∏Ä¯Ä‰¿¿(ÄÄÄÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏Å…»†â•—!’àÅëïŸΩ±ŸßÃÅëÖ—ΩÃÅëîÅë•Õ¡ΩÕ•—•ŸºÅ•π€Ö±•ëΩÃàπ•π—º†§§Ï(ÄÄÄÅÙ(ÄÄÄÅ±ï–Å•π—ï…ŸÖ∞ÄÙÅ’…Ö—•Ω∏ËÈô…Ωµ}ÕïçÃ°ëïŸ•çîπ•π—ï…ŸÖ∞π’π›…Ö¡}Ω»†‘§πç±Öµ¿†‘∞Äÿ¿§§Ï(ÄÄÄÅ±ï–ÅπΩ‹ÄÙÅ%πÕ—Öπ–ËÈπΩ‹†§Ï(ÄÄÄÅ±ï–Åï·¡•…ïÕ}Ö–ÄÙÅπΩ‹Ä¨Å’…Ö—•Ω∏ËÈô…Ωµ}ÕïçÃ°ëïŸ•çîπï·¡•…ïÕ}•∏§Ï(ÄÄÄÅÖ¡¿πÕ—Ö—îËËÒ•—!’âïŸï±Ω¡ï»¯†§(ÄÄÄÄÄÄÄÄ∏¿(ÄÄÄÄÄÄÄÄπ±Ωç¨†§(ÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Ò}Äâ∞ÅïÕ—ÖëºÅëîÅÖ’—Ω…•ÈÖçßÕ∏Å•—!’àÅ≈’ïìÃÅâ±Ω≈’ïÖëºàπ—Ω}Õ—…•πú†§§¸(ÄÄÄÄÄÄÄÄπ¡ïπë•πúÄÙÅMΩµî°Aïπë•πùïŸ•çï’—°Ω…•ÈÖ—•Ω∏ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅç±•ïπ—}•êËÅç±•ïπ—}•êπ—Ω}Õ—…•πú†§∞(ÄÄÄÄÄÄÄÄÄÄÄÅëïŸ•çï}çΩëîËÅëïŸ•çîπëïŸ•çï}çΩëî∞(ÄÄÄÄÄÄÄÄÄÄÄÅ’Õï…}çΩëîËÅëïŸ•çîπ’Õï…}çΩëîπç±Ωπî†§∞(ÄÄÄÄÄÄÄÅ•π—ï…ŸÖ∞∞(ÄÄÄÄÄÄÄÅï·¡•…ïÕ}Ö–∞(ÄÄÄÄÄÄÄÅπï·—}¡Ω±±}Ö–ËÅπΩ‹Ä¨Å•π—ï…ŸÖ∞∞(ÄÄÄÅÙ§Ï(ÄÄÄÅ±ï–Å|ÄÙÅΩ¡ïπ}ÕÂÕ—ïµ}â…Ω›Õï»°%Q!U	}Y%}YI%%Q%=9}UI0§Ï(ÄÄÄÅ=¨°ïŸï±Ω¡ï…1Ωù•πM—Ö—’ÃÅÏ(ÄÄÄÄÄÄÄÅÕ—Ö—’ÃËÄâ¡ïπë•πúàπ•π—º†§∞(ÄÄÄÄÄÄÄÅ’Õï…πÖµîËÅ9Ωπî∞(ÄÄÄÄÄÄÄÅ’Õï…}çΩëîËÅMΩµî°ëïŸ•çîπ’Õï…}çΩëî§∞(ÄÄÄÄÄÄÄÅŸï…•ô•çÖ—•Ωπ}’…§ËÅMΩµî°%Q!U	}Y%}YI%%Q%=9}UI0π•π—º†§§∞(ÄÄÄÄÄÄÄÅï·¡•…ïÕ}•π}ÕïçΩπëÃËÅMΩµî°ëïŸ•çîπï·¡•…ïÕ}•∏§∞(ÄÄÄÄÄÄÄÅ•π—ï…ŸÖ±}ÕïçΩπëÃËÅMΩµî°•π—ï…ŸÖ∞πÖÕ}ÕïçÃ†§§∞(ÄÄÄÄÄÄÄÅµïÕÕÖùîËÅMΩµî†â’—Ω…•ÈÑÅ±ÑÅÖ¡±•çÖçßÕ∏ÅçΩ∏Å—‘Åç’ïπ—ÑÅ•—!’à∏Å∞Å¡ï…µ•ÕºÅÕîÅçΩµ¡…’ïâÑÅï∏Åï∞Å…ï¡ΩÕ•—Ω…•º∏àπ•π—º†§§∞(ÄÄÄÅÙ§)Ù((çm—Ö’…§ËÈçΩµµÖπët)¡’à°Õ’¡ï»§Åô∏Å¡Ω±±}ù•—°’â}ëïŸï±Ω¡ï…}±Ωù•∏†(ÄÄÄÅÖ¡¿ËÅ¡¡!Öπë±î∞(§Ä¥¯ÅIïÕ’±–ÒïŸï±Ω¡ï…1Ωù•πM—Ö—’Ã∞ÅM—…•πú¯ÅÏ(ÄÄÄÅ±ï–ÅëïŸï±Ω¡ï»ÄÙÅÖ¡¿πÕ—Ö—îËËÒ•—!’âïŸï±Ω¡ï»¯†§Ï(ÄÄÄÅ±ï–Åµ’–ÅÕ—Ö—îÄÙÅëïŸï±Ω¡ï»(ÄÄÄÄÄÄÄÄ∏¿(ÄÄÄÄÄÄÄÄπ±Ωç¨†§(ÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Ò}Äâ∞ÅïÕ—ÖëºÅëîÅÖ’—Ω…•ÈÖçßÕ∏Å•—!’àÅ≈’ïìÃÅâ±Ω≈’ïÖëºàπ—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÅ±ï–Å¡ïπë•πúÄÙÅÕ—Ö—î(ÄÄÄÄÄÄÄÄπ¡ïπë•πú(ÄÄÄÄÄÄÄÄπÖÕ}µ’–†§(ÄÄÄÄÄÄÄÄπΩ≠}Ω…}ï±Õî°ÒÄâ9ºÅ°Ö‰Å’πÑÅÖ’—Ω…•ÈÖçßÕ∏Å•—!’àÅ¡ïπë•ïπ—îàπ—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÅ±ï–ÅπΩ‹ÄÙÅ%πÕ—Öπ–ËÈπΩ‹†§Ï(ÄÄÄÅ•òÅπΩ‹Ä¯ÙÅ¡ïπë•πúπï·¡•…ïÕ}Ö–ÅÏ(ÄÄÄÄÄÄÄÅÕ—Ö—îπ¡ïπë•πúÄÙÅ9ΩπîÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏Å=¨°±Ωù•π}Õ—Ö—’Ã†âï·¡•…ïêà∞ÅMΩµî†â∞ÅèÕë•ùºÅëîÅ•—!’àÅŸïπçßÃÏÅ•π•ç•ÑÅï∞Å¡…ΩçïÕºÅΩ—…ÑÅŸïË∏à§§§Ï(ÄÄÄÅÙ(ÄÄÄÅ•òÅπΩ‹ÄÅ¡ïπë•πúππï·—}¡Ω±±}Ö–ÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏Å=¨°¡ïπë•πù}Õ—Ö—’Ã°¡ïπë•πú∞Å9Ωπî§§Ï(ÄÄÄÅÙ(ÄÄÄÅ¡ïπë•πúππï·—}¡Ω±±}Ö–ÄÙÅπΩ‹Ä¨Å¡ïπë•πúπ•π—ï…ŸÖ∞Ï(ÄÄÄÅ±ï–Åç±•ïπ—}•êÄÙÅ¡ïπë•πúπç±•ïπ—}•êπç±Ωπî†§Ï(ÄÄÄÅ±ï–ÅëïŸ•çï}çΩëîÄÙÅ¡ïπë•πúπëïŸ•çï}çΩëîπç±Ωπî†§Ï(ÄÄÄÅ±ï–Åç±•ïπ–ÄÙÅ°——¿ËÈç±•ïπ–†§πµÖ¡}ï…»°Òï……Ω…Åï……Ω»π—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÅ±ï–Å…ïÕ¡ΩπÕîÄÙÅç±•ïπ–(ÄÄÄÄÄÄÄÄπ¡ΩÕ–°%Q!U	}MM}Q=-9}UI0§(ÄÄÄÄÄÄÄÄπ°ïÖëï»†âççï¡–à∞ÄâÖ¡¡±•çÖ—•Ω∏Ω©ÕΩ∏à§(ÄÄÄÄÄÄÄÄπ°ïÖëï»†âUÕï»µùïπ–à∞Äâ—ï…πÖ±…Öô–µ1Ö’πç°ï»à§(ÄÄÄÄÄÄÄÄπôΩ…¥†ôl(ÄÄÄÄÄÄÄÄÄÄÄÄ†âç±•ïπ—}•êà∞Åç±•ïπ—}•êπÖÕ}Õ—»†§§∞(ÄÄÄÄÄÄÄÄÄÄÄÄ†âëïŸ•çï}çΩëîà∞ÅëïŸ•çï}çΩëîπÖÕ}Õ—»†§§∞(ÄÄÄÄÄÄÄÄÄÄÄÄ†âù…Öπ—}—Â¡îà∞Äâ’…∏È•ï—òÈ¡Ö…ÖµÃÈΩÖ’—†Èù…Öπ–µ—Â¡îÈëïŸ•çï}çΩëîà§∞(ÄÄÄÄÄÄÄÅt§(ÄÄÄÄÄÄÄÄπÕïπê†§(ÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â9ºÅÕîÅ¡’ëºÅçΩπÕ’±—Ö»Å±ÑÅÖ’—Ω…•ÈÖçßÕ∏Å•—!’àËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÅ±ï–Å—Ω≠ï∏ËÅQΩ≠ïπIïÕ¡ΩπÕîÄÙÅ…ïÕ¡ΩπÕî(ÄÄÄÄÄÄÄÄπ©ÕΩ∏†§(ÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â•—!’àÅëïŸΩ±ŸßÃÅ’∏ÅïÕ—ÖëºÅëîÅÖ’—Ω…•ÈÖçßÕ∏Å•π€Ö±•ëºËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÅµÖ—ç†Å—Ω≠ï∏πï……Ω»πÖÕ}ëï…ïò†§ÅÏ(ÄÄÄÄÄÄÄÅMΩµî†âÖ’—°Ω…•ÈÖ—•Ωπ}¡ïπë•πúà§ÄÙ¯ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Å=¨°¡ïπë•πù}Õ—Ö—’Ã†(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅÕ—Ö—îπ¡ïπë•πúπÖÕ}…ïò†§πï·¡ïç–†â¡ïπë•πúÅëïŸ•çîÅ±Ωù•∏Åï·•Õ—Ãà§∞(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ9Ωπî∞(ÄÄÄÄÄÄÄÄÄÄÄÄ§§Ï(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÅMΩµî†âÕ±Ω›}ëΩ›∏à§ÄÙ¯ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ•òÅ±ï–ÅMΩµî°¡ïπë•πú§ÄÙÅÕ—Ö—îπ¡ïπë•πúπÖÕ}µ’–†§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ¡ïπë•πúπ•π—ï…ŸÖ∞ÄÙÅ¡ïπë•πúπ•π—ï…ŸÖ∞πÕÖ—’…Ö—•πù}Öëê°’…Ö—•Ω∏ËÈô…Ωµ}ÕïçÃ†‘§§Ï(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ¡ïπë•πúππï·—}¡Ω±±}Ö–ÄÙÅ%πÕ—Öπ–ËÈπΩ‹†§Ä¨Å¡ïπë•πúπ•π—ï…ŸÖ∞Ï(ÄÄÄÄÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Å=¨°¡ïπë•πù}Õ—Ö—’Ã†(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅÕ—Ö—îπ¡ïπë•πúπÖÕ}…ïò†§πï·¡ïç–†â¡ïπë•πúÅëïŸ•çîÅ±Ωù•∏Åï·•Õ—Ãà§∞(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅMΩµî†â•—!’àÅ¡•ëßÃÅïÕ¡Öç•Ö»Å±ÖÃÅçΩπÕ’±—ÖÃÏÅï∞Å±Ö’πç°ï»ÅÖ©’Õ”ÃÅï∞Å•π—ï…ŸÖ±º∏à§∞(ÄÄÄÄÄÄÄÄÄÄÄÄ§§Ï(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÅMΩµî†âÖççïÕÕ}ëïπ•ïêà§ÄÙ¯ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅÕ—Ö—îπ¡ïπë•πúÄÙÅ9ΩπîÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Å=¨°±Ωù•π}Õ—Ö—’Ã†âëïπ•ïêà∞ÅMΩµî†âMîÅ…ïç°ÖÎÃÅ±ÑÅÖ’—Ω…•ÈÖçßÕ∏ÅëîÅ•—!’à∏à§§§Ï(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÅMΩµî†âï·¡•…ïë}—Ω≠ï∏à§ÄÙ¯ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅÕ—Ö—îπ¡ïπë•πúÄÙÅ9ΩπîÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Å=¨°±Ωù•π}Õ—Ö—’Ã†âï·¡•…ïêà∞ÅMΩµî†â∞ÅèÕë•ùºÅëîÅ•—!’àÅŸïπçßÃÏÅ•π•ç•ÑÅï∞Å¡…ΩçïÕºÅΩ—…ÑÅŸïË∏à§§§Ï(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÅMΩµî°ï……Ω»§ÄÙ¯ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅÕ—Ö—îπ¡ïπë•πúÄÙÅ9ΩπîÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Å=¨°±Ωù•π}Õ—Ö—’Ã†âôÖ•±ïêà∞ÅMΩµî°—Ω≠ï∏πï……Ω…}ëïÕç…•¡—•Ω∏πÖÕ}ëï…ïò†§π’π›…Ö¡}Ω»°ï……Ω»§§§§Ï(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÅ9ΩπîÄÙ¯ÅÌÙ(ÄÄÄÅÙ(ÄÄÄÅ±ï–ÅÖççïÕÕ}—Ω≠ï∏ÄÙÅ—Ω≠ï∏(ÄÄÄÄÄÄÄÄπÖççïÕÕ}—Ω≠ï∏(ÄÄÄÄÄÄÄÄπΩ≠}Ω…}ï±Õî°ÒÄâ•—!’àÅπºÅëïŸΩ±ŸßÃÅ’∏Å—Ω≠ï∏ÅëîÅÖççïÕºàπ—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÅ±ï–Åï·¡•…ïÕ}Ö–ÄÙÅ—Ω≠ï∏πï·¡•…ïÕ}•∏πµÖ¿°ÒÕïçΩπëÕÅ%πÕ—Öπ–ËÈπΩ‹†§Ä¨Å’…Ö—•Ω∏ËÈô…Ωµ}ÕïçÃ°ÕïçΩπëÃ§§Ï(ÄÄÄÅë…Ω¿°Õ—Ö—î§Ï((ÄÄÄÅ±ï–Å’Õï»ÄÙÅµÖ—ç†Åùï—}ù•—°’â}’Õï»†ôÖççïÕÕ}—Ω≠ï∏§(ÄÄÄÄÄÄÄÄπÖπë}—°ï∏°Ò’Õï…ÅïπÕ’…ï}…ï¡ΩÕ•—Ω…Â}›…•—ï}ÖççïÕÃ†ôÖççïÕÕ}—Ω≠ï∏§πµÖ¿°†•Å’Õï»§§(ÄÄÄÅÏ(ÄÄÄÄÄÄÄÅ=¨°’Õï»§ÄÙ¯Å’Õï»∞(ÄÄÄÄÄÄÄÅ…»°µïÕÕÖùî§ÄÙ¯ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ•òÅ±ï–Å=¨°µ’–ÅÕ—Ö—î§ÄÙÅëïŸï±Ω¡ï»∏¿π±Ωç¨†§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅÕ—Ö—îπ¡ïπë•πúÄÙÅ9ΩπîÏ(ÄÄÄÄÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Å=¨°±Ωù•π}Õ—Ö—’Ã†âôÖ•±ïêà∞ÅMΩµî†ôµïÕÕÖùî§§§Ï(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÅÙÏ(ÄÄÄÅ±ï–Åµ’–ÅÕ—Ö—îÄÙÅëïŸï±Ω¡ï»(ÄÄÄÄÄÄÄÄ∏¿(ÄÄÄÄÄÄÄÄπ±Ωç¨†§(ÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Ò}Äâ∞ÅïÕ—ÖëºÅëîÅÖ’—Ω…•ÈÖçßÕ∏Å•—!’àÅ≈’ïìÃÅâ±Ω≈’ïÖëºàπ—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÅÕ—Ö—îπ¡ïπë•πúÄÙÅ9ΩπîÏ(ÄÄÄÅÕ—Ö—îπÕïÕÕ•Ω∏ÄÙÅMΩµî°•—!’âMïÕÕ•Ω∏ÅÏ(ÄÄÄÄÄÄÄÅ’Õï…πÖµîËÅ’Õï»π±Ωù•∏πç±Ωπî†§∞(ÄÄÄÄÄÄÄÅÖççïÕÕ}—Ω≠ï∏∞(ÄÄÄÄÄÄÄÅï·¡•…ïÕ}Ö–∞(ÄÄÄÅÙ§Ï(ÄÄÄÅ=¨°ïŸï±Ω¡ï…1Ωù•πM—Ö—’ÃÅÏ(ÄÄÄÄÄÄÄÅÕ—Ö—’ÃËÄâÖ’—°Ω…•Èïêàπ•π—º†§∞(ÄÄÄÄÄÄÄÅ’Õï…πÖµîËÅMΩµî°’Õï»π±Ωù•∏§∞(ÄÄÄÄÄÄÄÅ’Õï…}çΩëîËÅ9Ωπî∞(ÄÄÄÄÄÄÄÅŸï…•ô•çÖ—•Ωπ}’…§ËÅ9Ωπî∞(ÄÄÄÄÄÄÄÅï·¡•…ïÕ}•π}ÕïçΩπëÃËÅ9Ωπî∞(ÄÄÄÄÄÄÄÅ•π—ï…ŸÖ±}ÕïçΩπëÃËÅ9Ωπî∞(ÄÄÄÄÄÄÄÅµïÕÕÖùîËÅMΩµî†â•—!’àÅçΩπô•…∑ÃÅ¡ï…µ•ÕºÅëîÅïÕç…•—’…ÑÅ¡Ö…ÑÅ—ï…πÖ±…Öô–µ1Ö’πç°ï»∏àπ•π—º†§§∞(ÄÄÄÅÙ§)Ù((çm—Ö’…§ËÈçΩµµÖπët)¡’à°Õ’¡ï»§Åô∏Åù•—°’â}ëïŸï±Ω¡ï…}Õ—Ö—’Ã°Ö¡¿ËÅ¡¡!Öπë±î§Ä¥¯ÅïŸï±Ω¡ï…1Ωù•πM—Ö—’ÃÅÏ(ÄÄÄÅ±ï–Å’Õï…πÖµîÄÙÅÖ¡¿πÕ—Ö—îËËÒ•—!’âïŸï±Ω¡ï»¯†§π’Õï…πÖµî†§Ï(ÄÄÄÅïŸï±Ω¡ï…1Ωù•πM—Ö—’ÃÅÏ(ÄÄÄÄÄÄÄÅÕ—Ö—’ÃËÅ•òÅ’Õï…πÖµîπ•Õ}ÕΩµî†§ÅÏÄâÖ’—°Ω…•ÈïêàÅÙÅï±ÕîÅÏÄâÕ•ùπïë=’–àÅÙπ•π—º†§∞(ÄÄÄÄÄÄÄÅ’Õï…πÖµî∞(ÄÄÄÄÄÄÄÅ’Õï…}çΩëîËÅ9Ωπî∞(ÄÄÄÄÄÄÄÅŸï…•ô•çÖ—•Ωπ}’…§ËÅ9Ωπî∞(ÄÄÄÄÄÄÄÅï·¡•…ïÕ}•π}ÕïçΩπëÃËÅ9Ωπî∞(ÄÄÄÄÄÄÄÅ•π—ï…ŸÖ±}ÕïçΩπëÃËÅ9Ωπî∞(ÄÄÄÄÄÄÄÅµïÕÕÖùîËÅ9Ωπî∞(ÄÄÄÅÙ)Ù((çm—Ö’…§ËÈçΩµµÖπët)¡’à°Õ’¡ï»§Åô∏Å±ΩùΩ’—}ù•—°’â}ëïŸï±Ω¡ï»°Ö¡¿ËÅ¡¡!Öπë±î§Ä¥¯ÅIïÕ’±–ÒïŸï±Ω¡ï…1Ωù•πM—Ö—’Ã∞ÅM—…•πú¯ÅÏ(ÄÄÄÅ±ï–ÅëïŸï±Ω¡ï»ÄÙÅÖ¡¿πÕ—Ö—îËËÒ•—!’âïŸï±Ω¡ï»¯†§Ï(ÄÄÄÅ±ï–Åµ’–ÅÕ—Ö—îÄÙÅëïŸï±Ω¡ï»(ÄÄÄÄÄÄÄÄ∏¿(ÄÄÄÄÄÄÄÄπ±Ωç¨†§(ÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Ò}Äâ∞ÅïÕ—ÖëºÅëîÅÖ’—Ω…•ÈÖçßÕ∏Å•—!’àÅ≈’ïìÃÅâ±Ω≈’ïÖëºàπ—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÅÕ—Ö—îπ¡ïπë•πúÄÙÅ9ΩπîÏ(ÄÄÄÅÕ—Ö—îπÕïÕÕ•Ω∏ÄÙÅ9ΩπîÏ(ÄÄÄÅÕ—Ö—îπÕΩ’…çï}ë•…ïç—Ω…•ïÃπç±ïÖ»†§Ï(ÄÄÄÅ=¨°±Ωù•π}Õ—Ö—’Ã†âÕ•ùπïë=’–à∞ÅMΩµî†âMîÅçï…ÀÃÅ±ÑÅÕïÕßÕ∏ÅëïŸï±Ω¡ï»ÅëîÅïÕ—îÅ¡…ΩçïÕº∏à§§§)Ù()ô∏Å±Ωù•π}Õ—Ö—’Ã°Õ—Ö—’ÃËÄôÕ—»∞ÅµïÕÕÖùîËÅ=¡—•Ω∏ôÕ—»¯§Ä¥¯ÅïŸï±Ω¡ï…1Ωù•πM—Ö—’ÃÅÏ(ÄÄÄÅïŸï±Ω¡ï…1Ωù•πM—Ö—’ÃÅÏ(ÄÄÄÄÄÄÄÅÕ—Ö—’ÃËÅÕ—Ö—’Ãπ•π—º†§∞(ÄÄÄÄÄÄÄÅ’Õï…πÖµîËÅ9Ωπî∞(ÄÄÄÄÄÄÄÅ’Õï…}çΩëîËÅ9Ωπî∞(ÄÄÄÄÄÄÄÅŸï…•ô•çÖ—•Ωπ}’…§ËÅ9Ωπî∞(ÄÄÄÄÄÄÄÅï·¡•…ïÕ}•π}ÕïçΩπëÃËÅ9Ωπî∞(ÄÄÄÄÄÄÄÅ•π—ï…ŸÖ±}ÕïçΩπëÃËÅ9Ωπî∞(ÄÄÄÄÄÄÄÅµïÕÕÖùîËÅµïÕÕÖùîπµÖ¿°Õ—»ËÈ—Ω}Õ—…•πú§∞(ÄÄÄÅÙ)Ù()ô∏Å¡ïπë•πù}Õ—Ö—’Ã†(ÄÄÄÅ¡ïπë•πúËÄôAïπë•πùïŸ•çï’—°Ω…•ÈÖ—•Ω∏∞(ÄÄÄÅµïÕÕÖùîËÅ=¡—•Ω∏ôÕ—»¯∞(§Ä¥¯ÅïŸï±Ω¡ï…1Ωù•πM—Ö—’ÃÅÏ(ÄÄÄÅïŸï±Ω¡ï…1Ωù•πM—Ö—’ÃÅÏ(ÄÄÄÄÄÄÄÅÕ—Ö—’ÃËÄâ¡ïπë•πúàπ•π—º†§∞(ÄÄÄÄÄÄÄÅ’Õï…πÖµîËÅ9Ωπî∞(ÄÄÄÄÄÄÄÅ’Õï…}çΩëîËÅMΩµî°¡ïπë•πúπ’Õï…}çΩëîπç±Ωπî†§§∞(ÄÄÄÄÄÄÄÅŸï…•ô•çÖ—•Ωπ}’…§ËÅMΩµî°%Q!U	}Y%}YI%%Q%=9}UI0π•π—º†§§∞(ÄÄÄÄÄÄÄÅï·¡•…ïÕ}•π}ÕïçΩπëÃËÅMΩµî†(ÄÄÄÄÄÄÄÄÄÄÄÅ¡ïπë•πú(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄπï·¡•…ïÕ}Ö–(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄπÕÖ—’…Ö—•πù}ë’…Ö—•Ωπ}Õ•πçî°%πÕ—Öπ–ËÈπΩ‹†§§(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄπÖÕ}ÕïçÃ†§∞(ÄÄÄÄÄÄÄÄ§∞(ÄÄÄÄÄÄÄÅ•π—ï…ŸÖ±}ÕïçΩπëÃËÅMΩµî°¡ïπë•πúπ•π—ï…ŸÖ∞πÖÕ}ÕïçÃ†§§∞(ÄÄÄÄÄÄÄÅµïÕÕÖùîËÅµïÕÕÖùîπµÖ¿°Õ—»ËÈ—Ω}Õ—…•πú§∞(ÄÄÄÅÙ)Ù()ô∏Åùï—}ù•—°’â}’Õï»°ÖççïÕÕ}—Ω≠ï∏ËÄôÕ—»§Ä¥¯ÅIïÕ’±–Ò•—!’âUÕï»∞ÅM—…•πú¯ÅÏ(ÄÄÄÅ±ï–Åç±•ïπ–ÄÙÅ°——¿ËÈç±•ïπ–†§πµÖ¡}ï…»°Òï……Ω…Åï……Ω»π—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÅ±ï–Å…ïÕ¡ΩπÕîÄÙÅç±•ïπ–(ÄÄÄÄÄÄÄÄπùï–°ôΩ…µÖ–Ñ†âÌ%Q!U	}A%ÙΩ’Õï»à§§(ÄÄÄÄÄÄÄÄπâïÖ…ï…}Ö’—†°ÖççïÕÕ}—Ω≠ï∏§(ÄÄÄÄÄÄÄÄπ°ïÖëï»†âççï¡–à∞ÄâÖ¡¡±•çÖ—•Ω∏ΩŸπêπù•—°’à≠©ÕΩ∏à§(ÄÄÄÄÄÄÄÄπ°ïÖëï»†â`µ•—!’àµ¡§µYï…Õ•Ω∏à∞Äà»¿»»¥ƒƒ¥»‡à§(ÄÄÄÄÄÄÄÄπ°ïÖëï»†âUÕï»µùïπ–à∞Äâ—ï…πÖ±…Öô–µ1Ö’πç°ï»à§(ÄÄÄÄÄÄÄÄπÕïπê†§(ÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â9ºÅÕîÅ¡’ëºÅŸÖ±•ëÖ»Å±ÑÅç’ïπ—ÑÅ•—!’àËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÅ•òÄÖ…ïÕ¡ΩπÕîπÕ—Ö—’Ã†§π•Õ}Õ’ççïÕÃ†§ÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏Å…»†â•—!’àÅπºÅ¡’ëºÅŸÖ±•ëÖ»ÅïÕ—ÑÅÕïÕßÕ∏àπ•π—º†§§Ï(ÄÄÄÅÙ(ÄÄÄÅ…ïÕ¡ΩπÕî(ÄÄÄÄÄÄÄÄπ©ÕΩ∏†§(ÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â•—!’àÅëïŸΩ±ŸßÃÅ’πÑÅç’ïπ—ÑÅ•π€Ö±•ëÑËÅÌï……Ω…Ùà§§)Ù()ô∏Å•πÕ—Ö±±Ö—•Ωπ}°ÖÕ}çΩπ—ïπ—Õ}›…•—î°¡ï…µ•ÕÕ•ΩπÃËÄô	Q…ïï5Ö¿ÒM—…•πú∞ÅM—…•πú¯§Ä¥¯ÅâΩΩ∞ÅÏ(ÄÄÄÅ¡ï…µ•ÕÕ•ΩπÃ(ÄÄÄÄÄÄÄÄπùï–†âçΩπ—ïπ—Ãà§(ÄÄÄÄÄÄÄÄπ•Õ}ÕΩµï}Öπê°Ò¡ï…µ•ÕÕ•ΩπÅ¡ï…µ•ÕÕ•Ω∏πï≈}•ùπΩ…ï}ÖÕç••}çÖÕî†â›…•—îà§§)Ù()ô∏Å…ï¡ΩÕ•—Ω…Â}¡ï…µ•ÕÕ•ΩπÕ}Ö±±Ω›}›…•—î°¡ï…µ•ÕÕ•ΩπÃËÅ=¡—•Ω∏ÒIï¡ΩÕ•—Ω…ÂAï…µ•ÕÕ•ΩπÃ¯§Ä¥¯ÅâΩΩ∞ÅÏ(ÄÄÄÅ¡ï…µ•ÕÕ•ΩπÃπ•Õ}ÕΩµï}Öπê°Ò¡ï…µ•ÕÕ•ΩπÕÅÏ(ÄÄÄÄÄÄÄÅ¡ï…µ•ÕÕ•ΩπÃπ¡’Õ†ÄÙÙÅMΩµî°—…’î§ÅÒÅ¡ï…µ•ÕÕ•ΩπÃπÖëµ•∏ÄÙÙÅMΩµî°—…’î§(ÄÄÄÅÙ§)Ù()ô∏ÅïπÕ’…ï}…ï¡ΩÕ•—Ω…Â}›…•—ï}ÖççïÕÃ°ÖççïÕÕ}—Ω≠ï∏ËÄôÕ—»§Ä¥¯ÅIïÕ’±–†§∞ÅM—…•πú¯ÅÏ(ÄÄÄÅ±ï–Åç±•ïπ–ÄÙÅ°——¿ËÈç±•ïπ–†§πµÖ¡}ï…»°Òï……Ω…Åï……Ω»π—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÅ±ï–Åµ’–Å•πÕ—Ö±±Ö—•ΩπÃÄÙÅYïåËÈπï‹†§Ï(ÄÄÄÅôΩ»Å¡ÖùîÅ•∏Äƒ∏∏Ùƒ¿ÅÏ(ÄÄÄÄÄÄÄÅ±ï–Å…ïÕ¡ΩπÕîÄÙÅç±•ïπ–(ÄÄÄÄÄÄÄÄÄÄÄÄπùï–°ôΩ…µÖ–Ñ†âÌ%Q!U	}A%ÙΩ’Õï»Ω•πÕ—Ö±±Ö—•ΩπÃ˝¡ï…}¡ÖùîÙƒ¿¿ô¡ÖùîıÌ¡ÖùïÙà§§(ÄÄÄÄÄÄÄÄÄÄÄÄπâïÖ…ï…}Ö’—†°ÖççïÕÕ}—Ω≠ï∏§(ÄÄÄÄÄÄÄÄÄÄÄÄπ°ïÖëï»†âççï¡–à∞ÄâÖ¡¡±•çÖ—•Ω∏ΩŸπêπù•—°’à≠©ÕΩ∏à§(ÄÄÄÄÄÄÄÄÄÄÄÄπ°ïÖëï»†â`µ•—!’àµ¡§µYï…Õ•Ω∏à∞Äà»¿»»¥ƒƒ¥»‡à§(ÄÄÄÄÄÄÄÄÄÄÄÄπ°ïÖëï»†âUÕï»µùïπ–à∞Äâ—ï…πÖ±…Öô–µ1Ö’πç°ï»à§(ÄÄÄÄÄÄÄÄÄÄÄÄπÕïπê†§(ÄÄÄÄÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â9ºÅÕîÅ¡’ë•ï…Ω∏ÅŸÖ±•ëÖ»Å±ÖÃÅ•πÕ—Ö±Öç•ΩπïÃÅëîÅ±ÑÅ•—!’àÅ¡¿ËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÄÄÄÄÅ•òÄÖ…ïÕ¡ΩπÕîπÕ—Ö—’Ã†§π•Õ}Õ’ççïÕÃ†§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Å…»°ôΩ…µÖ–Ñ†(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄâ•—!’àÅπºÅ¡’ëºÅŸÖ±•ëÖ»Å±ÑÅ•πÕ—Ö±ÖçßÕ∏ÅëîÅ±ÑÅ¡¿Ä°ÌÙ§à∞(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ…ïÕ¡ΩπÕîπÕ—Ö—’Ã†§(ÄÄÄÄÄÄÄÄÄÄÄÄ§§Ï(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÅ±ï–Å…ïÕ’±–ËÅUÕï…%πÕ—Ö±±Ö—•ΩπÕIïÕ¡ΩπÕîÄÙÅ…ïÕ¡ΩπÕî(ÄÄÄÄÄÄÄÄÄÄÄÄπ©ÕΩ∏†§(ÄÄÄÄÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â•—!’àÅëïŸΩ±ŸßÃÅ•πÕ—Ö±Öç•ΩπïÃÅ•π€Ö±•ëÖÃËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÄÄÄÄÅ±ï–ÅçΩ’π–ÄÙÅ…ïÕ’±–π•πÕ—Ö±±Ö—•ΩπÃπ±ï∏†§Ï(ÄÄÄÄÄÄÄÅ•πÕ—Ö±±Ö—•ΩπÃπï·—ïπê°…ïÕ’±–π•πÕ—Ö±±Ö—•ΩπÃ§Ï(ÄÄÄÄÄÄÄÅ•òÅçΩ’π–ÄÄƒ¿¿ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅâ…ïÖ¨Ï(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÅÙ((ÄÄÄÅôΩ»Å•πÕ—Ö±±Ö—•Ω∏Å•∏Å•πÕ—Ö±±Ö—•ΩπÃπ•π—Ω}•—ï»†§πô•±—ï»°Ò•πÕ—Ö±±Ö—•ΩπÅÏ(ÄÄÄÄÄÄÄÅ•πÕ—Ö±±Ö—•Ω∏πÖççΩ’π–π±Ωù•∏πï≈}•ùπΩ…ï}ÖÕç••}çÖÕî†âMÖπ—§µAëHà§(ÄÄÄÄÄÄÄÄÄÄÄÄòòÅ•πÕ—Ö±±Ö—•Ωπ}°ÖÕ}çΩπ—ïπ—Õ}›…•—î†ô•πÕ—Ö±±Ö—•Ω∏π¡ï…µ•ÕÕ•ΩπÃ§(ÄÄÄÅÙ§ÅÏ(ÄÄÄÄÄÄÄÅôΩ»Å¡ÖùîÅ•∏Äƒ∏∏Ùƒ¿ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ±ï–Å…ïÕ¡ΩπÕîÄÙÅç±•ïπ–(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄπùï–°ôΩ…µÖ–Ñ†(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄâÌ%Q!U	}A%ÙΩ’Õï»Ω•πÕ—Ö±±Ö—•ΩπÃΩÌÙΩ…ï¡ΩÕ•—Ω…•ïÃ˝¡ï…}¡ÖùîÙƒ¿¿ô¡ÖùîıÌ¡ÖùïÙà∞(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ•πÕ—Ö±±Ö—•Ω∏π•ê(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄ§§(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄπâïÖ…ï…}Ö’—†°ÖççïÕÕ}—Ω≠ï∏§(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄπ°ïÖëï»†âççï¡–à∞ÄâÖ¡¡±•çÖ—•Ω∏ΩŸπêπù•—°’à≠©ÕΩ∏à§(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄπ°ïÖëï»†â`µ•—!’àµ¡§µYï…Õ•Ω∏à∞Äà»¿»»¥ƒƒ¥»‡à§(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄπ°ïÖëï»†âUÕï»µùïπ–à∞Äâ—ï…πÖ±…Öô–µ1Ö’πç°ï»à§(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄπÕïπê†§(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â9ºÅÕîÅ¡’ëºÅçΩµ¡…ΩâÖ»Åï∞ÅÖççïÕºÅëîÅ±ÑÅ•—!’àÅ¡¿ÅÖ∞Å…ï¡ΩÕ•—Ω…•ºËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÄÄÄÄÄÄÄÄÅ•òÄÖ…ïÕ¡ΩπÕîπÕ—Ö—’Ã†§π•Õ}Õ’ççïÕÃ†§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Å…»°ôΩ…µÖ–Ñ†(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄâ•—!’àÅπºÅ¡’ëºÅçΩµ¡…ΩâÖ»Å±ΩÃÅ…ï¡ΩÕ•—Ω…•ΩÃÅëîÅ±ÑÅ•πÕ—Ö±ÖçßÕ∏Ä°ÌÙ§à∞(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ…ïÕ¡ΩπÕîπÕ—Ö—’Ã†§(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄ§§Ï(ÄÄÄÄÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÄÄÄÄÅ±ï–Å…ïÕ’±–ËÅ%πÕ—Ö±±Ö—•ΩπIï¡ΩÕ•—Ω…•ïÕIïÕ¡ΩπÕîÄÙÅ…ïÕ¡ΩπÕî(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄπ©ÕΩ∏†§(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â•—!’àÅëïŸΩ±ŸßÃÅ…ï¡ΩÕ•—Ω…•ΩÃÅ•πÕ—Ö±ÖëΩÃÅ•π€Ö±•ëΩÃËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÄÄÄÄÄÄÄÄÅ±ï–ÅçΩ’π–ÄÙÅ…ïÕ’±–π…ï¡ΩÕ•—Ω…•ïÃπ±ï∏†§Ï(ÄÄÄÄÄÄÄÄÄÄÄÅ•òÅ±ï–ÅMΩµî°…ï¡ΩÕ•—Ω…‰§ÄÙÅ…ïÕ’±–π…ï¡ΩÕ•—Ω…•ïÃπ•π—Ω}•—ï»†§πô•πê°Ò…ï¡ΩÕ•—Ω…ÂÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ…ï¡ΩÕ•—Ω…‰πô’±±}πÖµîπï≈}•ùπΩ…ï}ÖÕç••}çÖÕî°AU	1%M!}IA=M%Q=Id§(ÄÄÄÄÄÄÄÄÄÄÄÅÙ§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ•òÅ…ï¡ΩÕ•—Ω…Â}¡ï…µ•ÕÕ•ΩπÕ}Ö±±Ω›}›…•—î°…ï¡ΩÕ•—Ω…‰π¡ï…µ•ÕÕ•ΩπÃ§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Å=¨††§§Ï(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Å…»†âQ‘Åç’ïπ—ÑÅπºÅ—•ïπîÅ¡ï…µ•ÕºÅëîÅïÕç…•—’…ÑÅï∏Å—ï…πÖ±…Öô–µ1Ö’πç°ï»àπ•π—º†§§Ï(ÄÄÄÄÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÄÄÄÄÅ•òÅçΩ’π–ÄÄƒ¿¿ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅâ…ïÖ¨Ï(ÄÄÄÄÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÅÙ((ÄÄÄÅ…»†â%πÕ—Ö±ÑÅ±ÑÅ•—!’àÅ¡¿ÅçΩ∏Å¡ï…µ•ÕºÅΩπ—ïπ—ÃËÅIïÖêÅÖπêÅ›…•—îÉÈπ•çÖµïπ—îÅï∏ÅMÖπ—§µAëHΩ—ï…πÖ±…Öô–µ1Ö’πç°ï»∏àπ•π—º†§§)Ù((çm—Ö’…§ËÈçΩµµÖπët)¡’à°Õ’¡ï»§Åô∏Åç°ΩΩÕï}¡Öç≠}ÕΩ’…çï}ë•…ïç—Ω…‰†(ÄÄÄÅÖ¡¿ËÅ¡¡!Öπë±î∞(ÄÄÄÅÕï…•ïÕ}•êËÅM—…•πú∞(§Ä¥¯ÅIïÕ’±–Ò=¡—•Ω∏ÒAÖç≠MΩ’…çïA…ïŸ•ï‹¯∞ÅM—…•πú¯ÅÏ(ÄÄÄÅ±ï–Å}—Ω≠ï∏ÄÙÅÖ¡¿πÕ—Ö—îËËÒ•—!’âïŸï±Ω¡ï»¯†§πÖççïÕÕ}—Ω≠ï∏†§¸Ï(ÄÄÄÅ±ï–ÅçÖ—Ö±ΩúÄÙÅç’……ïπ—}çÖ—Ö±Ωú†§¸Ï(ÄÄÄÅ•òÄÖçÖ—Ö±ΩúπÕï…•ïÃπ•—ï»†§πÖπ‰°ÒÕï…•ïÕÅÕï…•ïÃπ•êÄÙÙÅÕï…•ïÕ}•ê§ÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏Å…»†â1ÑÅÕï…•îÅÕΩ±•ç•—ÖëÑÅπºÅï·•Õ—îÅï∏Åï∞ÅçÖ”Ö±Ωùºàπ•π—º†§§Ï(ÄÄÄÅÙ(ÄÄÄÅ±ï–ÅÕï±ïç—ïêÄÙÅÖ¡¿(ÄÄÄÄÄÄÄÄπë•Ö±Ωú†§(ÄÄÄÄÄÄÄÄπô•±î†§(ÄÄÄÄÄÄÄÄπÕï—}—•—±î†âMï±ïçç•ΩπÖ»ÅçÖ…¡ï—ÑÅçΩ∏ÅµΩëÃÅ)HÅΩô•ç•Ö±ïÃà§(ÄÄÄÄÄÄÄÄπâ±Ωç≠•πù}¡•ç≠}ôΩ±ëï»†§Ï(ÄÄÄÅ±ï–ÅMΩµî°Õï±ïç—ïê§ÄÙÅÕï±ïç—ïêÅï±ÕîÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏Å=¨°9Ωπî§Ï(ÄÄÄÅÙÏ(ÄÄÄÅ±ï–Å¡Ö—†ÄÙÅÕï±ïç—ïê(ÄÄÄÄÄÄÄÄπ•π—Ω}¡Ö—††§(ÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†âI’—ÑÅëîÅçÖ…¡ï—ÑÅπºÅ€Ö±•ëÑËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÅ±ï–ÅÕï…•ïÃÄÙÅçÖ—Ö±Ωú(ÄÄÄÄÄÄÄÄπÕï…•ïÃ(ÄÄÄÄÄÄÄÄπ•—ï»†§(ÄÄÄÄÄÄÄÄπô•πê°ÒÕï…•ïÕÅÕï…•ïÃπ•êÄÙÙÅÕï…•ïÕ}•ê§(ÄÄÄÄÄÄÄÄπΩ≠}Ω…}ï±Õî°ÒÄâ1ÑÅÕï…•îÅÕΩ±•ç•—ÖëÑÅπºÅï·•Õ—îÅï∏Åï∞ÅçÖ”Ö±Ωùºàπ—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÅ±ï–Å¡…ïŸ•ï‹ÄÙÅÕçÖπ}¡Öç≠}ÕΩ’…çî†(ÄÄÄÄÄÄÄÄô¡Ö—†∞(ÄÄÄÄÄÄÄÄôÕï…•ïÕ}•ê∞(ÄÄÄÄÄÄÄÄôÕï…•ïÃπµ•πïç…Öô—}Ÿï…Õ•Ω∏∞(ÄÄÄÄÄÄÄÄôÕï…•ïÃπ±ΩÖëï…}Ÿï…Õ•Ω∏∞(ÄÄÄÄ§¸Ï(ÄÄÄÅ±ï–ÅçÖπΩπ•çÖ±}¡Ö—†ÄÙÅAÖ—°	’òËÈô…Ω¥†ô¡…ïŸ•ï‹πë•…ïç—Ω…‰§Ï(ÄÄÄÅÖ¡¿πÕ—Ö—îËËÒ•—!’âïŸï±Ω¡ï»¯†§(ÄÄÄÄÄÄÄÄ∏¿(ÄÄÄÄÄÄÄÄπ±Ωç¨†§(ÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Ò}Äâ∞ÅïÕ—ÖëºÅëïŸï±Ω¡ï»Å≈’ïìÃÅâ±Ω≈’ïÖëºàπ—Ω}Õ—…•πú†§§¸(ÄÄÄÄÄÄÄÄπÕΩ’…çï}ë•…ïç—Ω…•ïÃ(ÄÄÄÄÄÄÄÄπ•πÕï…–°Õï…•ïÕ}•ê∞ÅçÖπΩπ•çÖ±}¡Ö—†§Ï(ÄÄÄÅ=¨°MΩµî°¡…ïŸ•ï‹§§)Ù((çm—Ö’…§ËÈçΩµµÖπët)¡’à°Õ’¡ï»§Åô∏Å…ïô…ïÕ°}¡Öç≠}ÕΩ’…çï}¡…ïŸ•ï‹†(ÄÄÄÅÖ¡¿ËÅ¡¡!Öπë±î∞(ÄÄÄÅÕï…•ïÕ}•êËÅM—…•πú∞(§Ä¥¯ÅIïÕ’±–ÒAÖç≠MΩ’…çïA…ïŸ•ï‹∞ÅM—…•πú¯ÅÏ(ÄÄÄÅ±ï–Å}—Ω≠ï∏ÄÙÅÖ¡¿πÕ—Ö—îËËÒ•—!’âïŸï±Ω¡ï»¯†§πÖççïÕÕ}—Ω≠ï∏†§¸Ï(ÄÄÄÅ±ï–Å¡Ö—†ÄÙÅÖ¡¿(ÄÄÄÄÄÄÄÄπÕ—Ö—îËËÒ•—!’âïŸï±Ω¡ï»¯†§(ÄÄÄÄÄÄÄÄ∏¿(ÄÄÄÄÄÄÄÄπ±Ωç¨†§(ÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Ò}Äâ∞ÅïÕ—ÖëºÅëïŸï±Ω¡ï»Å≈’ïìÃÅâ±Ω≈’ïÖëºàπ—Ω}Õ—…•πú†§§¸(ÄÄÄÄÄÄÄÄπÕΩ’…çï}ë•…ïç—Ω…•ïÃ(ÄÄÄÄÄÄÄÄπùï–†ôÕï…•ïÕ}•ê§(ÄÄÄÄÄÄÄÄπç±Ωπïê†§(ÄÄÄÄÄÄÄÄπΩ≠}Ω…}ï±Õî°ÒÄâMï±ïçç•ΩπÑÅ¡…•µï…ºÅ’πÑÅçÖ…¡ï—ÑÅô’ïπ—îÅ¡Ö…ÑÅïÕ—ÑÅÕï…•îàπ—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÅ±ï–ÅÕï…•ïÃÄÙÅç’……ïπ—}çÖ—Ö±Ωú†§¸(ÄÄÄÄÄÄÄÄπÕï…•ïÃ(ÄÄÄÄÄÄÄÄπ•π—Ω}•—ï»†§(ÄÄÄÄÄÄÄÄπô•πê°ÒÕï…•ïÕÅÕï…•ïÃπ•êÄÙÙÅÕï…•ïÕ}•ê§(ÄÄÄÄÄÄÄÄπΩ≠}Ω…}ï±Õî°ÒÄâ1ÑÅÕï…•îÅÕΩ±•ç•—ÖëÑÅπºÅï·•Õ—îÅï∏Åï∞ÅçÖ”Ö±Ωùºàπ—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÅÕçÖπ}¡Öç≠}ÕΩ’…çî†(ÄÄÄÄÄÄÄÄô¡Ö—†∞(ÄÄÄÄÄÄÄÄôÕï…•ïÕ}•ê∞(ÄÄÄÄÄÄÄÄôÕï…•ïÃπµ•πïç…Öô—}Ÿï…Õ•Ω∏∞(ÄÄÄÄÄÄÄÄôÕï…•ïÃπ±ΩÖëï…}Ÿï…Õ•Ω∏∞(ÄÄÄÄ§)Ù((çm—Ö’…§ËÈçΩµµÖπët)¡’à°Õ’¡ï»§ÅÖÕÂπåÅô∏Å¡’â±•Õ°}¡Öç≠}…ï±ïÖÕî†(ÄÄÄÅÖ¡¿ËÅ¡¡!Öπë±î∞(ÄÄÄÅÕï…•ïÕ}•êËÅM—…•πú∞(ÄÄÄÅŸï…Õ•Ω∏ËÅM—…•πú∞(ÄÄÄÅçΩπô•…µïë}ÕΩ’…çï}ô•πùï…¡…•π–ËÅM—…•πú∞(§Ä¥¯ÅIïÕ’±–ÒM—…•πú∞ÅM—…•πú¯ÅÏ(ÄÄÄÅ—Ö’…§ËÈÖÕÂπç}…’π—•µîËÈÕ¡Ö›π}â±Ωç≠•πú°µΩŸîÅÒÅÏ(ÄÄÄÄÄÄÄÅ¡’â±•Õ°}¡Öç≠}…ï±ïÖÕï}ÕÂπå°Ö¡¿∞ÅÕï…•ïÕ}•ê∞ÅŸï…Õ•Ω∏∞ÅçΩπô•…µïë}ÕΩ’…çï}ô•πùï…¡…•π–§(ÄÄÄÅÙ§(ÄÄÄÄÄÄÄÄπÖ›Ö•–(ÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â1ÑÅ—Ö…ïÑÅëîÅ¡’â±•çÖçßÕ∏ÅÕîÅ•π—ï……’µ¡ßÃËÅÌï……Ω…Ùà§§¸)Ù()ô∏Å¡’â±•Õ°}¡Öç≠}…ï±ïÖÕï}ÕÂπå†(ÄÄÄÅÖ¡¿ËÅ¡¡!Öπë±î∞(ÄÄÄÅÕï…•ïÕ}•êËÅM—…•πú∞(ÄÄÄÅŸï…Õ•Ω∏ËÅM—…•πú∞(ÄÄÄÅçΩπô•…µïë}ÕΩ’…çï}ô•πùï…¡…•π–ËÅM—…•πú∞(§Ä¥¯ÅIïÕ’±–ÒM—…•πú∞ÅM—…•πú¯ÅÏ(ÄÄÄÅ±ï–Å}¡’â±•Õ°}±ïÖÕîÄÙÅA’â±•Õ°1ïÖÕîËÈÖç≈’•…î†ôÖ¡¿§¸Ï(ÄÄÄÅ±ï–ÅÖççïÕÕ}—Ω≠ï∏ÄÙÅÖ¡¿πÕ—Ö—îËËÒ•—!’âïŸï±Ω¡ï»¯†§πÖççïÕÕ}—Ω≠ï∏†§¸Ï(ÄÄÄÅ•òÄÖŸÖ±•ë}¡Öç≠}Ÿï…Õ•Ω∏†ôŸï…Õ•Ω∏§ÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏Å…»†âUÕÑÅ’πÑÅŸï…ÕßÕ∏ÅïÕ—Öâ±îÅçΩ∏ÅôΩ…µÖ—ºÅ5)=Hπ5%9=HπAQ ∞Å¡Ω»Åï©ïµ¡±ºÄƒ∏»∏¿àπ•π—º†§§Ï(ÄÄÄÅÙ(ÄÄÄÅ±ï–ÅçÖ—Ö±ΩúÄÙÅç’……ïπ—}çÖ—Ö±Ωú†§¸Ï(ÄÄÄÅ±ï–ÅÕï…•ïÃÄÙÅçÖ—Ö±Ωú(ÄÄÄÄÄÄÄÄπÕï…•ïÃ(ÄÄÄÄÄÄÄÄπ•—ï»†§(ÄÄÄÄÄÄÄÄπô•πê°ÒÕï…•ïÕÅÕï…•ïÃπ•êÄÙÙÅÕï…•ïÕ}•ê§(ÄÄÄÄÄÄÄÄπΩ≠}Ω…}ï±Õî°ÒÄâ1ÑÅÕï…•îÅÕï±ïçç•ΩπÖëÑÅπºÅï·•Õ—îàπ—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÅ±ï–ÅÕΩ’…çîÄÙÅÖ¡¿(ÄÄÄÄÄÄÄÄπÕ—Ö—îËËÒ•—!’âïŸï±Ω¡ï»¯†§(ÄÄÄÄÄÄÄÄ∏¿(ÄÄÄÄÄÄÄÄπ±Ωç¨†§(ÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Ò}Äâ∞ÅïÕ—ÖëºÅëïŸï±Ω¡ï»Å≈’ïìÃÅâ±Ω≈’ïÖëºàπ—Ω}Õ—…•πú†§§¸(ÄÄÄÄÄÄÄÄπÕΩ’…çï}ë•…ïç—Ω…•ïÃ(ÄÄÄÄÄÄÄÄπùï–†ôÕï…•ïÕ}•ê§(ÄÄÄÄÄÄÄÄπç±Ωπïê†§(ÄÄÄÄÄÄÄÄπΩ≠}Ω…}ï±Õî°ÒÄâMï±ïçç•ΩπÑÅ¡…•µï…ºÅ±ÑÅçÖ…¡ï—ÑÅô’ïπ—îÅëîÅµΩëÃÅëîÅïÕ—ÑÅÕï…•îàπ—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÅ±ï–ÅÕΩ’…çîÄÙÅÕçÖπ}¡Öç≠}ÕΩ’…çî†(ÄÄÄÄÄÄÄÄôÕΩ’…çî∞(ÄÄÄÄÄÄÄÄôÕï…•ïÕ}•ê∞(ÄÄÄÄÄÄÄÄôÕï…•ïÃπµ•πïç…Öô—}Ÿï…Õ•Ω∏∞(ÄÄÄÄÄÄÄÄôÕï…•ïÃπ±ΩÖëï…}Ÿï…Õ•Ω∏∞(ÄÄÄÄ§¸Ï(ÄÄÄÅ±ï–Å•πçΩµ¡Ö—•â±îËÅYïåôÕ—»¯ÄÙÅÕΩ’…çî(ÄÄÄÄÄÄÄÄπô•±ïÃ(ÄÄÄÄÄÄÄÄπ•—ï»†§(ÄÄÄÄÄÄÄÄπô•±—ï»°Òô•±ïÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅô•±îπµ•πïç…Öô—}çΩµ¡Ö—•â•±•—‰ÄÙÙÅAÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈ%πçΩµ¡Ö—•â±î(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅÒÅô•±îπôΩ…ùï}çΩµ¡Ö—•â•±•—‰ÄÙÙÅAÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈ%πçΩµ¡Ö—•â±î(ÄÄÄÄÄÄÄÅÙ§(ÄÄÄÄÄÄÄÄπµÖ¿°Òô•±ïÅô•±îππÖµîπÖÕ}Õ—»†§§(ÄÄÄÄÄÄÄÄπçΩ±±ïç–†§Ï(ÄÄÄÅ•òÄÖ•πçΩµ¡Ö—•â±îπ•Õ}ïµ¡—‰†§ÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏Å…»°ôΩ…µÖ–Ñ†(ÄÄÄÄÄÄÄÄÄÄÄÄâ9ºÅÕîÅ¡’ïëîÅ¡’â±•çÖ»ËÅÌÙÅëïç±Ö…ÑÅ•πçΩµ¡Ö—•â•±•ëÖêÅçΩ∏Å5•πïç…Öô–ÅÌÙËÅÌÙà∞(ÄÄÄÄÄÄÄÄÄÄÄÅ•πçΩµ¡Ö—•â±îπ±ï∏†§∞(ÄÄÄÄÄÄÄÄÄÄÄÅÕï…•ïÃπµ•πïç…Öô—}Ÿï…Õ•Ω∏∞(ÄÄÄÄÄÄÄÄÄÄÄÅ•πçΩµ¡Ö—•â±îπ©Ω•∏†à∞Äà§(ÄÄÄÄÄÄÄÄ§§Ï(ÄÄÄÅÙ(ÄÄÄÅ•òÅÕΩ’…çîπÕΩ’…çï}ô•πùï…¡…•π–ÄÑÙÅçΩπô•…µïë}ÕΩ’…çï}ô•πùï…¡…•π–ÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏Å…»†â1ÑÅçÖ…¡ï—ÑÅºÅÕ’ÃÅ)HÅçÖµâ•Ö…Ω∏ÅëïÕëîÅ±ÑÅ…ïŸ•ÕßÕ∏ÅëîÅ±•çïπç•ÖÃ∏ÅY’ï±ŸîÅÑÅŸï…•ô•çÖ»Å±ÑÅô’ïπ—îÅ‰ÅçΩπô•…µÑÅΩ—…ÑÅŸïË∏àπ•π—º†§§Ï(ÄÄÄÅÙ(ÄÄÄÅ•òÅÕΩ’…çîπô•±ïÃπ±ï∏†§Ä¯Å5a}%Q!U	}MMQM}AI}I1MÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏Å…»°ôΩ…µÖ–Ñ†â•—!’àÅ¡ï…µ•—îÅ°ÖÕ—ÑÅÌ5a}%Q!U	}MMQM}AI}I1MÙÅÖÕÕï—ÃÅ¡Ω»Å…ï±ïÖÕîà§§Ï(ÄÄÄÅÙ((ÄÄÄÅ±ï–Å—ÖúÄÙÅôΩ…µÖ–Ñ†âÌÕï…•ïÕ}•ëÙµŸÌŸï…Õ•ΩπÙà§Ï(ÄÄÄÅ±ï–Å…ï±ïÖÕîÄÙÅùï—}Ω…}ç…ïÖ—ï}ë…Öô—}…ï±ïÖÕî†ôÖççïÕÕ}—Ω≠ï∏∞Äô—Öú∞ÄôÕï…•ïÃππÖµî§¸Ï(ÄÄÄÅ±ï–ÅÖÕÕï—ÃÄÙÅ±•Õ—}…ï±ïÖÕï}ÖÕÕï—Ã†ôÖççïÕÕ}—Ω≠ï∏∞Å…ï±ïÖÕîπ•ê§¸Ï(ÄÄÄÅ•òÄÖ…ï±ïÖÕîπë…Öô–ÄòòÄÖ¡’â±•Õ°ïë}ÖÕÕï—}πÖµïÕ}µÖ—ç††ôÕΩ’…çîπô•±ïÃ∞ÄôÖÕÕï—Ã§ÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏Å…»°ôΩ…µÖ–Ñ†(ÄÄÄÄÄÄÄÄÄÄÄÄâ∞Å…ï±ïÖÕîÅ¡’â±•çÖëºÅÌ—ÖùÙÅÂÑÅ—•ïπîÅ’∏ÅçΩπ©’π—ºÅëîÅµΩëÃÅë•Õ—•π—ºÏÅç…ïÑÅ’πÑÅŸï…ÕßÕ∏Åπ’ïŸÑà(ÄÄÄÄÄÄÄÄ§§Ï(ÄÄÄÅÙ(ÄÄÄÅ±ï–Åµ’–ÅŸï…•ô•ïë}πÖµïÃÄÙÅÕ—êËÈçΩ±±ïç—•ΩπÃËÈ	Q…ïïMï–ËÈπï‹†§Ï(ÄÄÄÅ±ï–Å—Ω—Ö∞ÄÙÅÕΩ’…çîπô•±ïÃπ±ï∏†§Ï(ÄÄÄÅôΩ»Ä°•πëï‡∞ÅÕΩ’…çï}ô•±î§Å•∏ÅÕΩ’…çîπô•±ïÃπ•—ï»†§πïπ’µï…Ö—î†§ÅÏ(ÄÄÄÄÄÄÄÅ±ï–Åï·¡ïç—ïë}ë•ùïÕ–ÄÙÅôΩ…µÖ–Ñ†âÕ°Ñ»‘ÿÈÌÙà∞ÅÕΩ’…çï}ô•±îπÕ°Ñ»‘ÿ§Ï(ÄÄÄÄÄÄÄÅ•òÅ±ï–ÅMΩµî°ÖÕÕï–§ÄÙÅÖÕÕï—Ãπ•—ï»†§πô•πê°ÒÖÕÕï—ÅÖÕÕï–ππÖµîÄÙÙÅÕΩ’…çï}ô•±îππÖµî§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ•òÅÖÕÕï–πë•ùïÕ–πÖÕ}ëï…ïò†§ÄÙÙÅMΩµî°ï·¡ïç—ïë}ë•ùïÕ–πÖÕ}Õ—»†§§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅŸï…•ô•ïë}πÖµïÃπ•πÕï…–°ÕΩ’…çï}ô•±îππÖµîπç±Ωπî†§§Ï(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅïµ•—}¡’â±•Õ°}¡…Ωù…ïÕÃ†ôÖ¡¿∞ÄôÕï…•ïÕ}•ê∞Å•πëï‡Ä¨Äƒ∞Å—Ω—Ö∞∞ÄôÕΩ’…çï}ô•±îππÖµî§Ï(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅçΩπ—•π’îÏ(ÄÄÄÄÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÄÄÄÄÅ•òÄÖ…ï±ïÖÕîπë…Öô–ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Å…»°ôΩ…µÖ–Ñ†â∞Å…ï±ïÖÕîÅ¡’â±•çÖëºÅÌ—ÖùÙÅÂÑÅçΩπ—•ïπîÅÌÙÅçΩ∏ÅΩ—…ºÅ°ÖÕ†ÏÅç…ïÑÅ’πÑÅŸï…ÕßÕ∏Åπ’ïŸÑà∞ÅÕΩ’…çï}ô•±îππÖµî§§Ï(ÄÄÄÄÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÄÄÄÄÅëï±ï—ï}…ï±ïÖÕï}ÖÕÕï–†ôÖççïÕÕ}—Ω≠ï∏∞Å…ï±ïÖÕîπ•ê∞ÅÖÕÕï–π•ê§¸Ï(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÅ•òÄÖ…ï±ïÖÕîπë…Öô–ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Å…»°ôΩ…µÖ–Ñ†â∞Å…ï±ïÖÕîÅ¡’â±•çÖëºÅÌ—ÖùÙÅπºÅçΩπ—•ïπîÅï∞ÅµΩêÅïÕ¡ï…ÖëºÅÌÙÏÅç…ïÑÅ’πÑÅŸï…ÕßÕ∏Åπ’ïŸÑà∞ÅÕΩ’…çï}ô•±îππÖµî§§Ï(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÅ±ï–Å¡Ö—†ÄÙÅAÖ—†ËÈπï‹†ôÕΩ’…çîπë•…ïç—Ω…‰§π©Ω•∏†ôÕΩ’…çï}ô•±îππÖµî§Ï(ÄÄÄÄÄÄÄÅ±ï–Åç’……ïπ–ÄÙÅôÃËÈµï—ÖëÖ—Ñ†ô¡Ö—†§(ÄÄÄÄÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â9ºÅÕîÅ¡’ëºÅ•πÕ¡ïçç•ΩπÖ»ÅÌÙÅ¡Ö…ÑÅÕ’â•…±ºËÅÌï……Ω…Ùà∞ÅÕΩ’…çï}ô•±îππÖµî§§¸Ï(ÄÄÄÄÄÄÄÅ•òÅç’……ïπ–π±ï∏†§ÄÑÙÅÕΩ’…çï}ô•±îπÕ•Èï}âÂ—ïÃÅÒÅÕ°Ñ»‘Ÿ}ô•±î†ô¡Ö—†§¸ÄÑÙÅÕΩ’…çï}ô•±îπÕ°Ñ»‘ÿÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Å…»°ôΩ…µÖ–Ñ†âÌÙÅçÖµâßÃÅëïÕ¡◊•ÃÅëîÅ±ÑÅ…ïŸ•ÕßÕ∏ÏÅŸ’ï±ŸîÅÑÅïÕçÖπïÖ»Å±ÑÅçÖ…¡ï—Ñà∞ÅÕΩ’…çï}ô•±îππÖµî§§Ï(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÅ±ï–Å’¡±ΩÖëïêÄÙÅ’¡±ΩÖë}…ï±ïÖÕï}ÖÕÕï—}…ïÕ’µÖâ±î†(ÄÄÄÄÄÄÄÄÄÄÄÄôÖççïÕÕ}—Ω≠ï∏∞(ÄÄÄÄÄÄÄÄÄÄÄÄô…ï±ïÖÕîπ’¡±ΩÖë}’…∞∞(ÄÄÄÄÄÄÄÄÄÄÄÅ…ï±ïÖÕîπ•ê∞(ÄÄÄÄÄÄÄÄÄÄÄÄôÕΩ’…çï}ô•±îππÖµî∞(ÄÄÄÄÄÄÄÄÄÄÄÄôï·¡ïç—ïë}ë•ùïÕ–∞(ÄÄÄÄÄÄÄÄÄÄÄÄô¡Ö—†∞(ÄÄÄÄÄÄÄÄÄÄÄÅÕΩ’…çï}ô•±îπÕ•Èï}âÂ—ïÃ∞(ÄÄÄÄÄÄÄÄ§¸Ï(ÄÄÄÄÄÄÄÅ•òÅ’¡±ΩÖëïêππÖµîÄÑÙÅÕΩ’…çï}ô•±îππÖµîÅÒÅ’¡±ΩÖëïêπë•ùïÕ–πÖÕ}ëï…ïò†§ÄÑÙÅMΩµî°ï·¡ïç—ïë}ë•ùïÕ–πÖÕ}Õ—»†§§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ±ï–Å|ÄÙÅëï±ï—ï}…ï±ïÖÕï}ÖÕÕï–†ôÖççïÕÕ}—Ω≠ï∏∞Å…ï±ïÖÕîπ•ê∞Å’¡±ΩÖëïêπ•ê§Ï(ÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Å…»°ôΩ…µÖ–Ñ†â•—!’àÅπºÅçΩπô•…∑ÃÅï∞ÅM!¥»‘ÿÅïÕ¡ï…ÖëºÅ¡Ö…ÑÅÌÙà∞ÅÕΩ’…çï}ô•±îππÖµî§§Ï(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÅŸï…•ô•ïë}πÖµïÃπ•πÕï…–°ÕΩ’…çï}ô•±îππÖµîπç±Ωπî†§§Ï(ÄÄÄÄÄÄÄÅïµ•—}¡’â±•Õ°}¡…Ωù…ïÕÃ†ôÖ¡¿∞ÄôÕï…•ïÕ}•ê∞Å•πëï‡Ä¨Äƒ∞Å—Ω—Ö∞∞ÄôÕΩ’…çï}ô•±îππÖµî§Ï(ÄÄÄÅÙ(ÄÄÄÅ•òÅ…ï±ïÖÕîπë…Öô–ÅÏ(ÄÄÄÄÄÄÄÅôΩ»ÅÖÕÕï–Å•∏ÄôÖÕÕï—ÃÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ•òÄÖŸï…•ô•ïë}πÖµïÃπçΩπ—Ö•πÃ†ôÖÕÕï–ππÖµî§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅëï±ï—ï}…ï±ïÖÕï}ÖÕÕï–†ôÖççïÕÕ}—Ω≠ï∏∞Å…ï±ïÖÕîπ•ê∞ÅÖÕÕï–π•ê§¸Ï(ÄÄÄÄÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÅÙ((ÄÄÄÅ±ï–ÅµÖπ•ôïÕ–ÄÙÅ5Öπ•ôïÕ–ÅÏ(ÄÄÄÄÄÄÄÅÕç°ïµÖ}Ÿï…Õ•Ω∏ËÄƒ∞(ÄÄÄÄÄÄÄÅÕï…•ïÕ}•êËÅÕï…•ïÕ}•êπç±Ωπî†§∞(ÄÄÄÄÄÄÄÅŸï…Õ•Ω∏ËÅŸï…Õ•Ω∏πç±Ωπî†§∞(ÄÄÄÄÄÄÄÅµ•πïç…Öô—}Ÿï…Õ•Ω∏ËÅÕï…•ïÃπµ•πïç…Öô—}Ÿï…Õ•Ω∏πç±Ωπî†§∞(ÄÄÄÄÄÄÄÅ±ΩÖëï»ËÅÕï…•ïÃπ±ΩÖëï»πç±Ωπî†§∞(ÄÄÄÄÄÄÄÅ±ΩÖëï…}Ÿï…Õ•Ω∏ËÅÕï…•ïÃπ±ΩÖëï…}Ÿï…Õ•Ω∏πç±Ωπî†§∞(ÄÄÄÄÄÄÄÅô•±ïÃËÅÕΩ’…çî(ÄÄÄÄÄÄÄÄÄÄÄÄπô•±ïÃ(ÄÄÄÄÄÄÄÄÄÄÄÄπ•—ï»†§(ÄÄÄÄÄÄÄÄÄÄÄÄπµÖ¿°Òô•±ïÅ5Öπ•ôïÕ—•±îÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ¡Ö—†ËÅôΩ…µÖ–Ñ†âµΩëÃΩÌÙà∞Åô•±îππÖµî§∞(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ’…∞ËÅôΩ…µÖ–Ñ†â°——¡ÃËºΩù•—°’àπçΩ¥ΩÌAU	1%M!}IA=M%Q=IeÙΩ…ï±ïÖÕïÃΩëΩ›π±ΩÖêΩÌ—ÖùÙΩÌÙà∞ÅïπçΩëï}¡Ö—°}çΩµ¡Ωπïπ–†ôô•±îππÖµî§§∞(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅÕ•Èï}âÂ—ïÃËÅô•±îπÕ•Èï}âÂ—ïÃ∞(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅÕ°Ñ»‘ÿËÅô•±îπÕ°Ñ»‘ÿπç±Ωπî†§∞(ÄÄÄÄÄÄÄÄÄÄÄÅÙ§(ÄÄÄÄÄÄÄÄÄÄÄÄπçΩ±±ïç–†§∞(ÄÄÄÅÙÏ(ÄÄÄÅ±ï–ÅµÖπ•ôïÕ—}âÂ—ïÃÄÙÅÕï…ëï}©ÕΩ∏ËÈ—Ω}Ÿïç}¡…ï——‰†ôµÖπ•ôïÕ–§(ÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â9ºÅÕîÅ¡’ëºÅùïπï…Ö»Åï∞ÅµÖπ•ô•ïÕ—ºËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÅ•òÅ…ï±ïÖÕîπë…Öô–ÅÏ(ÄÄÄÄÄÄÄÅ¡’â±•Õ°}ù•—°’â}…ï±ïÖÕî†ôÖççïÕÕ}—Ω≠ï∏∞Å…ï±ïÖÕîπ•ê∞ÄôÕï…•ïÃππÖµî∞ÄôŸï…Õ•Ω∏§¸Ï(ÄÄÄÅÙ((ÄÄÄÄººÅA’â±•Õ†Å—°îÅ…ï±ïÖÕîÅÖÕÕï—ÃÅâïôΩ…îÅÖëŸÖπç•πúÅ—°îÅµÖπ•ôïÕ–Å¡Ω•π—ï»∏Å·•Õ—•πúÅç±•ïπ—Ã(ÄÄÄÄººÅ≠ïï¿Å…ïÕΩ±Ÿ•πúÅ—°îÅ¡…ïŸ•Ω’ÃÅçΩµ¡±ï—îÅŸï…Õ•Ω∏Å›°•±îÅ—°îÅπï‹ÅÖÕÕï—ÃÅÖ…îÅπΩ–ÅÂï–Å¡’â±•å∏(ÄÄÄÅ±ï–ÅµÖπ•ôïÕ—}¡Ö—†ÄÙÅôΩ…µÖ–Ñ†â¡Öç≠ÃΩÌÕï…•ïÕ}•ëÙΩµÖπ•ôïÕ–π©ÕΩ∏à§Ï(ÄÄÄÅ±ï–Åç’……ïπ—}µÖπ•ôïÕ–ÄÙÅùï—}…ï¡ΩÕ•—Ω…Â}ô•±î†ôÖççïÕÕ}—Ω≠ï∏∞ÄôµÖπ•ôïÕ—}¡Ö—†§¸(ÄÄÄÄÄÄÄÄπµÖ¿°Òô•±ïÅô•±îπçΩπ—ïπ–πΩ≠}Ω…}ï±Õî°ÒÅôΩ…µÖ–Ñ†â•—!’àÅπºÅëïŸΩ±ŸßÃÅï∞ÅµÖπ•ô•ïÕ—ºÅÌµÖπ•ôïÕ—}¡Ö—°Ùà§§§(ÄÄÄÄÄÄÄÄπ—…ÖπÕ¡ΩÕî†§¸(ÄÄÄÄÄÄÄÄπµÖ¿°ÒçΩπ—ïπ—ÅâÖÕîÿ—}ëïçΩëî†ôçΩπ—ïπ–§§(ÄÄÄÄÄÄÄÄπ—…ÖπÕ¡ΩÕî†§¸Ï(ÄÄÄÅ•òÅÕ°Ω’±ë}ÖëŸÖπçï}µÖπ•ôïÕ—}¡Ω•π—ï»°ç’……ïπ—}µÖπ•ôïÕ–πÖÕ}ëï…ïò†§∞ÄôµÖπ•ôïÕ—}âÂ—ïÃ§¸ÅÏ(ÄÄÄÄÄÄÄÅ¡’—}…ï¡ΩÕ•—Ω…Â}ô•±î†ôÖççïÕÕ}—Ω≠ï∏∞ÄôµÖπ•ôïÕ—}¡Ö—†∞ÄôµÖπ•ôïÕ—}âÂ—ïÃ∞ÄôôΩ…µÖ–Ñ†âA’â±•Õ†ÅÌÙÅÌŸï…Õ•ΩπÙÅµÖπ•ôïÕ–à∞ÅÕï…•ïÃππÖµî§§¸Ï(ÄÄÄÅÙ(ÄÄÄÅ’¡ëÖ—ï}çÖ—Ö±Ωù}Õ—Ö—’Ã†ôÖççïÕÕ}—Ω≠ï∏∞ÄôÕï…•ïÕ}•ê§¸Ï(ÄÄÄÅÕ’¡ï»ËÈµÖ…≠}…’π—•µï}Õï…•ïÕ}ÖŸÖ•±Öâ±î†ôÕï…•ïÕ}•ê§¸Ï(ÄÄÄÅïµ•—}¡’â±•Õ°}¡…Ωù…ïÕÃ†ôÖ¡¿∞ÄôÕï…•ïÕ}•ê∞Å—Ω—Ö∞∞Å—Ω—Ö∞∞ÄâA’â±•çÖçßÕ∏ÅŸï…•ô•çÖëÑà§Ï(ÄÄÄÅ=¨°ôΩ…µÖ–Ñ†âIï±ïÖÕîÅÌ—ÖùÙÅ¡’â±•çÖëºËÅÌ—Ω—Ö±ÙÅµΩëÃ∞ÅÌÙ∏Å1ÑÅÕï…•îÅÂÑÅïÕ”ÑÅë•Õ¡Ωπ•â±îÅ¡Ö…ÑÅï∞Å±Ö’πç°ï»∏à∞ÅôΩ…µÖ—}âÂ—ïÃ°ÕΩ’…çîπ—Ω—Ö±}âÂ—ïÃ§§§)Ù()ô∏ÅŸÖ±•ë}¡Öç≠}Ÿï…Õ•Ω∏°Ÿï…Õ•Ω∏ËÄôÕ—»§Ä¥¯ÅâΩΩ∞ÅÏ(ÄÄÄÅ±ï–Å¡Ö…—ÃËÅYïåôÕ—»¯ÄÙÅŸï…Õ•Ω∏πÕ¡±•–†ú∏ú§πçΩ±±ïç–†§Ï(ÄÄÄÅ¡Ö…—Ãπ±ï∏†§ÄÙÙÄÃ(ÄÄÄÄÄÄÄÄòòÅ¡Ö…—Ãπ•—ï»†§πÖ±∞°Ò¡Ö…—ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÖ¡Ö…–π•Õ}ïµ¡—‰†§(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄòòÅ¡Ö…–π±ï∏†§ÄÙÄÿ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄòòÅ¡Ö…–πâÂ—ïÃ†§πÖ±∞°ÒâÂ—ïÅâÂ—îπ•Õ}ÖÕç••}ë•ù•–†§§(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄòòÄ†©¡Ö…–ÄÙÙÄà¿àÅÒÄÖ¡Ö…–πÕ—Ö…—Õ}›•—††ú¿ú§§(ÄÄÄÄÄÄÄÅÙ§)Ù()ô∏Åïµ•—}¡’â±•Õ°}¡…Ωù…ïÕÃ°Ö¡¿ËÄô¡¡!Öπë±î∞ÅÕï…•ïÕ}•êËÄôÕ—»∞ÅçΩµ¡±ï—ïêËÅ’Õ•Èî∞Å—Ω—Ö∞ËÅ’Õ•Èî∞ÅµïÕÕÖùîËÄôÕ—»§ÅÏ(ÄÄÄÅ±ï–Å|ÄÙÅÖ¡¿πïµ•–†â¡Öç¨µ¡’â±•Õ†µ¡…Ωù…ïÕÃà∞ÅAÖç≠A’â±•Õ°A…Ωù…ïÕÃÅÏ(ÄÄÄÄÄÄÄÅÕï…•ïÕ}•êËÅÕï…•ïÕ}•êπ—Ω}Õ—…•πú†§∞(ÄÄÄÄÄÄÄÅçΩµ¡±ï—ïë}ô•±ïÃËÅçΩµ¡±ï—ïê∞(ÄÄÄÄÄÄÄÅ—Ω—Ö±}ô•±ïÃËÅ—Ω—Ö∞∞(ÄÄÄÄÄÄÄÅµïÕÕÖùîËÅµïÕÕÖùîπ—Ω}Õ—…•πú†§∞(ÄÄÄÅÙ§Ï)Ù()ô∏Å¡’â±•Õ°ïë}ÖÕÕï—}πÖµïÕ}µÖ—ç†°ÕΩ’…çîËÄômAÖç≠MΩ’…çï•±ït∞ÅÖÕÕï—ÃËÄôm•—!’âIï±ïÖÕïÕÕï—t§Ä¥¯ÅâΩΩ∞ÅÏ(ÄÄÄÅ±ï–ÅÕΩ’…çï}πÖµïÃËÅ	Q…ïïMï–ôÕ—»¯ÄÙÅÕΩ’…çîπ•—ï»†§πµÖ¿°Òô•±ïÅô•±îππÖµîπÖÕ}Õ—»†§§πçΩ±±ïç–†§Ï(ÄÄÄÅ±ï–ÅÖÕÕï—}πÖµïÃËÅ	Q…ïïMï–ôÕ—»¯ÄÙÅÖÕÕï—Ãπ•—ï»†§πµÖ¿°ÒÖÕÕï—ÅÖÕÕï–ππÖµîπÖÕ}Õ—»†§§πçΩ±±ïç–†§Ï(ÄÄÄÅÕΩ’…çï}πÖµïÃÄÙÙÅÖÕÕï—}πÖµïÃ)Ù()ô∏ÅÕ°Ω’±ë}ÖëŸÖπçï}µÖπ•ôïÕ—}¡Ω•π—ï»°ï·•Õ—•πúËÅ=¡—•Ω∏ôm‘·t¯∞Åï·¡ïç—ïêËÄôm‘·t§Ä¥¯ÅIïÕ’±–ÒâΩΩ∞∞ÅM—…•πú¯ÅÏ(ÄÄÄÅ±ï–Åï·¡ïç—ïêËÅÕï…ëï}©ÕΩ∏ËÈYÖ±’îÄÙÅÕï…ëï}©ÕΩ∏ËÈô…Ωµ}Õ±•çî°ï·¡ïç—ïê§(ÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â5Öπ•ô•ïÕ—ºÅïÕ¡ï…ÖëºÅ•π€Ö±•ëºËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÅ±ï–Å—Ö…ùï—}Ÿï…Õ•Ω∏ÄÙÅï·¡ïç—ïëlâŸï…Õ•Ω∏âtπÖÕ}Õ—»†§(ÄÄÄÄÄÄÄÄπΩ≠}Ω…}ï±Õî°ÒÄâ∞ÅµÖπ•ô•ïÕ—ºÅïÕ¡ï…ÖëºÅπºÅçΩπ—•ïπîÅŸï…ÕßÕ∏àπ—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÅ±ï–Å—Ö…ùï–ÄÙÅ¡Ö…Õï}¡Öç≠}Ÿï…Õ•Ω∏°—Ö…ùï—}Ÿï…Õ•Ω∏§(ÄÄÄÄÄÄÄÄπΩ≠}Ω…}ï±Õî°ÒÄâ1ÑÅŸï…ÕßÕ∏Åëï∞ÅµÖπ•ô•ïÕ—ºÅïÕ¡ï…ÖëºÅπºÅïÃÅMïµYï»ÅïÕ—Öâ±îàπ—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÅ±ï–ÅMΩµî°ï·•Õ—•πú§ÄÙÅï·•Õ—•πúÅï±ÕîÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏Å=¨°—…’î§Ï(ÄÄÄÅÙÏ(ÄÄÄÅ±ï–Åï·•Õ—•πúËÅÕï…ëï}©ÕΩ∏ËÈYÖ±’îÄÙÅÕï…ëï}©ÕΩ∏ËÈô…Ωµ}Õ±•çî°ï·•Õ—•πú§(ÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â∞ÅµÖπ•ô•ïÕ—ºÅÖç—’Ö∞ÅπºÅïÃÅ)M=8Å€Ö±•ëºËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÅ•òÅï·•Õ—•πúÄÙÙÅï·¡ïç—ïêÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏Å=¨°ôÖ±Õî§Ï(ÄÄÄÅÙ(ÄÄÄÅ±ï–Åç’……ïπ—}Ÿï…Õ•Ω∏ÄÙÅï·•Õ—•πùlâŸï…Õ•Ω∏âtπÖÕ}Õ—»†§(ÄÄÄÄÄÄÄÄπΩ≠}Ω…}ï±Õî°ÒÄâ∞ÅµÖπ•ô•ïÕ—ºÅÖç—’Ö∞ÅπºÅçΩπ—•ïπîÅŸï…ÕßÕ∏ÏÅπºÅÕîÅ…ïïµ¡±ÖÎÃàπ—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÅ±ï–Åç’……ïπ–ÄÙÅ¡Ö…Õï}¡Öç≠}Ÿï…Õ•Ω∏°ç’……ïπ—}Ÿï…Õ•Ω∏§(ÄÄÄÄÄÄÄÄπΩ≠}Ω…}ï±Õî°ÒÄâ∞ÅµÖπ•ô•ïÕ—ºÅÖç—’Ö∞ÅπºÅ—•ïπîÅ’πÑÅŸï…ÕßÕ∏ÅïÕ—Öâ±îÅ€Ö±•ëÑÏÅπºÅÕîÅ…ïïµ¡±ÖÎÃàπ—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÅµÖ—ç†Å—Ö…ùï–πçµ¿†ôç’……ïπ–§ÅÏ(ÄÄÄÄÄÄÄÅÕ—êËÈçµ¿ËÈ=…ëï…•πúËÈ…ïÖ—ï»ÄÙ¯Å=¨°—…’î§∞(ÄÄÄÄÄÄÄÅÕ—êËÈçµ¿ËÈ=…ëï…•πúËÈ≈’Ö∞ÄÙ¯Å…»°ôΩ…µÖ–Ñ†(ÄÄÄÄÄÄÄÄÄÄÄÄâ1ÑÅŸï…ÕßÕ∏ÅÌ—Ö…ùï—}Ÿï…Õ•ΩπÙÅÂÑÅ—•ïπîÅ’∏ÅµÖπ•ô•ïÕ—ºÅë•Õ—•π—ºÏÅ’ÕÑÅ’πÑÅŸï…ÕßÕ∏Åπ’ïŸÑà(ÄÄÄÄÄÄÄÄ§§∞(ÄÄÄÄÄÄÄÅÕ—êËÈçµ¿ËÈ=…ëï…•πúËÈ1ïÕÃÄÙ¯Å…»°ôΩ…µÖ–Ñ†(ÄÄÄÄÄÄÄÄÄÄÄÄâ1ÑÅŸï…ÕßÕ∏ÅÌ—Ö…ùï—}Ÿï…Õ•ΩπÙÅïÃÅÖπ—ï…•Ω»ÅÖ∞ÅµÖπ•ô•ïÕ—ºÅÖç—’Ö∞ÅÌç’……ïπ—}Ÿï…Õ•ΩπÙÏÅπºÅÕîÅ¡ï…µ•—îÅ…ï—…Ωçïëï»à(ÄÄÄÄÄÄÄÄ§§∞(ÄÄÄÅÙ)Ù()ô∏Å¡Ö…Õï}¡Öç≠}Ÿï…Õ•Ω∏°Ÿï…Õ•Ω∏ËÄôÕ—»§Ä¥¯Å=¡—•Ω∏°‘Ã»∞Å‘Ã»∞Å‘Ã»§¯ÅÏ(ÄÄÄÅ•òÄÖŸÖ±•ë}¡Öç≠}Ÿï…Õ•Ω∏°Ÿï…Õ•Ω∏§ÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏Å9ΩπîÏ(ÄÄÄÅÙ(ÄÄÄÅ±ï–Åµ’–Å¡Ö…—ÃÄÙÅŸï…Õ•Ω∏πÕ¡±•–†ú∏ú§πµÖ¿°Õ—»ËÈ¡Ö…ÕîËËÒ‘Ã»¯§Ï(ÄÄÄÅMΩµî†°¡Ö…—Ãππï·–†§¸πΩ¨†§¸∞Å¡Ö…—Ãππï·–†§¸πΩ¨†§¸∞Å¡Ö…—Ãππï·–†§¸πΩ¨†§¸§§)Ù()ô∏Åù•—°’â}©ÕΩ∏ÒPËÅôΩ»ùëî¯ÅïÕï…•Ö±•Èîùëî¯¯°…ïÕ¡ΩπÕîËÅ…ï≈›ïÕ–ËÈâ±Ωç≠•πúËÈIïÕ¡ΩπÕî∞ÅçΩπ—ï·–ËÄôÕ—»§Ä¥¯ÅIïÕ’±–ÒP∞ÅM—…•πú¯ÅÏ(ÄÄÄÅ±ï–ÅÕ—Ö—’ÃÄÙÅ…ïÕ¡ΩπÕîπÕ—Ö—’Ã†§Ï(ÄÄÄÅ•òÄÖÕ—Ö—’Ãπ•Õ}Õ’ççïÕÃ†§ÅÏ(ÄÄÄÄÄÄÄÅ±ï–ÅâΩë‰ÄÙÅ…ïÕ¡ΩπÕîπ—ï·–†§π’π›…Ö¡}Ω…}ëïôÖ’±–†§Ï(ÄÄÄÄÄÄÄÅ…ï—’…∏Å…»°ôΩ…µÖ–Ñ†âÌçΩπ—ï·—ÙÅôÖ±≥ÃÄ°ÌÕ—Ö—’ÕÙ§ËÅÌÙà∞ÅâΩë‰πç°Ö…Ã†§π—Ö≠î†‘¿¿§πçΩ±±ïç–ËËÒM—…•πú¯†§§§Ï(ÄÄÄÅÙ(ÄÄÄÅ…ïÕ¡ΩπÕîπ©ÕΩ∏†§πµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†âÌçΩπ—ï·—ÙËÅ…ïÕ¡’ïÕ—ÑÅ•π€Ö±•ëÑÅëîÅ•—!’àËÅÌï……Ω…Ùà§§)Ù()ô∏Åùï—}Ω…}ç…ïÖ—ï}ë…Öô—}…ï±ïÖÕî°—Ω≠ï∏ËÄôÕ—»∞Å—ÖúËÄôÕ—»∞ÅÕï…•ïÕ}πÖµîËÄôÕ—»§Ä¥¯ÅIïÕ’±–Ò•—!’âIï±ïÖÕî∞ÅM—…•πú¯ÅÏ(ÄÄÄÅ±ï–Åç±•ïπ–ÄÙÅ°——¿ËÈç±•ïπ–†§πµÖ¡}ï…»°Òï……Ω…Åï……Ω»π—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÅ±ï–Å…ïÕ¡ΩπÕîÄÙÅç±•ïπ–πùï–°ôΩ…µÖ–Ñ†âÌ%Q!U	}A%ÙΩ…ï¡ΩÃΩÌAU	1%M!}IA=M%Q=IeÙΩ…ï±ïÖÕïÃΩ—ÖùÃΩÌ—ÖùÙà§§(ÄÄÄÄÄÄÄÄπâïÖ…ï…}Ö’—†°—Ω≠ï∏§π°ïÖëï»†âççï¡–à∞ÄâÖ¡¡±•çÖ—•Ω∏ΩŸπêπù•—°’à≠©ÕΩ∏à§(ÄÄÄÄÄÄÄÄπ°ïÖëï»†â`µ•—!’àµ¡§µYï…Õ•Ω∏à∞Äà»¿»»¥ƒƒ¥»‡à§π°ïÖëï»†âUÕï»µùïπ–à∞Äâ—ï…πÖ±…Öô–µ1Ö’πç°ï»à§(ÄÄÄÄÄÄÄÄπÕïπê†§πµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â9ºÅÕîÅ¡’ëºÅçΩπÕ’±—Ö»Åï∞Å…ï±ïÖÕîÅÌ—ÖùÙËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÅ•òÅ…ïÕ¡ΩπÕîπÕ—Ö—’Ã†§π•Õ}Õ’ççïÕÃ†§ÅÏ(ÄÄÄÄÄÄÄÅ±ï–Å…ï±ïÖÕîËÅ•—!’âIï±ïÖÕîÄÙÅù•—°’â}©ÕΩ∏°…ïÕ¡ΩπÕî∞ÄâΩπÕ’±—Ö»Å…ï±ïÖÕîà§¸Ï(ÄÄÄÄÄÄÄÅŸÖ±•ëÖ—ï}’¡±ΩÖë}’…∞†ô…ï±ïÖÕîπ’¡±ΩÖë}’…∞∞Å…ï±ïÖÕîπ•ê§¸Ï(ÄÄÄÄÄÄÄÅ…ï—’…∏Å=¨°…ï±ïÖÕî§Ï(ÄÄÄÅÙ(ÄÄÄÅ•òÅ…ïÕ¡ΩπÕîπÕ—Ö—’Ã†§πÖÕ}‘ƒÿ†§ÄÑÙÄ–¿–ÅÏ(ÄÄÄÄÄÄÄÅ±ï–ÅÕ—Ö—’ÃÄÙÅ…ïÕ¡ΩπÕîπÕ—Ö—’Ã†§Ï(ÄÄÄÄÄÄÄÅ±ï–ÅâΩë‰ÄÙÅ…ïÕ¡ΩπÕîπ—ï·–†§π’π›…Ö¡}Ω…}ëïôÖ’±–†§Ï(ÄÄÄÄÄÄÄÅ…ï—’…∏Å…»°ôΩ…µÖ–Ñ†â9ºÅÕîÅ¡’ëºÅçΩπÕ’±—Ö»Åï∞Å…ï±ïÖÕîÄ°ÌÕ—Ö—’ÕÙ§ËÅÌÙà∞ÅâΩë‰πç°Ö…Ã†§π—Ö≠î†–¿¿§πçΩ±±ïç–ËËÒM—…•πú¯†§§§Ï(ÄÄÄÅÙ(ÄÄÄÅ±ï–Å…ïÕ¡ΩπÕîÄÙÅç±•ïπ–π¡ΩÕ–°ôΩ…µÖ–Ñ†âÌ%Q!U	}A%ÙΩ…ï¡ΩÃΩÌAU	1%M!}IA=M%Q=IeÙΩ…ï±ïÖÕïÃà§§(ÄÄÄÄÄÄÄÄπâïÖ…ï…}Ö’—†°—Ω≠ï∏§π°ïÖëï»†âççï¡–à∞ÄâÖ¡¡±•çÖ—•Ω∏ΩŸπêπù•—°’à≠©ÕΩ∏à§(ÄÄÄÄÄÄÄÄπ°ïÖëï»†â`µ•—!’àµ¡§µYï…Õ•Ω∏à∞Äà»¿»»¥ƒƒ¥»‡à§π°ïÖëï»†âUÕï»µùïπ–à∞Äâ—ï…πÖ±…Öô–µ1Ö’πç°ï»à§(ÄÄÄÄÄÄÄÄπ©ÕΩ∏†ôÕï…ëï}©ÕΩ∏ËÈ©ÕΩ∏Ñ°Ïâ—Öù}πÖµîàËÅ—Öú∞ÄâπÖµîàËÅôΩ…µÖ–Ñ†âÌÕï…•ïÕ}πÖµïÙÅÌ—ÖùÙà§∞ÄââΩë‰àËÄâA’â±•çÖëºÅ¡Ω»Å—ï…πÖ±…Öô–Å1Ö’πç°ï»ÅïŸï±Ω¡ï»∏à∞Äâë…Öô–àËÅ—…’î∞Äâ¡…ï…ï±ïÖÕîàËÅôÖ±ÕïÙ§§(ÄÄÄÄÄÄÄÄπÕïπê†§πµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â9ºÅÕîÅ¡’ëºÅç…ïÖ»Åï∞ÅâΩ……ÖëΩ»ÅÌ—ÖùÙËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÅ±ï–Å…ï±ïÖÕîËÅ•—!’âIï±ïÖÕîÄÙÅù•—°’â}©ÕΩ∏°…ïÕ¡ΩπÕî∞Äâ…ïÖ»Å…ï±ïÖÕîÅâΩ……ÖëΩ»à§¸Ï(ÄÄÄÅŸÖ±•ëÖ—ï}’¡±ΩÖë}’…∞†ô…ï±ïÖÕîπ’¡±ΩÖë}’…∞∞Å…ï±ïÖÕîπ•ê§¸Ï(ÄÄÄÅ=¨°…ï±ïÖÕî§)Ù()ô∏ÅŸÖ±•ëÖ—ï}’¡±ΩÖë}’…∞°’…∞ËÄôÕ—»∞Å…ï±ïÖÕï}•êËÅ‘ÿ–§Ä¥¯ÅIïÕ’±–†§∞ÅM—…•πú¯ÅÏ(ÄÄÄÅ±ï–Åï·¡ïç—ïêÄÙÅôΩ…µÖ–Ñ†â°——¡ÃËºΩ’¡±ΩÖëÃπù•—°’àπçΩ¥Ω…ï¡ΩÃΩÌAU	1%M!}IA=M%Q=IeÙΩ…ï±ïÖÕïÃΩÌ…ï±ïÖÕï}•ëÙΩÖÕÕï—Ãà§Ï(ÄÄÄÅ±ï–ÅÕ’ôô•‡ÄÙÅ’…∞πÕ—…•¡}¡…ïô•‡†ôï·¡ïç—ïê§π’π›…Ö¡}Ω…}ëïôÖ’±–†§Ï(ÄÄÄÅ•òÅÕ’ôô•‡ÄÑÙÄâÏ˝πÖµî±±Öâï±ÙàÄòòÄÖÕ’ôô•‡π•Õ}ïµ¡—‰†§ÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏Å…»†â•—!’àÅëïŸΩ±ŸßÃÅ’πÑÅUI0ÅëîÅçÖ…ùÑÅ•πïÕ¡ï…ÖëÑÏÅÕîÅçÖπçï≥ÃÅ¡Ω»ÅÕïù’…•ëÖêàπ•π—º†§§Ï(ÄÄÄÅÙ(ÄÄÄÅ•òÄÖ’…∞πÕ—Ö…—Õ}›•—††ôï·¡ïç—ïê§ÅÏÅ…ï—’…∏Å…»†â•—!’àÅëïŸΩ±ŸßÃÅ’πÑÅUI0ÅëîÅçÖ…ùÑÅ•πïÕ¡ï…ÖëÑÏÅÕîÅçÖπçï≥ÃÅ¡Ω»ÅÕïù’…•ëÖêàπ•π—º†§§ÏÅÙ(ÄÄÄÅ=¨††§§)Ù()ô∏Å±•Õ—}…ï±ïÖÕï}ÖÕÕï—Ã°—Ω≠ï∏ËÄôÕ—»∞Å…ï±ïÖÕï}•êËÅ‘ÿ–§Ä¥¯ÅIïÕ’±–ÒYïåÒ•—!’âIï±ïÖÕïÕÕï–¯∞ÅM—…•πú¯ÅÏ(ÄÄÄÅ±ï–Åç±•ïπ–ÄÙÅ°——¿ËÈç±•ïπ–†§πµÖ¡}ï…»°Òï……Ω…Åï……Ω»π—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÅ±ï–Åµ’–ÅÖÕÕï—ÃÄÙÅYïåËÈπï‹†§Ï(ÄÄÄÅôΩ»Å¡ÖùîÅ•∏Äƒ∏∏Ùƒ¿ÅÏ(ÄÄÄÄÄÄÄÅ±ï–Å…ïÕ¡ΩπÕîÄÙÅç±•ïπ–πùï–°ôΩ…µÖ–Ñ†âÌ%Q!U	}A%ÙΩ…ï¡ΩÃΩÌAU	1%M!}IA=M%Q=IeÙΩ…ï±ïÖÕïÃΩÌ…ï±ïÖÕï}•ëÙΩÖÕÕï—Ã˝¡ï…}¡ÖùîÙƒ¿¿ô¡ÖùîıÌ¡ÖùïÙà§§(ÄÄÄÄÄÄÄÄÄÄÄÄπâïÖ…ï…}Ö’—†°—Ω≠ï∏§π°ïÖëï»†âççï¡–à∞ÄâÖ¡¡±•çÖ—•Ω∏ΩŸπêπù•—°’à≠©ÕΩ∏à§(ÄÄÄÄÄÄÄÄÄÄÄÄπ°ïÖëï»†â`µ•—!’àµ¡§µYï…Õ•Ω∏à∞Äà»¿»»¥ƒƒ¥»‡à§π°ïÖëï»†âUÕï»µùïπ–à∞Äâ—ï…πÖ±…Öô–µ1Ö’πç°ï»à§(ÄÄÄÄÄÄÄÄÄÄÄÄπÕïπê†§πµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â9ºÅÕîÅ¡’ë•ï…Ω∏ÅçΩπÕ’±—Ö»Å±ΩÃÅÖ…ç°•ŸΩÃÅëï∞Å…ï±ïÖÕîËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÄÄÄÄÅ±ï–Å¡Öùï}ÖÕÕï—ÃËÅYïåÒ•—!’âIï±ïÖÕïÕÕï–¯ÄÙÅù•—°’â}©ÕΩ∏°…ïÕ¡ΩπÕî∞ÄâΩπÕ’±—Ö»ÅÖÕÕï—ÃÅëï∞Å…ï±ïÖÕîà§¸Ï(ÄÄÄÄÄÄÄÅ±ï–ÅçΩ’π–ÄÙÅ¡Öùï}ÖÕÕï—Ãπ±ï∏†§Ï(ÄÄÄÄÄÄÄÅÖÕÕï—Ãπï·—ïπê°¡Öùï}ÖÕÕï—Ã§Ï(ÄÄÄÄÄÄÄÅ•òÅçΩ’π–ÄÄƒ¿¿ÅÏÅ…ï—’…∏Å=¨°ÖÕÕï—Ã§ÏÅÙ(ÄÄÄÅÙ(ÄÄÄÅ…»†â∞Å…ï±ïÖÕîÅï·çïëîÅï∞Å≥µµ•—îÅëîÄƒ¿¿¿ÅÖÕÕï—ÃÅÕΩ¡Ω…—Öëºàπ•π—º†§§)Ù()ô∏Åëï±ï—ï}…ï±ïÖÕï}ÖÕÕï–°—Ω≠ï∏ËÄôÕ—»∞Å…ï±ïÖÕï}•êËÅ‘ÿ–∞ÅÖÕÕï—}•êËÅ‘ÿ–§Ä¥¯ÅIïÕ’±–†§∞ÅM—…•πú¯ÅÏ(ÄÄÄÅ±ï–Åç±•ïπ–ÄÙÅ°——¿ËÈç±•ïπ–†§πµÖ¡}ï…»°Òï……Ω…Åï……Ω»π—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÅ±ï–Å…ïÕ¡ΩπÕîÄÙÅç±•ïπ–πëï±ï—î°ôΩ…µÖ–Ñ†âÌ%Q!U	}A%ÙΩ…ï¡ΩÃΩÌAU	1%M!}IA=M%Q=IeÙΩ…ï±ïÖÕïÃΩÖÕÕï—ÃΩÌÖÕÕï—}•ëÙà§§(ÄÄÄÄÄÄÄÄπâïÖ…ï…}Ö’—†°—Ω≠ï∏§π°ïÖëï»†âççï¡–à∞ÄâÖ¡¡±•çÖ—•Ω∏ΩŸπêπù•—°’à≠©ÕΩ∏à§(ÄÄÄÄÄÄÄÄπ°ïÖëï»†â`µ•—!’àµ¡§µYï…Õ•Ω∏à∞Äà»¿»»¥ƒƒ¥»‡à§π°ïÖëï»†âUÕï»µùïπ–à∞Äâ—ï…πÖ±…Öô–µ1Ö’πç°ï»à§(ÄÄÄÄÄÄÄÄπÕïπê†§πµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â9ºÅÕîÅ¡’ëºÅ…ïïµ¡±ÖÈÖ»Å’∏ÅÖÕÕï–Åëï∞Å…ï±ïÖÕîÅÌ…ï±ïÖÕï}•ëÙËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÅ•òÅ…ïÕ¡ΩπÕîπÕ—Ö—’Ã†§π•Õ}Õ’ççïÕÃ†§ÅÏÅ=¨††§§ÅÙÅï±ÕîÅÏÅ…»°ôΩ…µÖ–Ñ†â•—!’àÅ…ïç°ÖÎÃÅ…ï—•…Ö»Åï∞ÅÖÕÕï–ÅÌÖÕÕï—}•ëÙÄ°ÌÙ§à∞Å…ïÕ¡ΩπÕîπÕ—Ö—’Ã†§§§ÅÙ)Ù()Õ—…’ç–ÅÕÕï—U¡±ΩÖëÖ•±’…îÅÏ(ÄÄÄÅµïÕÕÖùîËÅM—…•πú∞(ÄÄÄÅ…ï—…ÂÖâ±îËÅâΩΩ∞∞)Ù()ô∏Å…ï—…ÂÖâ±ï}’¡±ΩÖë}Õ—Ö—’Ã°Õ—Ö—’ÃËÅ…ï≈›ïÕ–ËÈM—Ö—’ÕΩëî§Ä¥¯ÅâΩΩ∞ÅÏ(ÄÄÄÅÕ—Ö—’Ãπ•Õ}Õï…Ÿï…}ï……Ω»†§ÅÒÅÕ—Ö—’ÃÄÙÙÅ…ï≈›ïÕ–ËÈM—Ö—’ÕΩëîËÈQ==}59e}IEUMQL)Ù()ô∏Å’¡±ΩÖë}…ï±ïÖÕï}ÖÕÕï—}Ωπçî†(ÄÄÄÅ—Ω≠ï∏ËÄôÕ—»∞(ÄÄÄÅ’¡±ΩÖë}’…∞ËÄôÕ—»∞(ÄÄÄÅπÖµîËÄôÕ—»∞(ÄÄÄÅ¡Ö—†ËÄôAÖ—†∞(ÄÄÄÅÕ•ÈîËÅ‘ÿ–∞(§Ä¥¯ÅIïÕ’±–Ò•—!’âIï±ïÖÕïÕÕï–∞ÅÕÕï—U¡±ΩÖëÖ•±’…î¯ÅÏ(ÄÄÄÅ±ï–Å’…∞ÄÙÅôΩ…µÖ–Ñ†(ÄÄÄÄÄÄÄÄâÌÙ˝πÖµîıÌÙà∞(ÄÄÄÄÄÄÄÅ’¡±ΩÖë}’…∞πÕ¡±•–†ùÏú§ππï·–†§π’π›…Ö¡}Ω»°’¡±ΩÖë}’…∞§∞(ÄÄÄÄÄÄÄÅïπçΩëï}¡Ö—°}çΩµ¡Ωπïπ–°πÖµî§(ÄÄÄÄ§Ï(ÄÄÄÅ±ï–Åô•±îÄÙÅôÃËÈ•±îËÈΩ¡ï∏°¡Ö—†§πµÖ¡}ï…»°Òï……Ω…ÅÕÕï—U¡±ΩÖëÖ•±’…îÅÏ(ÄÄÄÄÄÄÄÅµïÕÕÖùîËÅôΩ…µÖ–Ñ†â9ºÅÕîÅ¡’ëºÅÖâ…•»ÅÌπÖµïÙÅ¡Ö…ÑÅÕ’â•…±ºËÅÌï……Ω…Ùà§∞(ÄÄÄÄÄÄÄÅ…ï—…ÂÖâ±îËÅôÖ±Õî∞(ÄÄÄÅÙ§¸Ï(ÄÄÄÅ±ï–Åç±•ïπ–ÄÙÅ…ï≈›ïÕ–ËÈâ±Ωç≠•πúËÈ±•ïπ–ËÈâ’•±ëï»†§(ÄÄÄÄÄÄÄÄπ—•µïΩ’–°’…Ö—•Ω∏ËÈô…Ωµ}ÕïçÃ†»¿Ä®Äÿ¿§§(ÄÄÄÄÄÄÄÄπ’Õï…}Öùïπ–†â—ï…πÖ±…Öô–µ1Ö’πç°ï»à§(ÄÄÄÄÄÄÄÄπâ’•±ê†§(ÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Òï……Ω…ÅÕÕï—U¡±ΩÖëÖ•±’…îÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅµïÕÕÖùîËÅôΩ…µÖ–Ñ†â9ºÅÕîÅ¡’ëºÅ¡…ï¡Ö…Ö»Å±ÑÅÕ’â•ëÑÅëîÅÌπÖµïÙËÅÌï……Ω…Ùà§∞(ÄÄÄÄÄÄÄÄÄÄÄÅ…ï—…ÂÖâ±îËÅôÖ±Õî∞(ÄÄÄÄÄÄÄÅÙ§¸Ï(ÄÄÄÅ±ï–Å…ïÕ¡ΩπÕîÄÙÅç±•ïπ–(ÄÄÄÄÄÄÄÄπ¡’–°’…∞§(ÄÄÄÄÄÄÄÄπâïÖ…ï…}Ö’—†°—Ω≠ï∏§(ÄÄÄÄÄÄÄÄπ°ïÖëï»†âççï¡–à∞ÄâÖ¡¡±•çÖ—•Ω∏ΩŸπêπù•—°’à≠©ÕΩ∏à§(ÄÄÄÄÄÄÄÄπ°ïÖëï»†â`µ•—!’àµ¡§µYï…Õ•Ω∏à∞Äà»¿»»¥ƒƒ¥»‡à§(ÄÄÄÄÄÄÄÄπ°ïÖëï»†âUÕï»µùïπ–à∞Äâ—ï…πÖ±…Öô–µ1Ö’πç°ï»à§(ÄÄÄÄÄÄÄÄπ°ïÖëï»†âΩπ—ïπ–µQÂ¡îà∞ÄâÖ¡¡±•çÖ—•Ω∏Ω©ÖŸÑµÖ…ç°•Ÿîà§(ÄÄÄÄÄÄÄÄπ°ïÖëï»†âΩπ—ïπ–µ1ïπù—†à∞ÅÕ•Èîπ—Ω}Õ—…•πú†§§(ÄÄÄÄÄÄÄÄπâΩë‰°…ï≈›ïÕ–ËÈâ±Ωç≠•πúËÈ	Ωë‰ËÈπï‹°ô•±î§§(ÄÄÄÄÄÄÄÄπÕïπê†§(ÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Òï……Ω…ÅÕÕï—U¡±ΩÖëÖ•±’…îÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅµïÕÕÖùîËÅôΩ…µÖ–Ñ†â9ºÅÕîÅ¡’ëºÅÕ’â•»ÅÌπÖµïÙËÅÌï……Ω…Ùà§∞(ÄÄÄÄÄÄÄÄÄÄÄÅ…ï—…ÂÖâ±îËÅï……Ω»π•Õ}—•µïΩ’–†§ÅÒÅï……Ω»π•Õ}çΩππïç–†§∞(ÄÄÄÄÄÄÄÅÙ§¸Ï(ÄÄÄÅ±ï–ÅÕ—Ö—’ÃÄÙÅ…ïÕ¡ΩπÕîπÕ—Ö—’Ã†§Ï(ÄÄÄÅ•òÄÖÕ—Ö—’Ãπ•Õ}Õ’ççïÕÃ†§ÅÏ(ÄÄÄÄÄÄÄÅ±ï–ÅâΩë‰ÄÙÅ…ïÕ¡ΩπÕîπ—ï·–†§π’π›…Ö¡}Ω…}ëïôÖ’±–†§Ï(ÄÄÄÄÄÄÄÅ…ï—’…∏Å…»°ÕÕï—U¡±ΩÖëÖ•±’…îÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅµïÕÕÖùîËÅôΩ…µÖ–Ñ†(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄâM’â•»ÅÌπÖµïÙÅôÖ±≥ÃÄ°ÌÕ—Ö—’ÕÙ§ËÅÌÙà∞(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅâΩë‰πç°Ö…Ã†§π—Ö≠î†‘¿¿§πçΩ±±ïç–ËËÒM—…•πú¯†§(ÄÄÄÄÄÄÄÄÄÄÄÄ§∞(ÄÄÄÄÄÄÄÄÄÄÄÅ…ï—…ÂÖâ±îËÅ…ï—…ÂÖâ±ï}’¡±ΩÖë}Õ—Ö—’Ã°Õ—Ö—’Ã§∞(ÄÄÄÄÄÄÄÅÙ§Ï(ÄÄÄÅÙ(ÄÄÄÅ…ïÕ¡ΩπÕîπ©ÕΩ∏†§πµÖ¡}ï…»°Òï……Ω…ÅÕÕï—U¡±ΩÖëÖ•±’…îÅÏ(ÄÄÄÄÄÄÄÅµïÕÕÖùîËÅôΩ…µÖ–Ñ†â•—!’àÅëïŸΩ±ŸßÃÅ’πÑÅ…ïÕ¡’ïÕ—ÑÅ•π€Ö±•ëÑÅÖ∞ÅÕ’â•»ÅÌπÖµïÙËÅÌï……Ω…Ùà§∞(ÄÄÄÄÄÄÄÅ…ï—…ÂÖâ±îËÅ—…’î∞(ÄÄÄÅÙ§)Ù()ô∏Å’¡±ΩÖë}…ï±ïÖÕï}ÖÕÕï—}…ïÕ’µÖâ±î†(ÄÄÄÅ—Ω≠ï∏ËÄôÕ—»∞(ÄÄÄÅ’¡±ΩÖë}’…∞ËÄôÕ—»∞(ÄÄÄÅ…ï±ïÖÕï}•êËÅ‘ÿ–∞(ÄÄÄÅπÖµîËÄôÕ—»∞(ÄÄÄÅï·¡ïç—ïë}ë•ùïÕ–ËÄôÕ—»∞(ÄÄÄÅ¡Ö—†ËÄôAÖ—†∞(ÄÄÄÅÕ•ÈîËÅ‘ÿ–∞(§Ä¥¯ÅIïÕ’±–Ò•—!’âIï±ïÖÕïÕÕï–∞ÅM—…•πú¯ÅÏ(ÄÄÄÅçΩπÕ–Å5a}QQ5AQLËÅ’Õ•ÈîÄÙÄÃÏ(ÄÄÄÅ±ï–Åµ’–Å±ÖÕ—}ï……Ω»ÄÙÅM—…•πúËÈπï‹†§Ï(ÄÄÄÅôΩ»ÅÖ——ïµ¡–Å•∏Äƒ∏∏ı5a}QQ5AQLÅÏ(ÄÄÄÄÄÄÄÅµÖ—ç†Å’¡±ΩÖë}…ï±ïÖÕï}ÖÕÕï—}Ωπçî°—Ω≠ï∏∞Å’¡±ΩÖë}’…∞∞ÅπÖµî∞Å¡Ö—†∞ÅÕ•Èî§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ=¨°ÖÕÕï–§(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ•òÅÖÕÕï–ππÖµîÄÙÙÅπÖµîÄòòÅÖÕÕï–πë•ùïÕ–πÖÕ}ëï…ïò†§ÄÙÙÅMΩµî°ï·¡ïç—ïë}ë•ùïÕ–§ÄÙ¯(ÄÄÄÄÄÄÄÄÄÄÄÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Å=¨°ÖÕÕï–§Ï(ÄÄÄÄÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÄÄÄÄÅ=¨°ÖÕÕï–§ÄÙ¯ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ±ï–Å|ÄÙÅëï±ï—ï}…ï±ïÖÕï}ÖÕÕï–°—Ω≠ï∏∞Å…ï±ïÖÕï}•ê∞ÅÖÕÕï–π•ê§Ï(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Å…»°ôΩ…µÖ–Ñ†â•—!’àÅπºÅçΩπô•…∑ÃÅï∞ÅM!¥»‘ÿÅïÕ¡ï…ÖëºÅ¡Ö…ÑÅÌπÖµïÙà§§Ï(ÄÄÄÄÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÄÄÄÄÅ…»°ôÖ•±’…î§ÄÙ¯ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ±ÖÕ—}ï……Ω»ÄÙÅôÖ•±’…îπµïÕÕÖùîÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅµÖ—ç†Å±•Õ—}…ï±ïÖÕï}ÖÕÕï—Ã°—Ω≠ï∏∞Å…ï±ïÖÕï}•ê§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ=¨°ÖÕÕï—Ã§ÄÙ¯ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ•òÅ±ï–ÅMΩµî°ÖÕÕï–§ÄÙÅÖÕÕï—Ãπ•—ï»†§πô•πê°ÒÖÕÕï—ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅÖÕÕï–ππÖµîÄÙÙÅπÖµîÄòòÅÖÕÕï–πë•ùïÕ–πÖÕ}ëï…ïò†§ÄÙÙÅMΩµî°ï·¡ïç—ïë}ë•ùïÕ–§(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅÙ§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Å=¨°•—!’âIï±ïÖÕïÕÕï–ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ•êËÅÖÕÕï–π•ê∞(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅπÖµîËÅÖÕÕï–ππÖµîπç±Ωπî†§∞(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅë•ùïÕ–ËÅÖÕÕï–πë•ùïÕ–πç±Ωπî†§∞(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅÙ§Ï(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ±ï–Åµ’–Å…ïµΩŸïë}Õ—Ö±ï}ÖÕÕï–ÄÙÅôÖ±ÕîÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅôΩ»ÅÖÕÕï–Å•∏ÅÖÕÕï—Ãπ•—ï»†§πô•±—ï»°ÒÖÕÕï—ÅÖÕÕï–ππÖµîÄÙÙÅπÖµî§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅëï±ï—ï}…ï±ïÖÕï}ÖÕÕï–°—Ω≠ï∏∞Å…ï±ïÖÕï}•ê∞ÅÖÕÕï–π•ê§¸Ï(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ…ïµΩŸïë}Õ—Ö±ï}ÖÕÕï–ÄÙÅ—…’îÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ•òÄÖôÖ•±’…îπ…ï—…ÂÖâ±îÄòòÄÖ…ïµΩŸïë}Õ—Ö±ï}ÖÕÕï–ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Å…»°±ÖÕ—}ï……Ω»§Ï(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ•òÅÖ——ïµ¡–ÄÙÙÅ5a}QQ5AQLÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅâ…ïÖ¨Ï(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ…»°Ÿï…•ôÂ}ï……Ω»§Å•òÄÖôÖ•±’…îπ…ï—…ÂÖâ±îÅÒÅÖ——ïµ¡–ÄÙÙÅ5a}QQ5AQLÄÙ¯ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Å…»°ôΩ…µÖ–Ñ†(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄâÌ±ÖÕ—}ï……Ω…Ù∏Å9ºÅÕîÅ¡’ëºÅçΩπô•…µÖ»ÅÕ§Å•—!’àÅÖçï¡”ÃÅï∞ÅÖ…ç°•ŸºËÅÌŸï…•ôÂ}ï……Ω…Ùà(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄ§§Ï(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ…»°|§ÄÙ¯ÅÌÙ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ•òÅÖ——ïµ¡–ÄÅ5a}QQ5AQLÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅÕ—êËÈ—°…ïÖêËÈÕ±ïï¿°’…Ö—•Ω∏ËÈô…Ωµ}ÕïçÃ†…}‘ÿ–π¡Ω‹°Ö——ïµ¡–ÅÖÃÅ‘Ã»§§§Ï(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÅÙ(ÄÄÄÅ…»°ôΩ…µÖ–Ñ†(ÄÄÄÄÄÄÄÄâ9ºÅÕîÅ¡’ëºÅçΩπô•…µÖ»Å±ÑÅçÖ…ùÑÅëîÅÌπÖµïÙÅëïÕ¡◊•ÃÅëîÅÌ5a}QQ5AQMÙÅ•π—ïπ—ΩÃËÅÌ±ÖÕ—}ï……Ω…Ùà(ÄÄÄÄ§§)Ù()ô∏Å¡’â±•Õ°}ù•—°’â}…ï±ïÖÕî°—Ω≠ï∏ËÄôÕ—»∞Å…ï±ïÖÕï}•êËÅ‘ÿ–∞ÅÕï…•ïÕ}πÖµîËÄôÕ—»∞ÅŸï…Õ•Ω∏ËÄôÕ—»§Ä¥¯ÅIïÕ’±–†§∞ÅM—…•πú¯ÅÏ(ÄÄÄÅ±ï–Åç±•ïπ–ÄÙÅ°——¿ËÈç±•ïπ–†§πµÖ¡}ï…»°Òï……Ω…Åï……Ω»π—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÅ±ï–Å…ïÕ¡ΩπÕîÄÙÅç±•ïπ–π¡Ö—ç†°ôΩ…µÖ–Ñ†âÌ%Q!U	}A%ÙΩ…ï¡ΩÃΩÌAU	1%M!}IA=M%Q=IeÙΩ…ï±ïÖÕïÃΩÌ…ï±ïÖÕï}•ëÙà§§(ÄÄÄÄÄÄÄÄπâïÖ…ï…}Ö’—†°—Ω≠ï∏§π°ïÖëï»†âççï¡–à∞ÄâÖ¡¡±•çÖ—•Ω∏ΩŸπêπù•—°’à≠©ÕΩ∏à§(ÄÄÄÄÄÄÄÄπ°ïÖëï»†â`µ•—!’àµ¡§µYï…Õ•Ω∏à∞Äà»¿»»¥ƒƒ¥»‡à§π°ïÖëï»†âUÕï»µùïπ–à∞Äâ—ï…πÖ±…Öô–µ1Ö’πç°ï»à§(ÄÄÄÄÄÄÄÄπ©ÕΩ∏†ôÕï…ëï}©ÕΩ∏ËÈ©ÕΩ∏Ñ°Ïâë…Öô–àËÅôÖ±Õî∞ÄâπÖµîàËÅôΩ…µÖ–Ñ†âÌÕï…•ïÕ}πÖµïÙÅÌŸï…Õ•ΩπÙà§∞ÄââΩë‰àËÄâYï…ÕßÕ∏ÅΩô•ç•Ö∞Å¡’â±•çÖëÑÅ¡Ω»Å—ï…πÖ±…Öô–Å1Ö’πç°ï»ÅïŸï±Ω¡ï»∏âÙ§§(ÄÄÄÄÄÄÄÄπÕïπê†§πµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â9ºÅÕîÅ¡’ëºÅ¡’â±•çÖ»Åï∞Å…ï±ïÖÕîËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÅ±ï–Å…ï±ïÖÕîËÅ•—!’âIï±ïÖÕîÄÙÅù•—°’â}©ÕΩ∏°…ïÕ¡ΩπÕî∞ÄâA’â±•çÖ»Å…ï±ïÖÕîà§¸Ï(ÄÄÄÅ•òÅ…ï±ïÖÕîπë…Öô–ÅÏÅ…ï—’…∏Å…»†â•—!’àÅπºÅçΩπô•…∑ÃÅ±ÑÅ¡’â±•çÖçßÕ∏Åëï∞Å…ï±ïÖÕîàπ•π—º†§§ÏÅÙ(ÄÄÄÅ=¨††§§)Ù()ô∏Å¡’—}…ï¡ΩÕ•—Ω…Â}ô•±î°—Ω≠ï∏ËÄôÕ—»∞Å¡Ö—†ËÄôÕ—»∞ÅâÂ—ïÃËÄôm‘·t∞ÅµïÕÕÖùîËÄôÕ—»§Ä¥¯ÅIïÕ’±–†§∞ÅM—…•πú¯ÅÏ(ÄÄÄÅ±ï–Åïπë¡Ω•π–ÄÙÅôΩ…µÖ–Ñ†âÌ%Q!U	}A%ÙΩ…ï¡ΩÃΩÌAU	1%M!}IA=M%Q=IeÙΩçΩπ—ïπ—ÃΩÌ¡Ö—°Ùà§Ï(ÄÄÄÅ±ï–Åç’……ïπ–ÄÙÅùï—}…ï¡ΩÕ•—Ω…Â}ô•±î°—Ω≠ï∏∞Å¡Ö—†§¸Ï(ÄÄÄÅ±ï–ÅÕ°ÑÄÙÅç’……ïπ–πµÖ¿°ÒçΩπ—ïπ—ÅçΩπ—ïπ–πÕ°Ñ§Ï(ÄÄÄÅ±ï–Åç±•ïπ–ÄÙÅ°——¿ËÈç±•ïπ–†§πµÖ¡}ï…»°Òï……Ω…Åï……Ω»π—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÅ±ï–Åµ’–ÅâΩë‰ÄÙÅÕï…ëï}©ÕΩ∏ËÈ©ÕΩ∏Ñ°ÏâµïÕÕÖùîàËÅµïÕÕÖùî∞ÄâçΩπ—ïπ–àËÅâÖÕîÿ—}ïπçΩëî°âÂ—ïÃ•Ù§Ï(ÄÄÄÅ•òÅ±ï–ÅMΩµî°Õ°Ñ§ÄÙÅÕ°ÑÅÏÅâΩëÂlâÕ°ÑâtÄÙÅÕï…ëï}©ÕΩ∏ËÈYÖ±’îËÈM—…•πú°Õ°Ñ§ÏÅÙ(ÄÄÄÅ±ï–Å…ïÕ¡ΩπÕîÄÙÅç±•ïπ–π¡’–°ïπë¡Ω•π–§πâïÖ…ï…}Ö’—†°—Ω≠ï∏§π°ïÖëï»†âççï¡–à∞ÄâÖ¡¡±•çÖ—•Ω∏ΩŸπêπù•—°’à≠©ÕΩ∏à§(ÄÄÄÄÄÄÄÄπ°ïÖëï»†â`µ•—!’àµ¡§µYï…Õ•Ω∏à∞Äà»¿»»¥ƒƒ¥»‡à§π°ïÖëï»†âUÕï»µùïπ–à∞Äâ—ï…πÖ±…Öô–µ1Ö’πç°ï»à§(ÄÄÄÄÄÄÄÄπ©ÕΩ∏†ôâΩë‰§πÕïπê†§πµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â9ºÅÕîÅ¡’ëºÅù’Ö…ëÖ»ÅÌ¡Ö—°ÙÅï∏Å•—!’àËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÅ•òÅ…ïÕ¡ΩπÕîπÕ—Ö—’Ã†§π•Õ}Õ’ççïÕÃ†§ÅÏÅ=¨††§§ÅÙ(ÄÄÄÅï±ÕîÅÏÅ…»°ôΩ…µÖ–Ñ†â•—!’àÅ…ïç°ÖÎÃÅÖç—’Ö±•ÈÖ»ÅÌ¡Ö—°ÙÄ°ÌÙ§ËÅÌÙà∞Å…ïÕ¡ΩπÕîπÕ—Ö—’Ã†§∞Å…ïÕ¡ΩπÕîπ—ï·–†§π’π›…Ö¡}Ω…}ëïôÖ’±–†§πç°Ö…Ã†§π—Ö≠î†–¿¿§πçΩ±±ïç–ËËÒM—…•πú¯†§§§ÅÙ)Ù()ô∏Åùï—}…ï¡ΩÕ•—Ω…Â}ô•±î°—Ω≠ï∏ËÄôÕ—»∞Å¡Ö—†ËÄôÕ—»§Ä¥¯ÅIïÕ’±–Ò=¡—•Ω∏Ò•—!’âΩπ—ïπ—IïÕ¡ΩπÕî¯∞ÅM—…•πú¯ÅÏ(ÄÄÄÅ±ï–Åç±•ïπ–ÄÙÅ°——¿ËÈç±•ïπ–†§πµÖ¡}ï…»°Òï……Ω…Åï……Ω»π—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÅ±ï–Å…ïÕ¡ΩπÕîÄÙÅç±•ïπ–πùï–°ôΩ…µÖ–Ñ†âÌ%Q!U	}A%ÙΩ…ï¡ΩÃΩÌAU	1%M!}IA=M%Q=IeÙΩçΩπ—ïπ—ÃΩÌ¡Ö—°Ùà§§(ÄÄÄÄÄÄÄÄπâïÖ…ï…}Ö’—†°—Ω≠ï∏§π°ïÖëï»†âççï¡–à∞ÄâÖ¡¡±•çÖ—•Ω∏ΩŸπêπù•—°’à≠©ÕΩ∏à§(ÄÄÄÄÄÄÄÄπ°ïÖëï»†â`µ•—!’àµ¡§µYï…Õ•Ω∏à∞Äà»¿»»¥ƒƒ¥»‡à§π°ïÖëï»†âUÕï»µùïπ–à∞Äâ—ï…πÖ±…Öô–µ1Ö’πç°ï»à§(ÄÄÄÄÄÄÄÄπÕïπê†§πµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â9ºÅÕîÅ¡’ëºÅ±ïï»ÅÌ¡Ö—°ÙÅï∏Å•—!’àËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÅ•òÅ…ïÕ¡ΩπÕîπÕ—Ö—’Ã†§π•Õ}Õ’ççïÕÃ†§ÅÏ(ÄÄÄÄÄÄÄÅù•—°’â}©ÕΩ∏°…ïÕ¡ΩπÕî∞ÄôôΩ…µÖ–Ñ†â1ïï»ÅÌ¡Ö—°Ùà§§πµÖ¿°MΩµî§(ÄÄÄÅÙÅï±ÕîÅ•òÅ…ïÕ¡ΩπÕîπÕ—Ö—’Ã†§πÖÕ}‘ƒÿ†§ÄÙÙÄ–¿–ÅÏ(ÄÄÄÄÄÄÄÅ=¨°9Ωπî§(ÄÄÄÅÙÅï±ÕîÅÏ(ÄÄÄÄÄÄÄÅ…»°ôΩ…µÖ–Ñ†â•—!’àÅπºÅ¡’ëºÅ±ïï»ÅÌ¡Ö—°ÙÄ°ÌÙ§à∞Å…ïÕ¡ΩπÕîπÕ—Ö—’Ã†§§§(ÄÄÄÅÙ)Ù()ô∏Å’¡ëÖ—ï}çÖ—Ö±Ωù}Õ—Ö—’Ã°—Ω≠ï∏ËÄôÕ—»∞ÅÕï…•ïÕ}•êËÄôÕ—»§Ä¥¯ÅIïÕ’±–†§∞ÅM—…•πú¯ÅÏ(ÄÄÄÅ±ï–Å¡Ö—†ÄÙÄâ…ïÕΩ’…çïÃΩÕï…•ïÃΩçÖ—Ö±Ωúπ©ÕΩ∏àÏ(ÄÄÄÅ±ï–Åç±•ïπ–ÄÙÅ°——¿ËÈç±•ïπ–†§πµÖ¡}ï…»°Òï……Ω…Åï……Ω»π—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÅ±ï–Å…ïÕ¡ΩπÕîÄÙÅç±•ïπ–πùï–°ôΩ…µÖ–Ñ†âÌ%Q!U	}A%ÙΩ…ï¡ΩÃΩÌAU	1%M!}IA=M%Q=IeÙΩçΩπ—ïπ—ÃΩÌ¡Ö—°Ùà§§(ÄÄÄÄÄÄÄÄπâïÖ…ï…}Ö’—†°—Ω≠ï∏§π°ïÖëï»†âççï¡–à∞ÄâÖ¡¡±•çÖ—•Ω∏ΩŸπêπù•—°’à≠©ÕΩ∏à§(ÄÄÄÄÄÄÄÄπ°ïÖëï»†â`µ•—!’àµ¡§µYï…Õ•Ω∏à∞Äà»¿»»¥ƒƒ¥»‡à§π°ïÖëï»†âUÕï»µùïπ–à∞Äâ—ï…πÖ±…Öô–µ1Ö’πç°ï»à§(ÄÄÄÄÄÄÄÄπÕïπê†§πµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â9ºÅÕîÅ¡’ëºÅ±ïï»Åï∞ÅçÖ”Ö±ΩùºÅ…ïµΩ—ºËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÅ±ï–ÅïπçΩëïêËÅ•—!’âΩπ—ïπ—IïÕ¡ΩπÕîÄÙÅù•—°’â}©ÕΩ∏°…ïÕ¡ΩπÕî∞ÄâÖ…ùÖ»ÅçÖ”Ö±ΩùºÅ…ïµΩ—ºà§¸Ï(ÄÄÄÅ±ï–ÅëïçΩëïêÄÙÅâÖÕîÿ—}ëïçΩëî°ïπçΩëïêπçΩπ—ïπ–πÖÕ}ëï…ïò†§πΩ≠}Ω…}ï±Õî°ÒÄâ•—!’àÅπºÅëïŸΩ±ŸßÃÅï∞ÅçÖ”Ö±ΩùºÅçΩë•ô•çÖëºàπ—Ω}Õ—…•πú†§§¸§¸Ï(ÄÄÄÅ±ï–Åµ’–ÅçÖ—Ö±ΩúËÅÕï…ëï}©ÕΩ∏ËÈYÖ±’îÄÙÅÕï…ëï}©ÕΩ∏ËÈô…Ωµ}Õ±•çî†ôëïçΩëïê§πµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â∞ÅçÖ”Ö±ΩùºÅ…ïµΩ—ºÅπºÅïÃÅ)M=8Å€Ö±•ëºËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÅ±ï–ÅÕï…•ïÃÄÙÅçÖ—Ö±ΩùlâÕï…•ïÃâtπÖÕ}Ö……ÖÂ}µ’–†§πΩ≠}Ω…}ï±Õî°ÒÄâ∞ÅçÖ”Ö±ΩùºÅ…ïµΩ—ºÅπºÅ—•ïπîÅ’πÑÅ±•Õ—ÑÅëîÅÕï…•ïÃàπ—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÅ±ï–Åïπ—…‰ÄÙÅÕï…•ïÃπ•—ï…}µ’–†§πô•πê°Òïπ—…ÂÅïπ—…Âlâ•êâtπÖÕ}Õ—»†§ÄÙÙÅMΩµî°Õï…•ïÕ}•ê§§(ÄÄÄÄÄÄÄÄπΩ≠}Ω…}ï±Õî°ÒÅôΩ…µÖ–Ñ†â1ÑÅÕï…•îÅÌÕï…•ïÕ}•ëÙÅÂÑÅπºÅï·•Õ—îÅï∏Åï∞ÅçÖ”Ö±ΩùºÅ…ïµΩ—ºà§§¸Ï(ÄÄÄÅïπ—…Âlâ¡Öç≠M—Ö—’ÃâtÄÙÅÕï…ëï}©ÕΩ∏ËÈYÖ±’îËÈM—…•πú†âÖŸÖ•±Öâ±îàπ•π—º†§§Ï(ÄÄÄÅ±ï–ÅâÂ—ïÃÄÙÅÕï…ëï}©ÕΩ∏ËÈ—Ω}Ÿïç}¡…ï——‰†ôçÖ—Ö±Ωú§πµÖ¡}ï…»°Òï……Ω…Åï……Ω»π—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÅ¡’—}…ï¡ΩÕ•—Ω…Â}ô•±î°—Ω≠ï∏∞Å¡Ö—†∞ÄôâÂ—ïÃ∞ÄôôΩ…µÖ–Ñ†âπÖâ±îÅÌÕï…•ïÕ}•ëÙÅΩôô•ç•Ö∞Å¡Öç¨à§§¸Ï(ÄÄÄÅ=¨††§§)Ù()ô∏ÅïπçΩëï}¡Ö—°}çΩµ¡Ωπïπ–°ŸÖ±’îËÄôÕ—»§Ä¥¯ÅM—…•πúÅÏ(ÄÄÄÅ±ï–Åµ’–ÅïπçΩëïêÄÙÅM—…•πúËÈ›•—°}çÖ¡Öç•—‰°ŸÖ±’îπ±ï∏†§§Ï(ÄÄÄÅôΩ»ÅâÂ—îÅ•∏ÅŸÖ±’îπâÂ—ïÃ†§ÅÏ(ÄÄÄÄÄÄÄÅ•òÅâÂ—îπ•Õ}ÖÕç••}Ö±¡°Öπ’µï…•å†§ÅÒÅµÖ—ç°ïÃÑ°âÂ—î∞Åàú¥úÅÅàù|úÅÅàú∏úÅÅàù¯ú§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅïπçΩëïêπ¡’Õ†°âÂ—îÅÖÃÅç°Ö»§Ï(ÄÄÄÄÄÄÄÅÙÅï±ÕîÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅïπçΩëïêπ¡’Õ°}Õ—»†ôôΩ…µÖ–Ñ†àïÌâÂ—îË¿…aÙà§§Ï(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÅÙ(ÄÄÄÅïπçΩëïê)Ù()ô∏ÅâÖÕîÿ—}ïπçΩëî°âÂ—ïÃËÄôm‘·t§Ä¥¯ÅM—…•πúÅÏ(ÄÄÄÅçΩπÕ–ÅQ	1ËÄôm‘‡ÏÄÿ—tÄÙÅàâ	!%)-159=AEIMQUY]aeiÖâçëïôù°•©≠±µπΩ¡≈…Õ—’Ÿ›·ÂË¿ƒ»Ã–‘ÿ‹‡‰¨ºàÏ(ÄÄÄÅ±ï–Åµ’–ÅΩ’—¡’–ÄÙÅM—…•πúËÈ›•—°}çÖ¡Öç•—‰°âÂ—ïÃπ±ï∏†§πë•Ÿ}çï•∞†Ã§Ä®Ä–§Ï(ÄÄÄÅôΩ»Åç°’π¨Å•∏ÅâÂ—ïÃπç°’π≠Ã†Ã§ÅÏ(ÄÄÄÄÄÄÄÅ±ï–ÅÑÄÙÅç°’π≠l¡tÏ(ÄÄÄÄÄÄÄÅ±ï–ÅàÄÙÄ©ç°’π¨πùï–†ƒ§π’π›…Ö¡}Ω»†ò¿§Ï(ÄÄÄÄÄÄÄÅ±ï–ÅåÄÙÄ©ç°’π¨πùï–†»§π’π›…Ö¡}Ω»†ò¿§Ï(ÄÄÄÄÄÄÄÅΩ’—¡’–π¡’Õ†°Q	1l°ÑÄ¯¯Ä»§ÅÖÃÅ’Õ•ÈïtÅÖÃÅç°Ö»§Ï(ÄÄÄÄÄÄÄÅΩ’—¡’–π¡’Õ†°Q	1l††°ÑÄòÄÃ§ÄÄ–§ÅÄ°àÄ¯¯Ä–§§ÅÖÃÅ’Õ•ÈïtÅÖÃÅç°Ö»§Ï(ÄÄÄÄÄÄÄÅΩ’—¡’–π¡’Õ†°•òÅç°’π¨π±ï∏†§Ä¯ÄƒÅÏÅQ	1l††°àÄòÄƒ‘§ÄÄ»§ÅÄ°åÄ¯¯Äÿ§§ÅÖÃÅ’Õ•ÈïtÅÖÃÅç°Ö»ÅÙÅï±ÕîÅÏÄúÙúÅÙ§Ï(ÄÄÄÄÄÄÄÅΩ’—¡’–π¡’Õ†°•òÅç°’π¨π±ï∏†§Ä¯Ä»ÅÏÅQ	1l°åÄòÄÿÃ§ÅÖÃÅ’Õ•ÈïtÅÖÃÅç°Ö»ÅÙÅï±ÕîÅÏÄúÙúÅÙ§Ï(ÄÄÄÅÙ(ÄÄÄÅΩ’—¡’–)Ù()ô∏ÅâÖÕîÿ—}ëïçΩëî°ïπçΩëïêËÄôÕ—»§Ä¥¯ÅIïÕ’±–ÒYïåÒ‘‡¯∞ÅM—…•πú¯ÅÏ(ÄÄÄÅ±ï–ÅâÂ—ïÃËÅYïåÒ‘‡¯ÄÙÅïπçΩëïêπâÂ—ïÃ†§πô•±—ï»°ÒâÂ—ïÄÖâÂ—îπ•Õ}ÖÕç••}›°•—ïÕ¡Öçî†§§πçΩ±±ïç–†§Ï(ÄÄÄÅ•òÅâÂ—ïÃπ±ï∏†§ÄîÄ–ÄÑÙÄ¿ÅÏÅ…ï—’…∏Å…»†â•—!’àÅëïŸΩ±ŸßÃÅâÖÕîÿ–Å•πçΩµ¡±ï—ºàπ•π—º†§§ÏÅÙ(ÄÄÄÅ±ï–ÅŸÖ±’îÄÙÅÒâÂ—îËÅ‘·Ä¥¯Å=¡—•Ω∏Ò‘‡¯ÅÏ(ÄÄÄÄÄÄÄÅµÖ—ç†ÅâÂ—îÅÏÅàùú∏∏ıàùhúÄÙ¯ÅMΩµî°âÂ—îÄ¥Åàùú§∞ÅàùÑú∏∏ıàùËúÄÙ¯ÅMΩµî°âÂ—îÄ¥ÅàùÑúÄ¨Ä»ÿ§∞Åàú¿ú∏∏ıàú‰úÄÙ¯ÅMΩµî°âÂ—îÄ¥Åàú¿úÄ¨Ä‘»§∞Åàú¨úÄÙ¯ÅMΩµî†ÿ»§∞ÅàúºúÄÙ¯ÅMΩµî†ÿÃ§∞Å|ÄÙ¯Å9ΩπîÅÙ(ÄÄÄÅÙÏ(ÄÄÄÅ±ï–Åµ’–ÅΩ’—¡’–ÄÙÅYïåËÈ›•—°}çÖ¡Öç•—‰°âÂ—ïÃπ±ï∏†§ÄºÄ–Ä®ÄÃ§Ï(ÄÄÄÅôΩ»Åç°’π¨Å•∏ÅâÂ—ïÃπç°’π≠Õ}ï·Öç–†–§ÅÏ(ÄÄÄÄÄÄÄÅ±ï–ÅÑÄÙÅŸÖ±’î°ç°’π≠l¡t§πΩ≠}Ω…}ï±Õî°ÒÄâ•—!’àÅëïŸΩ±ŸßÃÅâÖÕîÿ–Å•π€Ö±•ëºàπ—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÄÄÄÄÅ±ï–ÅàÄÙÅŸÖ±’î°ç°’π≠l≈t§πΩ≠}Ω…}ï±Õî°ÒÄâ•—!’àÅëïŸΩ±ŸßÃÅâÖÕîÿ–Å•π€Ö±•ëºàπ—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÄÄÄÄÅ±ï–ÅåÄÙÅ•òÅç°’π≠l…tÄÙÙÅàúÙúÅÏÄ¿ÅÙÅï±ÕîÅÏÅŸÖ±’î°ç°’π≠l…t§πΩ≠}Ω…}ï±Õî°ÒÄâ•—!’àÅëïŸΩ±ŸßÃÅâÖÕîÿ–Å•π€Ö±•ëºàπ—Ω}Õ—…•πú†§§¸ÅÙÏ(ÄÄÄÄÄÄÄÅ±ï–ÅêÄÙÅ•òÅç°’π≠lÕtÄÙÙÅàúÙúÅÏÄ¿ÅÙÅï±ÕîÅÏÅŸÖ±’î°ç°’π≠lÕt§πΩ≠}Ω…}ï±Õî°ÒÄâ•—!’àÅëïŸΩ±ŸßÃÅâÖÕîÿ–Å•π€Ö±•ëºàπ—Ω}Õ—…•πú†§§¸ÅÙÏ(ÄÄÄÄÄÄÄÅΩ’—¡’–π¡’Õ††°ÑÄÄ»§ÅÄ°àÄ¯¯Ä–§§Ï(ÄÄÄÄÄÄÄÅ•òÅç°’π≠l…tÄÑÙÅàúÙúÅÏÅΩ’—¡’–π¡’Õ††°àÄÄ–§ÅÄ°åÄ¯¯Ä»§§ÏÅÙ(ÄÄÄÄÄÄÄÅ•òÅç°’π≠lÕtÄÑÙÅàúÙúÅÏÅΩ’—¡’–π¡’Õ††°åÄÄÿ§ÅÅê§ÏÅÙ(ÄÄÄÅÙ(ÄÄÄÅ=¨°Ω’—¡’–§)Ù()ô∏ÅôΩ…µÖ—}âÂ—ïÃ°âÂ—ïÃËÅ‘ÿ–§Ä¥¯ÅM—…•πúÅÏ(ÄÄÄÅ•òÅâÂ—ïÃÄÄƒ¿»–Ä®Äƒ¿»–ÅÏÅôΩ…µÖ–Ñ†âÌÙÅ-•à∞ÅâÂ—ïÃÄºÄƒ¿»–§ÅÙ(ÄÄÄÅï±ÕîÅÏÅôΩ…µÖ–Ñ†âÏË∏≈ÙÅ5•à∞ÅâÂ—ïÃÅÖÃÅòÿ–ÄºÄ†ƒ¿»–∏¿Ä®Äƒ¿»–∏¿§§ÅÙ)Ù()ô∏ÅÕçÖπ}¡Öç≠}ÕΩ’…çî†(ÄÄÄÅ¡Ö—†ËÄôAÖ—†∞(ÄÄÄÅÕï…•ïÕ}•êËÄôÕ—»∞(ÄÄÄÅµ•πïç…Öô—}Ÿï…Õ•Ω∏ËÄôÕ—»∞(ÄÄÄÅôΩ…ùï}Ÿï…Õ•Ω∏ËÄôÕ—»∞(§Ä¥¯ÅIïÕ’±–ÒAÖç≠MΩ’…çïA…ïŸ•ï‹∞ÅM—…•πú¯ÅÏ(ÄÄÄÅ±ï–Åµï—ÖëÖ—ÑÄÙÅôÃËÈÕÂµ±•π≠}µï—ÖëÖ—Ñ°¡Ö—†§(ÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â9ºÅÕîÅ¡’ëºÅ•πÕ¡ïçç•ΩπÖ»Å±ÑÅçÖ…¡ï—ÑÅï±ïù•ëÑËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÅ•òÄÖµï—ÖëÖ—Ñπ•Õ}ë•»†§ÅÒÅµï—ÖëÖ—Ñπô•±ï}—Â¡î†§π•Õ}ÕÂµ±•π¨†§ÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏Å…»†â1ÑÅô’ïπ—îÅëïâîÅÕï»Å’πÑÅçÖ…¡ï—ÑÅ…ïÖ∞∞ÅπºÅ’∏Åïπ±ÖçîÅÕ•µãÕ±•çºàπ•π—º†§§Ï(ÄÄÄÅÙ(ÄÄÄÅ±ï–Åë•…ïç—Ω…‰ÄÙÅ¡Ö—†(ÄÄÄÄÄÄÄÄπçÖπΩπ•çÖ±•Èî†§(ÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â9ºÅÕîÅ¡’ëºÅ…ïÕΩ±Ÿï»Å±ÑÅçÖ…¡ï—ÑÅô’ïπ—îËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÅ•òÅë•…ïç—Ω…‰(ÄÄÄÄÄÄÄÄπô•±ï}πÖµî†§(ÄÄÄÄÄÄÄÄπÖπë}—°ï∏°ÒπÖµïÅπÖµîπ—Ω}Õ—»†§§(ÄÄÄÄÄÄÄÄπ•Õ}ÕΩµï}Öπê°ÒπÖµïÅπÖµîπï≈}•ùπΩ…ï}ÖÕç••}çÖÕî†â¡ï…ÕΩπÖ±ïÃà§§(ÄÄÄÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏Å…»†â9ºÅÕîÅ¡’ïëîÅ¡’â±•çÖ»Å’πÑÅçÖ…¡ï—ÑÅ±±ÖµÖëÑÅ¡ï…ÕΩπÖ±ïÃÅçΩµºÅ¡Öç¨ÅΩô•ç•Ö∞àπ•π—º†§§Ï(ÄÄÄÅÙ((ÄÄÄÅ±ï–Åµ’–Åô•±ïÃÄÙÅYïåËÈπï‹†§Ï(ÄÄÄÅ±ï–Åµ’–ÅÕïï∏ÄÙÅÕ—êËÈçΩ±±ïç—•ΩπÃËÈ	Q…ïïMï–ËÈπï‹†§Ï(ÄÄÄÅ±ï–Åµ’–Å—Ω—Ö±}âÂ—ïÃÄÙÄ¡}‘ÿ–Ï(ÄÄÄÅôΩ»Åïπ—…‰Å•∏ÅôÃËÈ…ïÖë}ë•»†ôë•…ïç—Ω…‰§(ÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â9ºÅÕîÅ¡’ëºÅ±ïï»Å±ÑÅçÖ…¡ï—ÑÅô’ïπ—îËÅÌï……Ω…Ùà§§¸(ÄÄÄÅÏ(ÄÄÄÄÄÄÄÅ±ï–Åïπ—…‰ÄÙÅïπ—…‰πµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â9ºÅÕîÅ¡’ëºÅ±ïï»Å’∏Åï±ïµïπ—ºÅëîÅ±ÑÅô’ïπ—îËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÄÄÄÄÅ±ï–Åô•±ï}—Â¡îÄÙÅïπ—…‰(ÄÄÄÄÄÄÄÄÄÄÄÄπô•±ï}—Â¡î†§(ÄÄÄÄÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â9ºÅÕîÅ¡’ëºÅ•πÕ¡ïçç•ΩπÖ»Å’∏Åï±ïµïπ—ºÅëîÅ±ÑÅô’ïπ—îËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÄÄÄÄÅ•òÄÖô•±ï}—Â¡îπ•Õ}ô•±î†§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅçΩπ—•π’îÏ(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÅ±ï–Åô•±ï}πÖµîÄÙÅïπ—…‰πô•±ï}πÖµî†§Ï(ÄÄÄÄÄÄÄÅ±ï–ÅMΩµî°πÖµî§ÄÙÅô•±ï}πÖµîπ—Ω}Õ—»†§Åï±ÕîÅÏÅçΩπ—•π’îÅÙÏ(ÄÄÄÄÄÄÄÅ•òÄÖπÖµîπ—Ω}ÖÕç••}±Ω›ï…çÖÕî†§πïπëÕ}›•—††àπ©Ö»à§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅçΩπ—•π’îÏ(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÅ•òÄÖŸÖ±•ë}Ωôô•ç•Ö±}ÖÕÕï—}πÖµî°πÖµî§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Å…»°ôΩ…µÖ–Ñ†â∞ÅπΩµâ…îÅëîÅÖ…ç°•ŸºÅπºÅïÃÅçΩµ¡Ö—•â±îÅçΩ∏ÅΩ…ùîΩ•—!’àËÅÌπÖµïÙà§§Ï(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÅ•òÄÖÕïï∏π•πÕï…–°πÖµîπ—Ω}ÖÕç••}±Ω›ï…çÖÕî†§§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Å…»°ôΩ…µÖ–Ñ†â!Ö‰ÅπΩµâ…ïÃÅëîÅµΩêÅë’¡±•çÖëΩÃÅÕ•∏Åë•Õ—•πù’•»ÅµÖÁÈÕç’±ÖÃËÅÌπÖµïÙà§§Ï(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÅ±ï–Å©Ö…}¡Ö—†ÄÙÅïπ—…‰π¡Ö—††§Ï(ÄÄÄÄÄÄÄÅ±ï–ÅâïôΩ…îÄÙÅïπ—…‰(ÄÄÄÄÄÄÄÄÄÄÄÄπµï—ÖëÖ—Ñ†§(ÄÄÄÄÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â9ºÅÕîÅ¡’ëºÅ±ïï»Åï∞Å—Öµá≈ºÅëîÅÌπÖµïÙËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÄÄÄÄÅ•òÅâïôΩ…îπ±ï∏†§ÄÙÙÄ¿ÅÒÅâïôΩ…îπ±ï∏†§Ä¯Å5a}M=UI})I}	eQLÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Å…»°ôΩ…µÖ–Ñ†â∞ÅµΩêÅÌπÖµïÙÅïÕ”ÑÅŸÖèµºÅºÅÕ’¡ï…ÑÄ»‘ÿÅ5•à§§Ï(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÅ—Ω—Ö±}âÂ—ïÃÄÙÅ—Ω—Ö±}âÂ—ïÃ(ÄÄÄÄÄÄÄÄÄÄÄÄπç°ïç≠ïë}Öëê°âïôΩ…îπ±ï∏†§§(ÄÄÄÄÄÄÄÄÄÄÄÄπΩ≠}Ω…}ï±Õî°ÒÄâ∞Å—Öµá≈ºÅ—Ω—Ö∞ÅëîÅ±ΩÃÅµΩëÃÅï·çïëîÄ–Å•àπ—Ω}Õ—…•πú†§§¸Ï(ÄÄÄÄÄÄÄÅ•òÅ—Ω—Ö±}âÂ—ïÃÄ¯Å5a}M=UI}A-}	eQLÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Å…»†â∞Å—Öµá≈ºÅ—Ω—Ö∞ÅëîÅ±ΩÃÅµΩëÃÅÕ’¡ï…ÑÄ–Å•àπ•π—º†§§Ï(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÅŸÖ±•ëÖ—ï}ôΩ…ùï}µΩë}Ö…ç°•Ÿî†ô©Ö…}¡Ö—†§(ÄÄÄÄÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†âÌπÖµïÙËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÄÄÄÄÅ±ï–Å±•çïπÕîÄÙÅ…ïÖë}¡Öç≠}±•çïπÕî†ô©Ö…}¡Ö—†§Ï(ÄÄÄÄÄÄÄÅ±ï–Å±•çïπÕï}Õ—Ö—’ÃÄÙÅ¡Öç≠}±•çïπÕï}Õ—Ö—’Ã°±•çïπÕîπÖÕ}ëï…ïò†§§Ï(ÄÄÄÄÄÄÄÅ±ï–Ä°µ•πïç…Öô—}çΩµ¡Ö—•â•±•—‰∞Åµ•πïç…Öô—}Ÿï…Õ•Ωπ}…Öπùî§ÄÙ(ÄÄÄÄÄÄÄÄÄÄÄÅ…ïÖë}¡Öç≠}µ•πïç…Öô—}çΩµ¡Ö—•â•±•—‰†ô©Ö…}¡Ö—†∞Åµ•πïç…Öô—}Ÿï…Õ•Ω∏§Ï(ÄÄÄÄÄÄÄÅ±ï–Ä°ôΩ…ùï}çΩµ¡Ö—•â•±•—‰∞ÅôΩ…ùï}Ÿï…Õ•Ωπ}…Öπùî§ÄÙ(ÄÄÄÄÄÄÄÄÄÄÄÅ…ïÖë}¡Öç≠}ôΩ…ùï}çΩµ¡Ö—•â•±•—‰†ô©Ö…}¡Ö—†∞ÅôΩ…ùï}Ÿï…Õ•Ω∏§Ï(ÄÄÄÄÄÄÄÅ±ï–Åë•ùïÕ–ÄÙÅÕ°Ñ»‘Ÿ}ô•±î†ô©Ö…}¡Ö—†§¸Ï(ÄÄÄÄÄÄÄÅ±ï–ÅÖô—ï»ÄÙÅôÃËÈµï—ÖëÖ—Ñ†ô©Ö…}¡Ö—†§(ÄÄÄÄÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â9ºÅÕîÅ¡’ëºÅŸï…•ô•çÖ»Åï∞ÅΩ…•ùï∏ÅëîÅÌπÖµïÙËÅÌï……Ω…Ùà§§¸Ï(ÄÄÄÄÄÄÄÅ•òÅâïôΩ…îπ±ï∏†§ÄÑÙÅÖô—ï»π±ï∏†§ÅÒÅâïôΩ…îπµΩë•ô•ïê†§πΩ¨†§ÄÑÙÅÖô—ï»πµΩë•ô•ïê†§πΩ¨†§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Å…»°ôΩ…µÖ–Ñ†â∞ÅÖ…ç°•ŸºÅÌπÖµïÙÅçÖµâßÃÅµ•ïπ—…ÖÃÅÕîÅŸï…•ô•çÖâÑà§§Ï(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÅô•±ïÃπ¡’Õ†°AÖç≠MΩ’…çï•±îÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅπÖµîËÅπÖµîπ—Ω}Õ—…•πú†§∞(ÄÄÄÄÄÄÄÄÄÄÄÅÕ•Èï}âÂ—ïÃËÅâïôΩ…îπ±ï∏†§∞(ÄÄÄÄÄÄÄÄÄÄÄÅÕ°Ñ»‘ÿËÅë•ùïÕ–∞(ÄÄÄÄÄÄÄÄÄÄÄÅ±•çïπÕî∞(ÄÄÄÄÄÄÄÄÄÄÄÅ±•çïπÕï}Õ—Ö—’Ã∞(ÄÄÄÄÄÄÄÄÄÄÄÅµ•πïç…Öô—}çΩµ¡Ö—•â•±•—‰∞(ÄÄÄÄÄÄÄÄÄÄÄÅµ•πïç…Öô—}Ÿï…Õ•Ωπ}…Öπùî∞(ÄÄÄÄÄÄÄÄÄÄÄÅôΩ…ùï}çΩµ¡Ö—•â•±•—‰∞(ÄÄÄÄÄÄÄÄÄÄÄÅôΩ…ùï}Ÿï…Õ•Ωπ}…Öπùî∞(ÄÄÄÄÄÄÄÅÙ§Ï(ÄÄÄÅÙ(ÄÄÄÅô•±ïÃπÕΩ…—}â‰°ÒÑ∞ÅâÅÑππÖµîπ—Ω}ÖÕç••}±Ω›ï…çÖÕî†§πçµ¿†ôàππÖµîπ—Ω}ÖÕç••}±Ω›ï…çÖÕî†§§§Ï(ÄÄÄÅ•òÅô•±ïÃπ•Õ}ïµ¡—‰†§ÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏Å…»†â1ÑÅçÖ…¡ï—ÑÅï±ïù•ëÑÅπºÅçΩπ—•ïπîÅÖ…ç°•ŸΩÃÅ)HÅΩô•ç•Ö±ïÃÅï∏ÅÕ‘Åπ•Ÿï∞Å…áµËàπ•π—º†§§Ï(ÄÄÄÅÙ(ÄÄÄÅ±ï–ÅÕΩ’…çï}ô•πùï…¡…•π–ÄÙÅ¡Öç≠}ÕΩ’…çï}ô•πùï…¡…•π–†ôô•±ïÃ§Ï(ÄÄÄÅ=¨°AÖç≠MΩ’…çïA…ïŸ•ï‹ÅÏ(ÄÄÄÄÄÄÄÅÕï…•ïÕ}•êËÅÕï…•ïÕ}•êπ—Ω}Õ—…•πú†§∞(ÄÄÄÄÄÄÄÅë•…ïç—Ω…‰ËÅë•…ïç—Ω…‰π—Ω}Õ—…•πù}±ΩÕÕ‰†§π•π—Ω}Ω›πïê†§∞(ÄÄÄÄÄÄÄÅô•±ïÃ∞(ÄÄÄÄÄÄÄÅ—Ω—Ö±}âÂ—ïÃ∞(ÄÄÄÄÄÄÄÅÕΩ’…çï}ô•πùï…¡…•π–∞(ÄÄÄÅÙ§)Ù()ô∏Å…ïÖë}¡Öç≠}µ•πïç…Öô—}çΩµ¡Ö—•â•±•—‰†(ÄÄÄÅ¡Ö—†ËÄôAÖ—†∞(ÄÄÄÅ—Ö…ùï—}Ÿï…Õ•Ω∏ËÄôÕ—»∞(§Ä¥¯Ä°AÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’Ã∞Å=¡—•Ω∏ÒM—…•πú¯§ÅÏ(ÄÄÄÅ±ï–Å’π≠πΩ›∏ÄÙÄ°AÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈUπ≠πΩ›∏∞Å9Ωπî§Ï(ÄÄÄÅ±ï–ÅMΩµî°çΩπ—ïπ—Ã§ÄÙÅ…ïÖë}ôΩ…ùï}µΩë}µï—ÖëÖ—Ñ°¡Ö—†§Åï±ÕîÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏Å’π≠πΩ›∏Ï(ÄÄÄÅÙÏ(ÄÄÄÅ±ï–Å=¨°ëΩç’µïπ–§ÄÙÅ—Ωµ∞ËÈô…Ωµ}Õ—»ËËÒ—Ωµ∞ËÈYÖ±’î¯†ôçΩπ—ïπ—Ã§Åï±ÕîÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏Å’π≠πΩ›∏Ï(ÄÄÄÅÙÏ(ÄÄÄÅ±ï–ÅMΩµî°ëï¡ïπëïπç•ïÃ§ÄÙÅëΩç’µïπ–πùï–†âëï¡ïπëïπç•ïÃà§πÖπë}—°ï∏°—Ωµ∞ËÈYÖ±’îËÈÖÕ}—Öâ±î§Åï±ÕîÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏Å’π≠πΩ›∏Ï(ÄÄÄÅÙÏ((ÄÄÄÅ±ï–Åµ’–ÅôΩ’πë}µ•πïç…Öô—}ëï¡ïπëïπç‰ÄÙÅôÖ±ÕîÏ(ÄÄÄÅ±ï–Åµ’–Å…ï¡Ω…—ïë}…ÖπùîÄÙÅ9ΩπîÏ(ÄÄÄÅôΩ»Åïπ—…•ïÃÅ•∏Åëï¡ïπëïπç•ïÃπŸÖ±’ïÃ†§πô•±—ï…}µÖ¿°—Ωµ∞ËÈYÖ±’îËÈÖÕ}Ö……Ö‰§ÅÏ(ÄÄÄÄÄÄÄÅôΩ»Åëï¡ïπëïπç‰Å•∏Åïπ—…•ïÃÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ±ï–ÅMΩµî°—Öâ±î§ÄÙÅëï¡ïπëïπç‰πÖÕ}—Öâ±î†§Åï±ÕîÅÏÅçΩπ—•π’îÅÙÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ•òÄÖ—Öâ±î(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄπùï–†âµΩë%êà§(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄπÖπë}—°ï∏°—Ωµ∞ËÈYÖ±’îËÈÖÕ}Õ—»§(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄπ•Õ}ÕΩµï}Öπê°Ò•ëÅ•êπï≈}•ùπΩ…ï}ÖÕç••}çÖÕî†âµ•πïç…Öô–à§§(ÄÄÄÄÄÄÄÄÄÄÄÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅçΩπ—•π’îÏ(ÄÄÄÄÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÄÄÄÄÅôΩ’πë}µ•πïç…Öô—}ëï¡ïπëïπç‰ÄÙÅ—…’îÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ±ï–ÅMΩµî°…Öπùî§ÄÙÅ—Öâ±î(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄπùï–†âŸï…Õ•ΩπIÖπùîà§(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄπÖπë}—°ï∏°—Ωµ∞ËÈYÖ±’îËÈÖÕ}Õ—»§(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄπµÖ¿°Õ—»ËÈ—…•¥§(ÄÄÄÄÄÄÄÄÄÄÄÅï±ÕîÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅçΩπ—•π’îÏ(ÄÄÄÄÄÄÄÄÄÄÄÅÙÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ•òÅ…Öπùîπ•Õ}ïµ¡—‰†§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅçΩπ—•π’îÏ(ÄÄÄÄÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÄÄÄÄÅ…ï¡Ω…—ïë}…ÖπùîÄÙÅMΩµî°…Öπùîπ—Ω}Õ—…•πú†§§Ï(ÄÄÄÄÄÄÄÄÄÄÄÅµÖ—ç†ÅµÖŸïπ}Ÿï…Õ•Ωπ}…Öπùï}çΩπ—Ö•πÃ°…Öπùî∞Å—Ö…ùï—}Ÿï…Õ•Ω∏§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅMΩµî°—…’î§ÄÙ¯ÅÌÙ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅMΩµî°ôÖ±Õî§ÄÙ¯ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Ä°AÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈ%πçΩµ¡Ö—•â±î∞Å…ï¡Ω…—ïë}…Öπùî§Ï(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ9ΩπîÄÙ¯Å…ï—’…∏Ä°AÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈUπ≠πΩ›∏∞Å…ï¡Ω…—ïë}…Öπùî§∞(ÄÄÄÄÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÅÙ(ÄÄÄÅ•òÅôΩ’πë}µ•πïç…Öô—}ëï¡ïπëïπç‰ÅÏ(ÄÄÄÄÄÄÄÄ°AÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈΩµ¡Ö—•â±î∞Å…ï¡Ω…—ïë}…Öπùî§(ÄÄÄÅÙÅï±ÕîÅÏ(ÄÄÄÄÄÄÄÅ’π≠πΩ›∏(ÄÄÄÅÙ)Ù()ô∏Å…ïÖë}¡Öç≠}ôΩ…ùï}çΩµ¡Ö—•â•±•—‰†(ÄÄÄÅ¡Ö—†ËÄôAÖ—†∞(ÄÄÄÅ—Ö…ùï—}Ÿï…Õ•Ω∏ËÄôÕ—»∞(§Ä¥¯Ä°AÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’Ã∞Å=¡—•Ω∏ÒM—…•πú¯§ÅÏ(ÄÄÄÅ±ï–ÅMΩµî°çΩπ—ïπ—Ã§ÄÙÅ…ïÖë}ôΩ…ùï}µΩë}µï—ÖëÖ—Ñ°¡Ö—†§Åï±ÕîÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏Ä°AÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈUπ≠πΩ›∏∞Å9Ωπî§Ï(ÄÄÄÅÙÏ(ÄÄÄÅ±ï–Å=¨°ëΩç’µïπ–§ÄÙÅ—Ωµ∞ËÈô…Ωµ}Õ—»ËËÒ—Ωµ∞ËÈYÖ±’î¯†ôçΩπ—ïπ—Ã§Åï±ÕîÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏Ä°AÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈUπ≠πΩ›∏∞Å9Ωπî§Ï(ÄÄÄÅÙÏ(ÄÄÄÅ±ï–ÅMΩµî°µΩë}±ΩÖëï»§ÄÙÅëΩç’µïπ–πùï–†âµΩë1ΩÖëï»à§πÖπë}—°ï∏°—Ωµ∞ËÈYÖ±’îËÈÖÕ}Õ—»§Åï±ÕîÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏Ä°AÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈUπ≠πΩ›∏∞Å9Ωπî§Ï(ÄÄÄÅÙÏ(ÄÄÄÅ•òÄÖµÖ—ç°ïÃÑ°µΩë}±ΩÖëï»π—…•¥†§∞Äâ©ÖŸÖôµ∞àÅÄâ±Ω›çΩëïôµ∞à§ÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏Ä°AÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈUπ≠πΩ›∏∞Å9Ωπî§Ï(ÄÄÄÅÙ(ÄÄÄÅ±ï–ÅMΩµî°…Öπùî§ÄÙÅëΩç’µïπ–πùï–†â±ΩÖëï…Yï…Õ•Ω∏à§πÖπë}—°ï∏°—Ωµ∞ËÈYÖ±’îËÈÖÕ}Õ—»§Åï±ÕîÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏Ä°AÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈUπ≠πΩ›∏∞Å9Ωπî§Ï(ÄÄÄÅÙÏ(ÄÄÄÅ±ï–Å…ÖπùîÄÙÅ…Öπùîπ—…•¥†§Ï(ÄÄÄÅ•òÅ…Öπùîπ•Õ}ïµ¡—‰†§ÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏Ä°AÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈΩµ¡Ö—•â±î∞Å9Ωπî§Ï(ÄÄÄÅÙ(ÄÄÄÅµÖ—ç†ÅµÖŸïπ}Ÿï…Õ•Ωπ}…Öπùï}çΩπ—Ö•πÃ°…Öπùî∞Å—Ö…ùï—}Ÿï…Õ•Ω∏§ÅÏ(ÄÄÄÄÄÄÄÅMΩµî°—…’î§ÄÙ¯Ä°AÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈΩµ¡Ö—•â±î∞ÅMΩµî°…Öπùîπ—Ω}Õ—…•πú†§§§∞(ÄÄÄÄÄÄÄÅMΩµî°ôÖ±Õî§ÄÙ¯Ä°AÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈ%πçΩµ¡Ö—•â±î∞ÅMΩµî°…Öπùîπ—Ω}Õ—…•πú†§§§∞(ÄÄÄÄÄÄÄÅ9ΩπîÄÙ¯Ä°AÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈUπ≠πΩ›∏∞ÅMΩµî°…Öπùîπ—Ω}Õ—…•πú†§§§∞(ÄÄÄÅÙ)Ù()ô∏Å…ïÖë}ôΩ…ùï}µΩë}µï—ÖëÖ—Ñ°¡Ö—†ËÄôAÖ—†§Ä¥¯Å=¡—•Ω∏ÒM—…•πú¯ÅÏ(ÄÄÄÅ±ï–Åô•±îÄÙÅôÃËÈ•±îËÈΩ¡ï∏°¡Ö—†§πΩ¨†§¸Ï(ÄÄÄÅ±ï–Åµ’–ÅÖ…ç°•ŸîÄÙÅÈ•¿ËÈi•¡…ç°•ŸîËÈπï‹°ô•±î§πΩ¨†§¸Ï(ÄÄÄÅ±ï–Å•πëï‡ÄÙÅÖ…ç°•Ÿî(ÄÄÄÄÄÄÄÄπô•±ï}πÖµïÃ†§(ÄÄÄÄÄÄÄÄπ¡ΩÕ•—•Ω∏°ÒπÖµïÅπÖµîπï≈}•ùπΩ…ï}ÖÕç••}çÖÕî†â5Qµ%9ΩµΩëÃπ—Ωµ∞à§§¸Ï(ÄÄÄÅ±ï–Åµ’–Åµï—ÖëÖ—ÑÄÙÅÖ…ç°•ŸîπâÂ}•πëï‡°•πëï‡§πΩ¨†§¸Ï(ÄÄÄÅ±ï–Åµ’–ÅçΩπ—ïπ—ÃÄÙÅM—…•πúËÈπï‹†§Ï(ÄÄÄÅµï—ÖëÖ—Ñ(ÄÄÄÄÄÄÄÄπâÂ}…ïò†§(ÄÄÄÄÄÄÄÄπ—Ö≠î†»‘ÿÄ®Äƒ¿»–§(ÄÄÄÄÄÄÄÄπ…ïÖë}—Ω}Õ—…•πú†ôµ’–ÅçΩπ—ïπ—Ã§(ÄÄÄÄÄÄÄÄπΩ¨†§¸Ï(ÄÄÄÅMΩµî°çΩπ—ïπ—Ã§)Ù()ô∏ÅµÖŸïπ}Ÿï…Õ•Ωπ}…Öπùï}çΩπ—Ö•πÃ°…ÖπùîËÄôÕ—»∞Å—Ö…ùï–ËÄôÕ—»§Ä¥¯Å=¡—•Ω∏ÒâΩΩ∞¯ÅÏ(ÄÄÄÅ±ï–Å—Ö…ùï–ÄÙÅπ’µï…•ç}Ÿï…Õ•Ωπ}¡Ö…—Ã°—Ö…ùï–§¸Ï(ÄÄÄÅ±ï–Åµ’–Å…ïµÖ•π•πúÄÙÅ…Öπùîπ—…•¥†§Ï(ÄÄÄÅ•òÅ…ïµÖ•π•πúπ•Õ}ïµ¡—‰†§ÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏Å9ΩπîÏ(ÄÄÄÅÙ(ÄÄÄÅ±ï–Åµ’–ÅµÖ—ç°ïêÄÙÅôÖ±ÕîÏ(ÄÄÄÅ›°•±îÄÖ…ïµÖ•π•πúπ•Õ}ïµ¡—‰†§ÅÏ(ÄÄÄÄÄÄÄÅ±ï–ÅΩ¡ïπ•πúÄÙÅ…ïµÖ•π•πúπç°Ö…Ã†§ππï·–†§¸Ï(ÄÄÄÄÄÄÄÅ•òÅΩ¡ïπ•πúÄÑÙÄùlúÄòòÅΩ¡ïπ•πúÄÑÙÄú†úÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Å9ΩπîÏ(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÅ±ï–Åç±ΩÕ•πù}•πëï‡ÄÙÅ…ïµÖ•π•πúπô•πê°Òç°Ö…Öç—ï…Åç°Ö…Öç—ï»ÄÙÙÄú§úÅÒÅç°Ö…Öç—ï»ÄÙÙÄùtú§¸Ï(ÄÄÄÄÄÄÄÅ±ï–Åç±ΩÕ•πúÄÙÅ…ïµÖ•π•πùmç±ΩÕ•πù}•πëï‡∏πtπç°Ö…Ã†§ππï·–†§¸Ï(ÄÄÄÄÄÄÄÅ±ï–ÅâΩë‰ÄÙÄô…ïµÖ•π•πùlƒ∏πç±ΩÕ•πù}•πëï·tÏ(ÄÄÄÄÄÄÄÅ•òÅ±ï–ÅMΩµî†°±Ω›ï»∞Å’¡¡ï»§§ÄÙÅâΩë‰πÕ¡±•—}Ωπçî†ú∞ú§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ±ï–Å±Ω›ï»ÄÙÅ•òÅ±Ω›ï»π—…•¥†§π•Õ}ïµ¡—‰†§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ9Ωπî(ÄÄÄÄÄÄÄÄÄÄÄÅÙÅï±ÕîÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅMΩµî°π’µï…•ç}Ÿï…Õ•Ωπ}¡Ö…—Ã°±Ω›ï»π—…•¥†§§¸§(ÄÄÄÄÄÄÄÄÄÄÄÅÙÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ±ï–Å’¡¡ï»ÄÙÅ•òÅ’¡¡ï»π—…•¥†§π•Õ}ïµ¡—‰†§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ9Ωπî(ÄÄÄÄÄÄÄÄÄÄÄÅÙÅï±ÕîÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅMΩµî°π’µï…•ç}Ÿï…Õ•Ωπ}¡Ö…—Ã°’¡¡ï»π—…•¥†§§¸§(ÄÄÄÄÄÄÄÄÄÄÄÅÙÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ±ï–ÅÖâΩŸï}±Ω›ï»ÄÙÅ±Ω›ï»πÖÕ}…ïò†§π•Õ}πΩπï}Ω»°ÒâΩ’πëÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ±ï–ÅçΩµ¡Ö…•ÕΩ∏ÄÙÅçΩµ¡Ö…ï}π’µï…•ç}Ÿï…Õ•ΩπÃ†ô—Ö…ùï–∞ÅâΩ’πê§Ï(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅçΩµ¡Ö…•ÕΩ∏π•Õ}ù–†§ÅÒÅçΩµ¡Ö…•ÕΩ∏π•Õ}ïƒ†§ÄòòÅΩ¡ïπ•πúÄÙÙÄùlú(ÄÄÄÄÄÄÄÄÄÄÄÅÙ§Ï(ÄÄÄÄÄÄÄÄÄÄÄÅ±ï–Åâï±Ω›}’¡¡ï»ÄÙÅ’¡¡ï»πÖÕ}…ïò†§π•Õ}πΩπï}Ω»°ÒâΩ’πëÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ±ï–ÅçΩµ¡Ö…•ÕΩ∏ÄÙÅçΩµ¡Ö…ï}π’µï…•ç}Ÿï…Õ•ΩπÃ†ô—Ö…ùï–∞ÅâΩ’πê§Ï(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅçΩµ¡Ö…•ÕΩ∏π•Õ}±–†§ÅÒÅçΩµ¡Ö…•ÕΩ∏π•Õ}ïƒ†§ÄòòÅç±ΩÕ•πúÄÙÙÄùtú(ÄÄÄÄÄÄÄÄÄÄÄÅÙ§Ï(ÄÄÄÄÄÄÄÄÄÄÄÅµÖ—ç°ïêÅÙÅÖâΩŸï}±Ω›ï»ÄòòÅâï±Ω›}’¡¡ï»Ï(ÄÄÄÄÄÄÄÅÙÅï±ÕîÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ•òÅΩ¡ïπ•πúÄÑÙÄùlúÅÒÅç±ΩÕ•πúÄÑÙÄùtúÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ…ï—’…∏Å9ΩπîÏ(ÄÄÄÄÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÄÄÄÄÅ±ï–Åï·Öç–ÄÙÅπ’µï…•ç}Ÿï…Õ•Ωπ}¡Ö…—Ã°âΩë‰π—…•¥†§§¸Ï(ÄÄÄÄÄÄÄÄÄÄÄÅµÖ—ç°ïêÅÙÅçΩµ¡Ö…ï}π’µï…•ç}Ÿï…Õ•ΩπÃ†ô—Ö…ùï–∞Äôï·Öç–§π•Õ}ïƒ†§Ï(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÅ…ïµÖ•π•πúÄÙÅ…ïµÖ•π•πùmç±ΩÕ•πù}•πëï‡Ä¨Äƒ∏πtπ—…•µ}Õ—Ö…–†§Ï(ÄÄÄÄÄÄÄÅ•òÅ…ïµÖ•π•πúπ•Õ}ïµ¡—‰†§ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅâ…ïÖ¨Ï(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÅ…ïµÖ•π•πúÄÙÅ…ïµÖ•π•πúπÕ—…•¡}¡…ïô•‡†ú∞ú§¸π—…•µ}Õ—Ö…–†§Ï(ÄÄÄÅÙ(ÄÄÄÅMΩµî°µÖ—ç°ïê§)Ù()ô∏Åπ’µï…•ç}Ÿï…Õ•Ωπ}¡Ö…—Ã°Ÿï…Õ•Ω∏ËÄôÕ—»§Ä¥¯Å=¡—•Ω∏ÒYïåÒ‘ÿ–¯¯ÅÏ(ÄÄÄÅ±ï–Å¡Ö…—ÃËÅYïåÒ‘ÿ–¯ÄÙÅŸï…Õ•Ω∏(ÄÄÄÄÄÄÄÄπÕ¡±•–†ú∏ú§(ÄÄÄÄÄÄÄÄπµÖ¿°Õ—»ËÈ¡Ö…ÕîËËÒ‘ÿ–¯§(ÄÄÄÄÄÄÄÄπçΩ±±ïç–ËËÒIïÕ’±–Ò|∞Å|¯¯†§(ÄÄÄÄÄÄÄÄπΩ¨†§¸Ï(ÄÄÄÄ†Ö¡Ö…—Ãπ•Õ}ïµ¡—‰†§§π—°ïπ}ÕΩµî°¡Ö…—Ã§)Ù()ô∏ÅçΩµ¡Ö…ï}π’µï…•ç}Ÿï…Õ•ΩπÃ°±ïô–ËÄôm‘ÿ—t∞Å…•ù°–ËÄôm‘ÿ—t§Ä¥¯ÅÕ—êËÈçµ¿ËÈ=…ëï…•πúÅÏ(ÄÄÄÅ±ï–Å¡Ö…—}çΩ’π–ÄÙÅ±ïô–π±ï∏†§πµÖ‡°…•ù°–π±ï∏†§§Ï(ÄÄÄÄ†¿∏π¡Ö…—}çΩ’π–§(ÄÄÄÄÄÄÄÄπµÖ¿°Ò•πëï·Å±ïô–πùï–°•πëï‡§πçΩ¡•ïê†§π’π›…Ö¡}Ω»†¿§πçµ¿†ô…•ù°–πùï–°•πëï‡§πçΩ¡•ïê†§π’π›…Ö¡}Ω»†¿§§§(ÄÄÄÄÄÄÄÄπô•πê°ÒΩ…ëï…•πùÄÖΩ…ëï…•πúπ•Õ}ïƒ†§§(ÄÄÄÄÄÄÄÄπ’π›…Ö¡}Ω»°Õ—êËÈçµ¿ËÈ=…ëï…•πúËÈ≈’Ö∞§)Ù()ô∏Å¡Öç≠}ÕΩ’…çï}ô•πùï…¡…•π–°ô•±ïÃËÄômAÖç≠MΩ’…çï•±ït§Ä¥¯ÅM—…•πúÅÏ(ÄÄÄÅ±ï–Åµ’–Å°ÖÕ°ï»ÄÙÅÕ°Ñ»ËÈM°Ñ»‘ÿËÈπï‹†§Ï(ÄÄÄÅ±ï–Åµ’–ÅÕΩ…—ïë}ô•±ïÃËÅYïåôAÖç≠MΩ’…çï•±î¯ÄÙÅô•±ïÃπ•—ï»†§πçΩ±±ïç–†§Ï(ÄÄÄÅÕΩ…—ïë}ô•±ïÃπÕΩ…—}â‰°Ò±ïô–∞Å…•ù°—ÅÏ(ÄÄÄÄÄÄÄÅ±ïô–ππÖµî(ÄÄÄÄÄÄÄÄÄÄÄÄπ—Ω}ÖÕç••}±Ω›ï…çÖÕî†§(ÄÄÄÄÄÄÄÄÄÄÄÄπçµ¿†ô…•ù°–ππÖµîπ—Ω}ÖÕç••}±Ω›ï…çÖÕî†§§(ÄÄÄÅÙ§Ï(ÄÄÄÅôΩ»Åô•±îÅ•∏ÅÕΩ…—ïë}ô•±ïÃÅÏ(ÄÄÄÄÄÄÄÅ°ÖÕ°ï»π’¡ëÖ—î°ô•±îππÖµîπ—Ω}ÖÕç••}±Ω›ï…çÖÕî†§πÖÕ}âÂ—ïÃ†§§Ï(ÄÄÄÄÄÄÄÅ°ÖÕ°ï»π’¡ëÖ—î°l¡t§Ï(ÄÄÄÄÄÄÄÅ°ÖÕ°ï»π’¡ëÖ—î°ô•±îπÕ°Ñ»‘ÿπÖÕ}âÂ—ïÃ†§§Ï(ÄÄÄÄÄÄÄÅ°ÖÕ°ï»π’¡ëÖ—î°l¡t§Ï(ÄÄÄÅÙ(ÄÄÄÅôΩ…µÖ–Ñ†âÏÈ·Ùà∞Å°ÖÕ°ï»πô•πÖ±•Èî†§§)Ù()ô∏Å…ïÖë}¡Öç≠}±•çïπÕî°¡Ö—†ËÄôAÖ—†§Ä¥¯Å=¡—•Ω∏ÒM—…•πú¯ÅÏ(ÄÄÄÅ±ï–ÅçΩπ—ïπ—ÃÄÙÅ…ïÖë}ôΩ…ùï}µΩë}µï—ÖëÖ—Ñ°¡Ö—†§¸Ï(ÄÄÄÅ±ï–ÅëΩç’µïπ–ËÅ—Ωµ∞ËÈYÖ±’îÄÙÅ—Ωµ∞ËÈô…Ωµ}Õ—»†ôçΩπ—ïπ—Ã§πΩ¨†§¸Ï(ÄÄÄÅëΩç’µïπ–(ÄÄÄÄÄÄÄÄπùï–†â±•çïπÕîà§(ÄÄÄÄÄÄÄÄπÖπë}—°ï∏°—Ωµ∞ËÈYÖ±’îËÈÖÕ}Õ—»§(ÄÄÄÄÄÄÄÄπµÖ¿°Õ—»ËÈ—…•¥§(ÄÄÄÄÄÄÄÄπô•±—ï»°Ò±•çïπÕïÄÖ±•çïπÕîπ•Õ}ïµ¡—‰†§§(ÄÄÄÄÄÄÄÄπµÖ¿°Õ—»ËÈ—Ω}Õ—…•πú§)Ù()ô∏Å¡Öç≠}±•çïπÕï}Õ—Ö—’Ã°±•çïπÕîËÅ=¡—•Ω∏ôÕ—»¯§Ä¥¯ÅAÖç≠1•çïπÕïM—Ö—’ÃÅÏ(ÄÄÄÅ±ï–ÅMΩµî°±•çïπÕî§ÄÙÅ±•çïπÕîπµÖ¿°Õ—»ËÈ—…•¥§πô•±—ï»°ÒŸÖ±’ïÄÖŸÖ±’îπ•Õ}ïµ¡—‰†§§Åï±ÕîÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏ÅAÖç≠1•çïπÕïM—Ö—’ÃËÈUπ≠πΩ›∏Ï(ÄÄÄÅÙÏ(ÄÄÄÅ±ï–ÅπΩ…µÖ±•ÈïêÄÙÅ±•çïπÕîπ—Ω}ÖÕç••}±Ω›ï…çÖÕî†§Ï(ÄÄÄÅ±ï–Å›Ω…ëÃËÅYïåôÕ—»¯ÄÙÅπΩ…µÖ±•Èïê(ÄÄÄÄÄÄÄÄπÕ¡±•–°Òç°Ö…Öç—ï»ËÅç°Ö…ÄÖç°Ö…Öç—ï»π•Õ}ÖÕç••}Ö±¡°Öπ’µï…•å†§§(ÄÄÄÄÄÄÄÄπô•±—ï»°Ò›Ω…ëÄÖ›Ω…êπ•Õ}ïµ¡—‰†§§(ÄÄÄÄÄÄÄÄπçΩ±±ïç–†§Ï(ÄÄÄÅ±ï–Å°ÖÕ}Ö……}µÖ…≠ï»ÄÙÅ›Ω…ëÃπçΩπ—Ö•πÃ†òâÖ…»à§Ï(ÄÄÄÅ•òÅπΩ…µÖ±•ÈïêπçΩπ—Ö•πÃ†âÖ±∞Å…•ù°—ÃÅ…ïÕï…Ÿïêà§(ÄÄÄÄÄÄÄÅÒÅπΩ…µÖ±•Èïêπ…ï¡±Öçî†ú¥ú∞ÄàÄà§πçΩπ—Ö•πÃ†âÖ±∞Å…•ù°—ÃÅ…ïÕï…Ÿïêà§(ÄÄÄÄÄÄÄÅÒÅπΩ…µÖ±•ÈïêπçΩπ—Ö•πÃ†âπΩπçΩµµï…ç•Ö∞à§(ÄÄÄÄÄÄÄÅÒÅπΩ…µÖ±•ÈïêπçΩπ—Ö•πÃ†âπΩ∏µçΩµµï…ç•Ö∞à§(ÄÄÄÄÄÄÄÅÒÅπΩ…µÖ±•ÈïêπçΩπ—Ö•πÃ†ââ‰µπåà§(ÄÄÄÄÄÄÄÅÒÅπΩ…µÖ±•ÈïêπçΩπ—Ö•πÃ†ââ‰Åπåà§(ÄÄÄÄÄÄÄÅÒÅπΩ…µÖ±•ÈïêπçΩπ—Ö•πÃ†â¡…Ω—ïç—•Ÿîà§(ÄÄÄÄÄÄÄÅÒÅ°ÖÕ}Ö……}µÖ…≠ï»(ÄÄÄÅÏ(ÄÄÄÄÄÄÄÅ…ï—’…∏ÅAÖç≠1•çïπÕïM—Ö—’ÃËÈAï…µ•ÕÕ•ΩπIï≈’•…ïêÏ(ÄÄÄÅÙ(ÄÄÄÅ±ï–Å…ïçΩùπ•ÈïêÄÙÅ›Ω…ëÃπçΩπ—Ö•πÃ†òâµ•–à§(ÄÄÄÄÄÄÄÅÒÅ›Ω…ëÃπçΩπ—Ö•πÃ†òâÖ¡Öç°îà§(ÄÄÄÄÄÄÄÅÒÅ›Ω…ëÃπçΩπ—Ö•πÃ†òââÕêà§(ÄÄÄÄÄÄÄÅÒÅ›Ω…ëÃπ•—ï»†§πÖπ‰°Ò›Ω…ëÅ›Ω…êπÕ—Ö…—Õ}›•—††â±ù¡∞à§§(ÄÄÄÄÄÄÄÅÒÅ›Ω…ëÃπ•—ï»†§πÖπ‰°Ò›Ω…ëÅ›Ω…êπÕ—Ö…—Õ}›•—††âù¡∞à§§(ÄÄÄÄÄÄÄÅÒÅ›Ω…ëÃπ•—ï»†§πÖπ‰°Ò›Ω…ëÅ›Ω…êπÕ—Ö…—Õ}›•—††âµ¡∞à§§(ÄÄÄÄÄÄÄÅÒÅ›Ω…ëÃπçΩπ—Ö•πÃ†òâ’π±•çïπÕîà§(ÄÄÄÄÄÄÄÅÒÅ›Ω…ëÃπçΩπ—Ö•πÃ†òâÖçÖëïµ•åà§ÄòòÅ›Ω…ëÃπçΩπ—Ö•πÃ†òâ±•çïπÕîà§(ÄÄÄÄÄÄÄÅÒÅ›Ω…ëÃπçΩπ—Ö•πÃ†òâ±ïÕÕï»à§(ÄÄÄÄÄÄÄÄÄÄÄÄòòÅ›Ω…ëÃπçΩπ—Ö•πÃ†òâùïπï…Ö∞à§(ÄÄÄÄÄÄÄÄÄÄÄÄòòÅ›Ω…ëÃπçΩπ—Ö•πÃ†òâ¡’â±•åà§(ÄÄÄÄÄÄÄÄÄÄÄÄòòÅ›Ω…ëÃπçΩπ—Ö•πÃ†òâ±•çïπÕîà§(ÄÄÄÄÄÄÄÅÒÅ›Ω…ëÃπçΩπ—Ö•πÃ†òâùïπï…Ö∞à§(ÄÄÄÄÄÄÄÄÄÄÄÄòòÅ›Ω…ëÃπçΩπ—Ö•πÃ†òâ¡’â±•åà§(ÄÄÄÄÄÄÄÄÄÄÄÄòòÅ›Ω…ëÃπçΩπ—Ö•πÃ†òâ±•çïπÕîà§Ï(ÄÄÄÅ•òÅ…ïçΩùπ•ÈïêÅÏ(ÄÄÄÄÄÄÄÅAÖç≠1•çïπÕïM—Ö—’ÃËÈIïçΩùπ•Èïê(ÄÄÄÅÙÅï±ÕîÅÏ(ÄÄÄÄÄÄÄÅAÖç≠1•çïπÕïM—Ö—’ÃËÈUπ≠πΩ›∏(ÄÄÄÅÙ)Ù()ô∏ÅŸÖ±•ë}Ωôô•ç•Ö±}ÖÕÕï—}πÖµî°πÖµîËÄôÕ—»§Ä¥¯ÅâΩΩ∞ÅÏ(ÄÄÄÄÖπÖµîπ•Õ}ïµ¡—‰†§(ÄÄÄÄÄÄÄÄòòÅπÖµîπ±ï∏†§ÄÙÄƒ‡¿(ÄÄÄÄÄÄÄÄòòÅπÖµîπ—Ω}ÖÕç••}±Ω›ï…çÖÕî†§πïπëÕ}›•—††àπ©Ö»à§(ÄÄÄÄÄÄÄÄòòÄÖπÖµîπÕ—Ö…—Õ}›•—††ú∏ú§(ÄÄÄÄÄÄÄÄòòÄÖπÖµîπÕ—Ö…—Õ}›•—††úÄú§(ÄÄÄÄÄÄÄÄòòÄÖπÖµîπïπëÕ}›•—††úÄú§(ÄÄÄÄÄÄÄÄòòÄÖπÖµîπïπëÕ}›•—††ú∏ú§(ÄÄÄÄÄÄÄÄòòÅπÖµî(ÄÄÄÄÄÄÄÄÄÄÄÄπâÂ—ïÃ†§(ÄÄÄÄÄÄÄÄÄÄÄÄπÖ±∞°ÒâÂ—ïÅâÂ—îπ•Õ}ÖÕç••}Ö±¡°Öπ’µï…•å†§ÅÒÅààÄπ|¨¥†•mtúàπçΩπ—Ö•πÃ†ôâÂ—î§§)Ù()ô∏ÅÕ°Ñ»‘Ÿ}ô•±î°¡Ö—†ËÄôAÖ—†§Ä¥¯ÅIïÕ’±–ÒM—…•πú∞ÅM—…•πú¯ÅÏ(ÄÄÄÅ±ï–Åµ’–Åô•±îÄÙÅôÃËÈ•±îËÈΩ¡ï∏°¡Ö—†§(ÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â9ºÅÕîÅ¡’ëºÅÖâ…•»ÅÌÙÅ¡Ö…ÑÅçÖ±ç’±Ö»ÅM!¥»‘ÿËÅÌï……Ω…Ùà∞Å¡Ö—†πë•Õ¡±Ö‰†§§§¸Ï(ÄÄÄÅ±ï–Åµ’–Å°ÖÕ°ï»ÄÙÅÕ°Ñ»ËÈM°Ñ»‘ÿËÈπï‹†§Ï(ÄÄÄÅ±ï–Åµ’–Åâ’ôôï»ÄÙÅl¡}‘‡ÏÄÿ–Ä®Äƒ¿»—tÏ(ÄÄÄÅ±ΩΩ¿ÅÏ(ÄÄÄÄÄÄÄÅ±ï–Å…ïÖêÄÙÅô•±î(ÄÄÄÄÄÄÄÄÄÄÄÄπ…ïÖê†ôµ’–Åâ’ôôï»§(ÄÄÄÄÄÄÄÄÄÄÄÄπµÖ¡}ï…»°Òï……Ω…ÅôΩ…µÖ–Ñ†â9ºÅÕîÅ¡’ëºÅçÖ±ç’±Ö»ÅM!¥»‘ÿÅëîÅÌÙËÅÌï……Ω…Ùà∞Å¡Ö—†πë•Õ¡±Ö‰†§§§¸Ï(ÄÄÄÄÄÄÄÅ•òÅ…ïÖêÄÙÙÄ¿ÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅâ…ïÖ¨Ï(ÄÄÄÄÄÄÄÅÙ(ÄÄÄÄÄÄÄÅ°ÖÕ°ï»π’¡ëÖ—î†ôâ’ôôï…l∏π…ïÖët§Ï(ÄÄÄÅÙ(ÄÄÄÅ=¨°ôΩ…µÖ–Ñ†âÏÈ·Ùà∞Å°ÖÕ°ï»πô•πÖ±•Èî†§§§)Ù((çmçôú°—ïÕ–•t)µΩêÅ—ïÕ—ÃÅÏ(ÄÄÄÅ’ÕîÅÕ’¡ï»ËË®Ï((ÄÄÄÅô∏Å›…•—ï}ôΩ…ùï}©Ö»°¡Ö—†ËÄôAÖ—†§ÅÏ(ÄÄÄÄÄÄÄÅ’ÕîÅÕ—êËÈ•ºËÈ]…•—îÏ(ÄÄÄÄÄÄÄÅ±ï–Åô•±îÄÙÅôÃËÈ•±îËÈç…ïÖ—î°¡Ö—†§π’π›…Ö¿†§Ï(ÄÄÄÄÄÄÄÅ±ï–Åµ’–ÅÖ…ç°•ŸîÄÙÅÈ•¿ËÈi•¡]…•—ï»ËÈπï‹°ô•±î§Ï(ÄÄÄÄÄÄÄÅÖ…ç°•Ÿî(ÄÄÄÄÄÄÄÄÄÄÄÄπÕ—Ö…—}ô•±î†â5Qµ%9ΩµΩëÃπ—Ωµ∞à∞ÅÈ•¿ËÈ›…•—îËÈM•µ¡±ï•±ï=¡—•ΩπÃËÈëïôÖ’±–†§§(ÄÄÄÄÄÄÄÄÄÄÄÄπ’π›…Ö¿†§Ï(ÄÄÄÄÄÄÄÅÖ…ç°•Ÿî(ÄÄÄÄÄÄÄÄÄÄÄÄπ›…•—ï}Ö±∞°àâµΩë1ΩÖëï»ıpâ©ÖŸÖôµ±pâqπ±•çïπÕîıpâ5%Qpâq∏à§(ÄÄÄÄÄÄÄÄÄÄÄÄπ’π›…Ö¿†§Ï(ÄÄÄÄÄÄÄÅÖ…ç°•Ÿîπô•π•Õ††§π’π›…Ö¿†§Ï(ÄÄÄÅÙ((ÄÄÄÅô∏Å—ïµ¡Ω…Ö…Â}ë•…ïç—Ω…‰°±Öâï∞ËÄôÕ—»§Ä¥¯ÅAÖ—°	’òÅÏ(ÄÄÄÄÄÄÄÅ±ï–Å¡Ö—†ÄÙÅÕ—êËÈïπÿËÈ—ïµ¡}ë•»†§π©Ω•∏°ôΩ…µÖ–Ñ†(ÄÄÄÄÄÄÄÄÄÄÄÄâï—ï…πÖ±ç…Öô–µÌ±Öâï±ÙµÌÙµÌÙà∞(ÄÄÄÄÄÄÄÄÄÄÄÅÕ—êËÈ¡…ΩçïÕÃËÈ•ê†§∞(ÄÄÄÄÄÄÄÄÄÄÄÅÕ—êËÈ—•µîËÈMÂÕ—ïµQ•µîËÈπΩ‹†§(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄπë’…Ö—•Ωπ}Õ•πçî°Õ—êËÈ—•µîËÈU9%a}A= §(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄπ’π›…Ö¿†§(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄπÖÕ}πÖπΩÃ†§(ÄÄÄÄÄÄÄÄ§§Ï(ÄÄÄÄÄÄÄÅôÃËÈç…ïÖ—ï}ë•…}Ö±∞†ô¡Ö—†§π’π›…Ö¿†§Ï(ÄÄÄÄÄÄÄÅ¡Ö—†(ÄÄÄÅÙ((ÄÄÄÄçm—ïÕ—t(ÄÄÄÅô∏ÅçΩπç’……ïπ—}¡Öç≠}¡’â±•çÖ—•ΩπÕ}Ö…ï}Õï…•Ö±•Èïë}ôΩ…}çÖ—Ö±Ωù}çΩπÕ•Õ—ïπç‰†§ÅÏ(ÄÄÄÄÄÄÄÅ±ï–Åµ’–ÅÖç—•ŸîÄÙÅôÖ±ÕîÏ(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ°…ïÕï…Ÿï}¡’â±•Õ††ôµ’–ÅÖç—•Ÿî§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ†Ö…ïÕï…Ÿï}¡’â±•Õ††ôµ’–ÅÖç—•Ÿî§§Ï(ÄÄÄÄÄÄÄÅÖç—•ŸîÄÙÅôÖ±ÕîÏ(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ°…ïÕï…Ÿï}¡’â±•Õ††ôµ’–ÅÖç—•Ÿî§§Ï(ÄÄÄÅÙ((ÄÄÄÄçm—ïÕ—t(ÄÄÄÅô∏Å¡’â±•Õ°ïë}…ï±ïÖÕï}ÖÕÕï—}Õï—}µ’Õ—}µÖ—ç°}—°ï}ÕΩ’…çï}ï·Öç—±‰†§ÅÏ(ÄÄÄÄÄÄÄÅ±ï–ÅÕΩ’…çîÄÙÅŸïåÖl(ÄÄÄÄÄÄÄÄÄÄÄÅAÖç≠MΩ’…çï•±îÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅπÖµîËÄâÖ±¡°Ñπ©Ö»àπ•π—º†§∞(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅÕ•Èï}âÂ—ïÃËÄƒ¿∞(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅÕ°Ñ»‘ÿËÄâÑàπ…ï¡ïÖ–†ÿ–§∞(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ±•çïπÕîËÅMΩµî†â5%Pàπ•π—º†§§∞(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ±•çïπÕï}Õ—Ö—’ÃËÅAÖç≠1•çïπÕïM—Ö—’ÃËÈIïçΩùπ•Èïê∞(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅµ•πïç…Öô—}çΩµ¡Ö—•â•±•—‰ËÅAÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈUπ≠πΩ›∏∞(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅµ•πïç…Öô—}Ÿï…Õ•Ωπ}…ÖπùîËÅ9Ωπî∞(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅôΩ…ùï}çΩµ¡Ö—•â•±•—‰ËÅAÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈUπ≠πΩ›∏∞(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅôΩ…ùï}Ÿï…Õ•Ωπ}…ÖπùîËÅ9Ωπî∞(ÄÄÄÄÄÄÄÄÄÄÄÅÙ∞(ÄÄÄÄÄÄÄÄÄÄÄÅAÖç≠MΩ’…çï•±îÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅπÖµîËÄââï—Ñπ©Ö»àπ•π—º†§∞(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅÕ•Èï}âÂ—ïÃËÄ»¿∞(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅÕ°Ñ»‘ÿËÄâààπ…ï¡ïÖ–†ÿ–§∞(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ±•çïπÕîËÅMΩµî†â5%Pàπ•π—º†§§∞(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅ±•çïπÕï}Õ—Ö—’ÃËÅAÖç≠1•çïπÕïM—Ö—’ÃËÈIïçΩùπ•Èïê∞(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅµ•πïç…Öô—}çΩµ¡Ö—•â•±•—‰ËÅAÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈUπ≠πΩ›∏∞(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅµ•πïç…Öô—}Ÿï…Õ•Ωπ}…ÖπùîËÅ9Ωπî∞(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅôΩ…ùï}çΩµ¡Ö—•â•±•—‰ËÅAÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈUπ≠πΩ›∏∞(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅôΩ…ùï}Ÿï…Õ•Ωπ}…ÖπùîËÅ9Ωπî∞(ÄÄÄÄÄÄÄÄÄÄÄÅÙ∞(ÄÄÄÄÄÄÄÅtÏ(ÄÄÄÄÄÄÄÅ±ï–ÅçΩµ¡±ï—îÄÙÅŸïåÖl(ÄÄÄÄÄÄÄÄÄÄÄÅ•—!’âIï±ïÖÕïÕÕï–ÅÏÅ•êËÄ»∞ÅπÖµîËÄââï—Ñπ©Ö»àπ•π—º†§∞Åë•ùïÕ–ËÅ9ΩπîÅÙ∞(ÄÄÄÄÄÄÄÄÄÄÄÅ•—!’âIï±ïÖÕïÕÕï–ÅÏÅ•êËÄƒ∞ÅπÖµîËÄâÖ±¡°Ñπ©Ö»àπ•π—º†§∞Åë•ùïÕ–ËÅ9ΩπîÅÙ∞(ÄÄÄÄÄÄÄÅtÏ(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ°¡’â±•Õ°ïë}ÖÕÕï—}πÖµïÕ}µÖ—ç††ôÕΩ’…çî∞ÄôçΩµ¡±ï—î§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ†Ö¡’â±•Õ°ïë}ÖÕÕï—}πÖµïÕ}µÖ—ç††ôÕΩ’…çî∞ÄôçΩµ¡±ï—ïl∏∏≈t§§Ï(ÄÄÄÄÄÄÄÅ±ï–Å›•—°}Õ—Ö±ï}ÖÕÕï–ÄÙÅmçΩµ¡±ï—îπÖÕ}Õ±•çî†§∞Äôm•—!’âIï±ïÖÕïÕÕï–ÅÏÅ•êËÄÃ∞ÅπÖµîËÄâ…ï—•…ïêπ©Ö»àπ•π—º†§∞Åë•ùïÕ–ËÅ9ΩπîÅıutπçΩπçÖ–†§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ†Ö¡’â±•Õ°ïë}ÖÕÕï—}πÖµïÕ}µÖ—ç††ôÕΩ’…çî∞Äô›•—°}Õ—Ö±ï}ÖÕÕï–§§Ï(ÄÄÄÅÙ((ÄÄÄÄçm—ïÕ—t(ÄÄÄÅô∏Å¡Öç≠}ÕΩ’…çï}ô•πùï…¡…•π—}ç°ÖπùïÕ}›°ïπ}Ö}µΩë}ç°ÖπùïÕ}Öπë}•Õ}Ω…ëï…}•πëï¡ïπëïπ–†§ÅÏ(ÄÄÄÄÄÄÄÅ±ï–Åô•…Õ–ÄÙÅAÖç≠MΩ’…çï•±îÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅπÖµîËÄâ±¡°Ñπ©Ö»àπ•π—º†§∞(ÄÄÄÄÄÄÄÄÄÄÄÅÕ•Èï}âÂ—ïÃËÄƒ¿∞(ÄÄÄÄÄÄÄÄÄÄÄÅÕ°Ñ»‘ÿËÄâÑàπ…ï¡ïÖ–†ÿ–§∞(ÄÄÄÄÄÄÄÄÄÄÄÅ±•çïπÕîËÅMΩµî†â5%Pàπ•π—º†§§∞(ÄÄÄÄÄÄÄÄÄÄÄÅ±•çïπÕï}Õ—Ö—’ÃËÅAÖç≠1•çïπÕïM—Ö—’ÃËÈIïçΩùπ•Èïê∞(ÄÄÄÄÄÄÄÄÄÄÄÅµ•πïç…Öô—}çΩµ¡Ö—•â•±•—‰ËÅAÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈUπ≠πΩ›∏∞(ÄÄÄÄÄÄÄÄÄÄÄÅµ•πïç…Öô—}Ÿï…Õ•Ωπ}…ÖπùîËÅ9Ωπî∞(ÄÄÄÄÄÄÄÄÄÄÄÅôΩ…ùï}çΩµ¡Ö—•â•±•—‰ËÅAÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈUπ≠πΩ›∏∞(ÄÄÄÄÄÄÄÄÄÄÄÅôΩ…ùï}Ÿï…Õ•Ωπ}…ÖπùîËÅ9Ωπî∞(ÄÄÄÄÄÄÄÅÙÏ(ÄÄÄÄÄÄÄÅ±ï–ÅÕïçΩπêÄÙÅAÖç≠MΩ’…çï•±îÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅπÖµîËÄââï—Ñπ©Ö»àπ•π—º†§∞(ÄÄÄÄÄÄÄÄÄÄÄÅÕ•Èï}âÂ—ïÃËÄ»¿∞(ÄÄÄÄÄÄÄÄÄÄÄÅÕ°Ñ»‘ÿËÄâààπ…ï¡ïÖ–†ÿ–§∞(ÄÄÄÄÄÄÄÄÄÄÄÅ±•çïπÕîËÅMΩµî†â5%Pàπ•π—º†§§∞(ÄÄÄÄÄÄÄÄÄÄÄÅ±•çïπÕï}Õ—Ö—’ÃËÅAÖç≠1•çïπÕïM—Ö—’ÃËÈIïçΩùπ•Èïê∞(ÄÄÄÄÄÄÄÄÄÄÄÅµ•πïç…Öô—}çΩµ¡Ö—•â•±•—‰ËÅAÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈUπ≠πΩ›∏∞(ÄÄÄÄÄÄÄÄÄÄÄÅµ•πïç…Öô—}Ÿï…Õ•Ωπ}…ÖπùîËÅ9Ωπî∞(ÄÄÄÄÄÄÄÄÄÄÄÅôΩ…ùï}çΩµ¡Ö—•â•±•—‰ËÅAÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈUπ≠πΩ›∏∞(ÄÄÄÄÄÄÄÄÄÄÄÅôΩ…ùï}Ÿï…Õ•Ωπ}…ÖπùîËÅ9Ωπî∞(ÄÄÄÄÄÄÄÅÙÏ(ÄÄÄÄÄÄÄÅ±ï–ÅΩ…•ù•πÖ∞ÄÙÅ¡Öç≠}ÕΩ’…çï}ô•πùï…¡…•π–†ômô•…Õ–πç±Ωπî†§∞ÅÕïçΩπêπç±Ωπî†•t§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°Ω…•ù•πÖ∞π±ï∏†§∞Äÿ–§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°Ω…•ù•πÖ∞∞Å¡Öç≠}ÕΩ’…çï}ô•πùï…¡…•π–†ômÕïçΩπêπç±Ωπî†§∞Åô•…Õ–πç±Ωπî†•t§§Ï(ÄÄÄÄÄÄÄÅ±ï–Åç°ÖπùïêÄÙÅAÖç≠MΩ’…çï•±îÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅÕ°Ñ»‘ÿËÄâåàπ…ï¡ïÖ–†ÿ–§∞(ÄÄÄÄÄÄÄÄÄÄÄÄ∏πô•…Õ–(ÄÄÄÄÄÄÄÅÙÏ(ÄÄÄÄÄÄÄÅÖÕÕï…—}πîÑ°Ω…•ù•πÖ∞∞Å¡Öç≠}ÕΩ’…çï}ô•πùï…¡…•π–†ômç°Öπùïê∞ÅÕïçΩπët§§Ï(ÄÄÄÅÙ((ÄÄÄÄçm—ïÕ—t(ÄÄÄÅô∏ÅµÖπ•ôïÕ—}¡Ω•π—ï…}Ωπ±Â}ÖëŸÖπçïÕ}Öô—ï…}Ö}πï›}çΩµ¡±ï—ï}…ï±ïÖÕî†§ÅÏ(ÄÄÄÄÄÄÄÅ±ï–Åï·¡ïç—ïêÄÙÅâ»åâÏâÕï…•ïÕ%êàËâÕ•ïùîà∞âŸï…Õ•Ω∏àËàƒ∏»∏¿à∞âô•±ïÃàÈmÏâ¡Ö—†àËâµΩëÃΩÑπ©Ö»à∞âÕ°Ñ»‘ÿàËâÖâåâıuÙàåÏ(ÄÄÄÄÄÄÄÅ±ï–ÅÕÖµîÄÙÅâ»åâÏ(ÄÄÄÄÄÄÄÄÄÄÄÄâÕï…•ïÕ%êàËÄâÕ•ïùîà∞(ÄÄÄÄÄÄÄÄÄÄÄÄâŸï…Õ•Ω∏àËÄàƒ∏»∏¿à∞(ÄÄÄÄÄÄÄÄÄÄÄÄâô•±ïÃàËÅmÏâ¡Ö—†àËÄâµΩëÃΩÑπ©Ö»à∞ÄâÕ°Ñ»‘ÿàËÄâÖâåâıt(ÄÄÄÄÄÄÄÅÙàåÏ(ÄÄÄÄÄÄÄÅ±ï–ÅÕÖµï}Ÿï…Õ•Ωπ}ç°ÖπùïêÄÙÅâ»åâÏâÕï…•ïÕ%êàËâÕ•ïùîà∞âŸï…Õ•Ω∏àËàƒ∏»∏¿à∞âô•±ïÃàÈmuÙàåÏ(ÄÄÄÄÄÄÄÅ±ï–ÅΩ±ëï»ÄÙÅâ»åâÏâÕï…•ïÕ%êàËâÕ•ïùîà∞âŸï…Õ•Ω∏àËàƒ∏ƒ∏‰à∞âô•±ïÃàÈmuÙàåÏ(ÄÄÄÄÄÄÄÅ±ï–Åπï›ï»ÄÙÅâ»åâÏâÕï…•ïÕ%êàËâÕ•ïùîà∞âŸï…Õ•Ω∏àËàƒ∏Ã∏¿à∞âô•±ïÃàÈmuÙàåÏ(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ°Õ°Ω’±ë}ÖëŸÖπçï}µÖπ•ôïÕ—}¡Ω•π—ï»°9Ωπî∞Åï·¡ïç—ïê§π’π›…Ö¿†§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ†ÖÕ°Ω’±ë}ÖëŸÖπçï}µÖπ•ôïÕ—}¡Ω•π—ï»°MΩµî°ÕÖµî§∞Åï·¡ïç—ïê§π’π›…Ö¿†§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ°Õ°Ω’±ë}ÖëŸÖπçï}µÖπ•ôïÕ—}¡Ω•π—ï»°MΩµî°Ω±ëï»§∞Åï·¡ïç—ïê§π’π›…Ö¿†§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ°Õ°Ω’±ë}ÖëŸÖπçï}µÖπ•ôïÕ—}¡Ω•π—ï»°MΩµî°ÕÖµï}Ÿï…Õ•Ωπ}ç°Öπùïê§∞Åï·¡ïç—ïê§π•Õ}ï…»†§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ°Õ°Ω’±ë}ÖëŸÖπçï}µÖπ•ôïÕ—}¡Ω•π—ï»°MΩµî°πï›ï»§∞Åï·¡ïç—ïê§π•Õ}ï…»†§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ°Õ°Ω’±ë}ÖëŸÖπçï}µÖπ•ôïÕ—}¡Ω•π—ï»°MΩµî°àâπΩ–Å©ÕΩ∏à§∞Åï·¡ïç—ïê§π•Õ}ï…»†§§Ï(ÄÄÄÅÙ((ÄÄÄÄçm—ïÕ—t(ÄÄÄÅô∏Å¡Öç≠}Ÿï…Õ•ΩπÕ}çΩµ¡Ö…ï}π’µï…•çÖ±±‰†§ÅÏ(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°¡Ö…Õï}¡Öç≠}Ÿï…Õ•Ω∏†àƒ∏ƒ¿∏¿à§∞ÅMΩµî††ƒ∞Äƒ¿∞Ä¿§§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ°¡Ö…Õï}¡Öç≠}Ÿï…Õ•Ω∏†àƒ∏»∏Ãµâï—Ñà§π•Õ}πΩπî†§§Ï(ÄÄÄÅÙ((ÄÄÄÄçm—ïÕ—t(ÄÄÄÅô∏Å¡Öç≠}±•çïπÕï}…ïŸ•ï›}ô±ÖùÕ}…ïÕ—…•ç—ïë}Öπë}’π≠πΩ›π}µï—ÖëÖ—Ñ†§ÅÏ(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°¡Öç≠}±•çïπÕï}Õ—Ö—’Ã°MΩµî†â5%Pà§§∞ÅAÖç≠1•çïπÕïM—Ö—’ÃËÈIïçΩùπ•Èïê§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°¡Öç≠}±•çïπÕï}Õ—Ö—’Ã°MΩµî†â1A0¥Ã∏¿à§§∞ÅAÖç≠1•çïπÕïM—Ö—’ÃËÈIïçΩùπ•Èïê§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°¡Öç≠}±•çïπÕï}Õ—Ö—’Ã°MΩµî†â±∞ÅI•ù°—ÃÅIïÕï…Ÿïêà§§∞ÅAÖç≠1•çïπÕïM—Ö—’ÃËÈAï…µ•ÕÕ•ΩπIï≈’•…ïê§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°¡Öç≠}±•çïπÕï}Õ—Ö—’Ã°MΩµî†â±∞µI•ù°—ÃµIïÕï…Ÿïêà§§∞ÅAÖç≠1•çïπÕïM—Ö—’ÃËÈAï…µ•ÕÕ•ΩπIï≈’•…ïê§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ†(ÄÄÄÄÄÄÄÄÄÄÄÅ¡Öç≠}±•çïπÕï}Õ—Ö—’Ã°MΩµî†â5%PÅ1•çïπÕî∞Å…–ÅIïÕΩ’…çïÃËÅ±∞ÅI•ù°—ÃÅIïÕï…Ÿïê∏à§§∞(ÄÄÄÄÄÄÄÄÄÄÄÅAÖç≠1•çïπÕïM—Ö—’ÃËÈAï…µ•ÕÕ•ΩπIï≈’•…ïê(ÄÄÄÄÄÄÄÄ§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°¡Öç≠}±•çïπÕï}Õ—Ö—’Ã°MΩµî†âIHà§§∞ÅAÖç≠1•çïπÕïM—Ö—’ÃËÈAï…µ•ÕÕ•ΩπIï≈’•…ïê§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°¡Öç≠}±•çïπÕï}Õ—Ö—’Ã°MΩµî†âÅ	dµ9µ9Ä–∏¿à§§∞ÅAÖç≠1•çïπÕïM—Ö—’ÃËÈAï…µ•ÕÕ•ΩπIï≈’•…ïê§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°¡Öç≠}±•çïπÕï}Õ—Ö—’Ã°MΩµî†â9Ω–ÅÕ¡ïç•ô•ïêà§§∞ÅAÖç≠1•çïπÕïM—Ö—’ÃËÈUπ≠πΩ›∏§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°¡Öç≠}±•çïπÕï}Õ—Ö—’Ã°MΩµî†â9eÅ1•çïπÕîà§§∞ÅAÖç≠1•çïπÕïM—Ö—’ÃËÈUπ≠πΩ›∏§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°¡Öç≠}±•çïπÕï}Õ—Ö—’Ã°9Ωπî§∞ÅAÖç≠1•çïπÕïM—Ö—’ÃËÈUπ≠πΩ›∏§Ï(ÄÄÄÅÙ((ÄÄÄÄçm—ïÕ—t(ÄÄÄÅô∏Åµ•πïç…Öô—}µï—ÖëÖ—Ö}…ÖπùïÕ}µÖ—ç°}Õï…•ïÕ}Ÿï…Õ•Ωπ}Öπë}ôÖ•±}ç±ΩÕïê†§ÅÏ(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ†(ÄÄÄÄÄÄÄÄÄÄÄÅµÖŸïπ}Ÿï…Õ•Ωπ}…Öπùï}çΩπ—Ö•πÃ†âlƒ∏»¿∞ƒ∏»ƒ§à∞Äàƒ∏»¿∏ƒà§∞(ÄÄÄÄÄÄÄÄÄÄÄÅMΩµî°—…’î§(ÄÄÄÄÄÄÄÄ§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ†(ÄÄÄÄÄÄÄÄÄÄÄÅµÖŸïπ}Ÿï…Õ•Ωπ}…Öπùï}çΩπ—Ö•πÃ†âlƒ∏»¿∏»∞ƒ∏»ƒ§à∞Äàƒ∏»¿∏ƒà§∞(ÄÄÄÄÄÄÄÄÄÄÄÅMΩµî°ôÖ±Õî§(ÄÄÄÄÄÄÄÄ§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ†(ÄÄÄÄÄÄÄÄÄÄÄÅµÖŸïπ}Ÿï…Õ•Ωπ}…Öπùï}çΩπ—Ö•πÃ†à†ƒ∏»¿∏ƒ∞ƒ∏»¿∏…tà∞Äàƒ∏»¿∏ƒà§∞(ÄÄÄÄÄÄÄÄÄÄÄÅMΩµî°ôÖ±Õî§(ÄÄÄÄÄÄÄÄ§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ†(ÄÄÄÄÄÄÄÄÄÄÄÅµÖŸïπ}Ÿï…Õ•Ωπ}…Öπùï}çΩπ—Ö•πÃ†âlƒ∏»¿∏≈tà∞Äàƒ∏»¿∏ƒà§∞(ÄÄÄÄÄÄÄÄÄÄÄÅMΩµî°—…’î§(ÄÄÄÄÄÄÄÄ§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ†(ÄÄÄÄÄÄÄÄÄÄÄÅµÖŸïπ}Ÿï…Õ•Ωπ}…Öπùï}çΩπ—Ö•πÃ†âlƒ∏»¿∏ƒ∞ƒ∏»¿∏»§±lƒ∏»¿∏–∞ƒ∏»ƒ§à∞Äàƒ∏»¿∏–à§∞(ÄÄÄÄÄÄÄÄÄÄÄÅMΩµî°—…’î§(ÄÄÄÄÄÄÄÄ§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ†(ÄÄÄÄÄÄÄÄÄÄÄÅµÖŸïπ}Ÿï…Õ•Ωπ}…Öπùï}çΩπ—Ö•πÃ†âlƒ∏»¡t±lƒ∏»¿∏≈tà∞Äàƒ∏»¿∏ƒà§∞(ÄÄÄÄÄÄÄÄÄÄÄÅMΩµî°—…’î§(ÄÄÄÄÄÄÄÄ§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°µÖŸïπ}Ÿï…Õ•Ωπ}…Öπùï}çΩπ—Ö•πÃ†àƒ∏»¿∏ƒà∞Äàƒ∏»¿∏ƒà§∞Å9Ωπî§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°µÖŸïπ}Ÿï…Õ•Ωπ}…Öπùï}çΩπ—Ö•πÃ†âπΩ–µÑµ…Öπùîà∞Äàƒ∏»¿∏ƒà§∞Å9Ωπî§Ï(ÄÄÄÅÙ((ÄÄÄÄçm—ïÕ—t(ÄÄÄÅô∏Å¡Öç≠}ÕΩ’…çï}…ï¡Ω…—Õ}µ•πïç…Öô—}çΩµ¡Ö—•â•±•—Â}ô…Ωµ}ôΩ…ùï}µï—ÖëÖ—Ñ†§ÅÏ(ÄÄÄÄÄÄÄÅ’ÕîÅÕ—êËÈ•ºËÈ]…•—îÏ((ÄÄÄÄÄÄÄÅ±ï–ÅÕΩ’…çîÄÙÅ—ïµ¡Ω…Ö…Â}ë•…ïç—Ω…‰†âëïŸï±Ω¡ï»µ¡Öç¨µµ•πïç…Öô–µ…Öπùîà§Ï(ÄÄÄÄÄÄÄÅ±ï–Åô•±îÄÙÅôÃËÈ•±îËÈç…ïÖ—î°ÕΩ’…çîπ©Ω•∏†âΩµ¡Ö—•â±îπ©Ö»à§§π’π›…Ö¿†§Ï(ÄÄÄÄÄÄÄÅ±ï–Åµ’–ÅÖ…ç°•ŸîÄÙÅÈ•¿ËÈi•¡]…•—ï»ËÈπï‹°ô•±î§Ï(ÄÄÄÄÄÄÄÅÖ…ç°•Ÿî(ÄÄÄÄÄÄÄÄÄÄÄÄπÕ—Ö…—}ô•±î†â5Qµ%9ΩµΩëÃπ—Ωµ∞à∞ÅÈ•¿ËÈ›…•—îËÈM•µ¡±ï•±ï=¡—•ΩπÃËÈëïôÖ’±–†§§(ÄÄÄÄÄÄÄÄÄÄÄÄπ’π›…Ö¿†§Ï(ÄÄÄÄÄÄÄÅÖ…ç°•Ÿî(ÄÄÄÄÄÄÄÄÄÄÄÄπ›…•—ï}Ö±∞†(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅàâµΩë1ΩÖëï»ıpâ©ÖŸÖôµ±pâqπ±ΩÖëï…Yï…Õ•Ω∏ıpâl–‹∞–‡•pâqπ±•çïπÕîıpâ5%Qpâqπmmëï¡ïπëïπç•ïÃπï·Öµ¡±ïuuqπµΩë%êıpâµ•πïç…Öô—pâqπµÖπëÖ—Ω…‰ı—…’ïqπŸï…Õ•ΩπIÖπùîıpâlƒ∏»¿∏»∞ƒ∏»ƒ•pâq∏à∞(ÄÄÄÄÄÄÄÄÄÄÄÄ§(ÄÄÄÄÄÄÄÄÄÄÄÄπ’π›…Ö¿†§Ï(ÄÄÄÄÄÄÄÅÖ…ç°•Ÿîπô•π•Õ††§π’π›…Ö¿†§Ï((ÄÄÄÄÄÄÄÅ±ï–Åô•±îÄÙÅôÃËÈ•±îËÈç…ïÖ—î°ÕΩ’…çîπ©Ω•∏†âIïŸ•ï‹π©Ö»à§§π’π›…Ö¿†§Ï(ÄÄÄÄÄÄÄÅ±ï–Åµ’–ÅÖ…ç°•ŸîÄÙÅÈ•¿ËÈi•¡]…•—ï»ËÈπï‹°ô•±î§Ï(ÄÄÄÄÄÄÄÅÖ…ç°•Ÿî(ÄÄÄÄÄÄÄÄÄÄÄÄπÕ—Ö…—}ô•±î†â5Qµ%9ΩµΩëÃπ—Ωµ∞à∞ÅÈ•¿ËÈ›…•—îËÈM•µ¡±ï•±ï=¡—•ΩπÃËÈëïôÖ’±–†§§(ÄÄÄÄÄÄÄÄÄÄÄÄπ’π›…Ö¿†§Ï(ÄÄÄÄÄÄÄÅÖ…ç°•Ÿî(ÄÄÄÄÄÄÄÄÄÄÄÄπ›…•—ï}Ö±∞†(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅàâµΩë1ΩÖëï»ıpâ©ÖŸÖôµ±pâqπ±ΩÖëï…Yï…Õ•Ω∏ıpàëÌôΩ…ùï}Ÿï…Õ•Ωπ}…Öπùïıpâqπ±•çïπÕîıpâ5%Qpâqπmmëï¡ïπëïπç•ïÃπï·Öµ¡±ïuuqπµΩë%êıpâµ•πïç…Öô—pâqπµÖπëÖ—Ω…‰ı—…’ïqπŸï…Õ•ΩπIÖπùîıpà¯Ùƒ∏»¿∏ƒÄƒ∏»≈pâq∏à∞(ÄÄÄÄÄÄÄÄÄÄÄÄ§(ÄÄÄÄÄÄÄÄÄÄÄÄπ’π›…Ö¿†§Ï(ÄÄÄÄÄÄÄÅÖ…ç°•Ÿîπô•π•Õ††§π’π›…Ö¿†§Ï((ÄÄÄÄÄÄÄÅ±ï–Åô•±îÄÙÅôÃËÈ•±îËÈç…ïÖ—î°ÕΩ’…çîπ©Ω•∏†âUπ…ïÕ—…•ç—ïêπ©Ö»à§§π’π›…Ö¿†§Ï(ÄÄÄÄÄÄÄÅ±ï–Åµ’–ÅÖ…ç°•ŸîÄÙÅÈ•¿ËÈi•¡]…•—ï»ËÈπï‹°ô•±î§Ï(ÄÄÄÄÄÄÄÅÖ…ç°•Ÿî(ÄÄÄÄÄÄÄÄÄÄÄÄπÕ—Ö…—}ô•±î†â5Qµ%9ΩµΩëÃπ—Ωµ∞à∞ÅÈ•¿ËÈ›…•—îËÈM•µ¡±ï•±ï=¡—•ΩπÃËÈëïôÖ’±–†§§(ÄÄÄÄÄÄÄÄÄÄÄÄπ’π›…Ö¿†§Ï(ÄÄÄÄÄÄÄÅÖ…ç°•Ÿî(ÄÄÄÄÄÄÄÄÄÄÄÄπ›…•—ï}Ö±∞†(ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÅàâµΩë1ΩÖëï»ıpâ©ÖŸÖôµ±pâqπ±ΩÖëï…Yï…Õ•Ω∏ıpâl–‡∞•pâqπ±•çïπÕîıpâ5%Qpâqπmmëï¡ïπëïπç•ïÃπï·Öµ¡±ïuuqπµΩë%êıpâµ•πïç…Öô—pâqπµÖπëÖ—Ω…‰ı—…’ïqπŸï…Õ•ΩπIÖπùîıpâpâq∏à∞(ÄÄÄÄÄÄÄÄÄÄÄÄ§(ÄÄÄÄÄÄÄÄÄÄÄÄπ’π›…Ö¿†§Ï(ÄÄÄÄÄÄÄÅÖ…ç°•Ÿîπô•π•Õ††§π’π›…Ö¿†§Ï((ÄÄÄÄÄÄÄÅ±ï–Å¡…ïŸ•ï‹ÄÙÅÕçÖπ}¡Öç≠}ÕΩ’…çî†ôÕΩ’…çî∞ÄâÕ•ïùîà∞Äàƒ∏»¿∏ƒà∞Äà–‹∏–∏ƒ¿à§π’π›…Ö¿†§Ï(ÄÄÄÄÄÄÄÅ±ï–Å•πçΩµ¡Ö—•â±îÄÙÅ¡…ïŸ•ï‹πô•±ïÃπ•—ï»†§πô•πê°Òô•±ïÅô•±îππÖµîÄÙÙÄâΩµ¡Ö—•â±îπ©Ö»à§π’π›…Ö¿†§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°•πçΩµ¡Ö—•â±îπµ•πïç…Öô—}çΩµ¡Ö—•â•±•—‰∞ÅAÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈ%πçΩµ¡Ö—•â±î§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°•πçΩµ¡Ö—•â±îπµ•πïç…Öô—}Ÿï…Õ•Ωπ}…ÖπùîπÖÕ}ëï…ïò†§∞ÅMΩµî†âlƒ∏»¿∏»∞ƒ∏»ƒ§à§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°•πçΩµ¡Ö—•â±îπôΩ…ùï}çΩµ¡Ö—•â•±•—‰∞ÅAÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈΩµ¡Ö—•â±î§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°•πçΩµ¡Ö—•â±îπôΩ…ùï}Ÿï…Õ•Ωπ}…ÖπùîπÖÕ}ëï…ïò†§∞ÅMΩµî†âl–‹∞–‡§à§§Ï(ÄÄÄÄÄÄÄÅ±ï–Å…ïŸ•ï‹ÄÙÅ¡…ïŸ•ï‹πô•±ïÃπ•—ï»†§πô•πê°Òô•±ïÅô•±îππÖµîÄÙÙÄâIïŸ•ï‹π©Ö»à§π’π›…Ö¿†§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°…ïŸ•ï‹πµ•πïç…Öô—}çΩµ¡Ö—•â•±•—‰∞ÅAÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈUπ≠πΩ›∏§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°…ïŸ•ï‹πµ•πïç…Öô—}Ÿï…Õ•Ωπ}…ÖπùîπÖÕ}ëï…ïò†§∞ÅMΩµî†à¯Ùƒ∏»¿∏ƒÄƒ∏»ƒà§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°…ïŸ•ï‹πôΩ…ùï}çΩµ¡Ö—•â•±•—‰∞ÅAÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈUπ≠πΩ›∏§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°…ïŸ•ï‹πôΩ…ùï}Ÿï…Õ•Ωπ}…ÖπùîπÖÕ}ëï…ïò†§∞ÅMΩµî†àëÌôΩ…ùï}Ÿï…Õ•Ωπ}…ÖπùïÙà§§Ï(ÄÄÄÄÄÄÄÅ±ï–Å’π…ïÕ—…•ç—ïêÄÙÅ¡…ïŸ•ï‹πô•±ïÃπ•—ï»†§πô•πê°Òô•±ïÅô•±îππÖµîÄÙÙÄâUπ…ïÕ—…•ç—ïêπ©Ö»à§π’π›…Ö¿†§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°’π…ïÕ—…•ç—ïêπµ•πïç…Öô—}çΩµ¡Ö—•â•±•—‰∞ÅAÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈΩµ¡Ö—•â±î§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°’π…ïÕ—…•ç—ïêπµ•πïç…Öô—}Ÿï…Õ•Ωπ}…Öπùî∞Å9Ωπî§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°’π…ïÕ—…•ç—ïêπôΩ…ùï}çΩµ¡Ö—•â•±•—‰∞ÅAÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈ%πçΩµ¡Ö—•â±î§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°’π…ïÕ—…•ç—ïêπôΩ…ùï}Ÿï…Õ•Ωπ}…ÖπùîπÖÕ}ëï…ïò†§∞ÅMΩµî†âl–‡∞§à§§Ï((ÄÄÄÄÄÄÄÅôÃËÈ…ïµΩŸï}ë•…}Ö±∞°ÕΩ’…çî§π’π›…Ö¿†§Ï(ÄÄÄÅÙ((ÄÄÄÄçm—ïÕ—t(ÄÄÄÅô∏Å…ï±ïÖÕï}’¡±ΩÖë}…ï—…Â}¡Ω±•çÂ}…ï—…•ïÕ}—°…Ω——±•πù}Öπë}Õï…Ÿï…}ï……Ω…Õ}Ωπ±‰†§ÅÏ(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ°…ï—…ÂÖâ±ï}’¡±ΩÖë}Õ—Ö—’Ã°…ï≈›ïÕ–ËÈM—Ö—’ÕΩëîËÈQ==}59e}IEUMQL§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ°…ï—…ÂÖâ±ï}’¡±ΩÖë}Õ—Ö—’Ã°…ï≈›ïÕ–ËÈM—Ö—’ÕΩëîËÈ	}Q]d§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ°…ï—…ÂÖâ±ï}’¡±ΩÖë}Õ—Ö—’Ã°…ï≈›ïÕ–ËÈM—Ö—’ÕΩëîËÈ%9QI91}MIYI}II=H§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ†Ö…ï—…ÂÖâ±ï}’¡±ΩÖë}Õ—Ö—’Ã°…ï≈›ïÕ–ËÈM—Ö—’ÕΩëîËÈ=I	%8§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ†Ö…ï—…ÂÖâ±ï}’¡±ΩÖë}Õ—Ö—’Ã°…ï≈›ïÕ–ËÈM—Ö—’ÕΩëîËÈU9AI=MM	1}9Q%Qd§§Ï(ÄÄÄÅÙ((ÄÄÄÄçm—ïÕ—t(ÄÄÄÅô∏Åù•—°’â}ëïŸï±Ω¡ï…}ÖççïÕÕ}…ï≈’•…ïÕ}çΩπ—ïπ—Õ}›…•—ï}¡ï…µ•ÕÕ•Ω∏†§ÅÏ(ÄÄÄÄÄÄÄÅ±ï–Åµ’–Å¡ï…µ•ÕÕ•ΩπÃÄÙÅ	Q…ïï5Ö¿ËÈπï‹†§Ï(ÄÄÄÄÄÄÄÅ¡ï…µ•ÕÕ•ΩπÃπ•πÕï…–†âçΩπ—ïπ—Ãàπ•π—º†§∞Äâ›…•—îàπ•π—º†§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ°•πÕ—Ö±±Ö—•Ωπ}°ÖÕ}çΩπ—ïπ—Õ}›…•—î†ô¡ï…µ•ÕÕ•ΩπÃ§§Ï(ÄÄÄÄÄÄÄÅ¡ï…µ•ÕÕ•ΩπÃπ•πÕï…–†âçΩπ—ïπ—Ãàπ•π—º†§∞Äâ…ïÖêàπ•π—º†§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ†Ö•πÕ—Ö±±Ö—•Ωπ}°ÖÕ}çΩπ—ïπ—Õ}›…•—î†ô¡ï…µ•ÕÕ•ΩπÃ§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ†Ö•πÕ—Ö±±Ö—•Ωπ}°ÖÕ}çΩπ—ïπ—Õ}›…•—î†ô	Q…ïï5Ö¿ËÈπï‹†§§§Ï(ÄÄÄÅÙ((ÄÄÄÄçm—ïÕ—t(ÄÄÄÅô∏Åù•—°’â}ëïŸï±Ω¡ï…}ÖççïÕÕ}…ï≈’•…ïÕ}’Õï…}›…•—ï}Ωπ}•πÕ—Ö±±ïë}…ï¡ΩÕ•—Ω…‰†§ÅÏ(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ°…ï¡ΩÕ•—Ω…Â}¡ï…µ•ÕÕ•ΩπÕ}Ö±±Ω›}›…•—î°MΩµî°Iï¡ΩÕ•—Ω…ÂAï…µ•ÕÕ•ΩπÃÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ¡’Õ†ËÅMΩµî°—…’î§∞(ÄÄÄÄÄÄÄÄÄÄÄÅÖëµ•∏ËÅMΩµî°ôÖ±Õî§∞(ÄÄÄÄÄÄÄÅÙ§§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ°…ï¡ΩÕ•—Ω…Â}¡ï…µ•ÕÕ•ΩπÕ}Ö±±Ω›}›…•—î°MΩµî°Iï¡ΩÕ•—Ω…ÂAï…µ•ÕÕ•ΩπÃÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ¡’Õ†ËÅMΩµî°ôÖ±Õî§∞(ÄÄÄÄÄÄÄÄÄÄÄÅÖëµ•∏ËÅMΩµî°—…’î§∞(ÄÄÄÄÄÄÄÅÙ§§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ†Ö…ï¡ΩÕ•—Ω…Â}¡ï…µ•ÕÕ•ΩπÕ}Ö±±Ω›}›…•—î°MΩµî°Iï¡ΩÕ•—Ω…ÂAï…µ•ÕÕ•ΩπÃÅÏ(ÄÄÄÄÄÄÄÄÄÄÄÅ¡’Õ†ËÅMΩµî°ôÖ±Õî§∞(ÄÄÄÄÄÄÄÄÄÄÄÅÖëµ•∏ËÅMΩµî°ôÖ±Õî§∞(ÄÄÄÄÄÄÄÅÙ§§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ†Ö…ï¡ΩÕ•—Ω…Â}¡ï…µ•ÕÕ•ΩπÕ}Ö±±Ω›}›…•—î°9Ωπî§§Ï(ÄÄÄÅÙ((ÄÄÄÄçm—ïÕ—t(ÄÄÄÅô∏Åù•—°’â}Ö¡¡}ç±•ïπ—}•ë}ŸÖ±•ëÖ—•Ωπ}…ï©ïç—Õ}’…±Õ}Öπë}ïµ¡—Â}ŸÖ±’ïÃ†§ÅÏ(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ°ŸÖ±•ë}ù•—°’â}Ö¡¡}ç±•ïπ—}•ê†â%ÿƒπÖâç|ƒ»Ã¥–‘ÿà§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ†ÖŸÖ±•ë}ù•—°’â}Ö¡¡}ç±•ïπ—}•ê†àà§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ†ÖŸÖ±•ë}ù•—°’â}Ö¡¡}ç±•ïπ—}•ê†â°——¡ÃËºΩù•—°’àπçΩ¥à§§Ï(ÄÄÄÅÙ((ÄÄÄÄçm—ïÕ—t(ÄÄÄÅô∏ÅΩôô•ç•Ö±}ÖÕÕï—}πÖµïÕ}Ö…ï}ô±Ö—}©Ö…}πÖµïÕ}›•—°Ω’—}¡Ö—°}Ω…}Õ°ï±±}ç°Ö…Öç—ï…Ã†§ÅÏ(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ°ŸÖ±•ë}Ωôô•ç•Ö±}ÖÕÕï—}πÖµî†â·Öµ¡±îÅ5Ωê¥ƒ∏»∏Ãπ©Ö»à§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ†ÖŸÖ±•ë}Ωôô•ç•Ö±}ÖÕÕï—}πÖµî†à∏∏Ω·Öµ¡±îπ©Ö»à§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ†ÖŸÖ±•ë}Ωôô•ç•Ö±}ÖÕÕï—}πÖµî†âÕ’âë•»Ω·Öµ¡±îπ©Ö»à§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ†ÖŸÖ±•ë}Ωôô•ç•Ö±}ÖÕÕï—}πÖµî†â·Öµ¡±îπ©Ö»Äà§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ†ÖŸÖ±•ë}Ωôô•ç•Ö±}ÖÕÕï—}πÖµî†â·Öµ¡±îπ©Ö»Ì…¥Äµ…òà§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ†ÖŸÖ±•ë}Ωôô•ç•Ö±}ÖÕÕï—}πÖµî†àπ°•ëëï∏π©Ö»à§§Ï(ÄÄÄÅÙ((ÄÄÄÄçm—ïÕ—t(ÄÄÄÅô∏Å¡Öç≠}Ÿï…Õ•ΩπÕ}Ö…ï}Õ—Öâ±ï}—°…ïï}¡Ö…—}π’µâï…Ã†§ÅÏ(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ°ŸÖ±•ë}¡Öç≠}Ÿï…Õ•Ω∏†àƒ∏»∏¿à§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ°ŸÖ±•ë}¡Öç≠}Ÿï…Õ•Ω∏†à¿∏¿∏ƒà§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ†ÖŸÖ±•ë}¡Öç≠}Ÿï…Õ•Ω∏†àƒ∏»à§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ†ÖŸÖ±•ë}¡Öç≠}Ÿï…Õ•Ω∏†à¿ƒ∏»∏Ãà§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ†ÖŸÖ±•ë}¡Öç≠}Ÿï…Õ•Ω∏†àƒ∏»∏Ãµâï—Ñà§§Ï(ÄÄÄÅÙ((ÄÄÄÄçm—ïÕ—t(ÄÄÄÅô∏ÅâÖÕîÿ—}çΩπ—ïπ—}Öπë}…ï±ïÖÕï}ÖÕÕï—}πÖµïÕ}…Ω’πë}—…•¿†§ÅÏ(ÄÄÄÄÄÄÄÅ±ï–ÅΩ…•ù•πÖ∞ÄÙÅàâÌÕï…•ïÃËÅù°Ω’±ÃÅΩ’—â…ïÖ≠ÙàÏ(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°âÖÕîÿ—}ëïçΩëî†ôâÖÕîÿ—}ïπçΩëî°Ω…•ù•πÖ∞§§π’π›…Ö¿†§∞ÅΩ…•ù•πÖ∞§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°ïπçΩëï}¡Ö—°}çΩµ¡Ωπïπ–†â5ΩêÅ9ÖµîÄ†ƒ§π©Ö»à§∞Äâ5Ωêî»¡9Öµîî»¿î»‡ƒî»‰π©Ö»à§Ï(ÄÄÄÅÙ((ÄÄÄÄçm—ïÕ—t(ÄÄÄÅô∏Å¡Öç≠}ÕΩ’…çï}¡’â±•Õ°ïÕ}Ωπ±Â}…ΩΩ—}ôΩ…ùï}©Ö…Õ}Öπë}•ùπΩ…ïÕ}¡ï…ÕΩπÖ±}Öπë}çΩπô•ù}ô•±ïÃ†§ÅÏ(ÄÄÄÄÄÄÄÅ±ï–ÅÕΩ’…çîÄÙÅ—ïµ¡Ω…Ö…Â}ë•…ïç—Ω…‰†âëïŸï±Ω¡ï»µ¡Öç¨µÕΩ’…çîà§Ï(ÄÄÄÄÄÄÄÅôÃËÈç…ïÖ—ï}ë•…}Ö±∞°ÕΩ’…çîπ©Ω•∏†â¡ï…ÕΩπÖ±ïÃà§§π’π›…Ö¿†§Ï(ÄÄÄÄÄÄÄÅôÃËÈç…ïÖ—ï}ë•…}Ö±∞°ÕΩ’…çîπ©Ω•∏†âçΩπô•úà§§π’π›…Ö¿†§Ï(ÄÄÄÄÄÄÄÅ›…•—ï}ôΩ…ùï}©Ö»†ôÕΩ’…çîπ©Ω•∏†â=ôô•ç•Ö∞Å5Ωêπ©Ö»à§§Ï(ÄÄÄÄÄÄÄÅ›…•—ï}ôΩ…ùï}©Ö»†ôÕΩ’…çîπ©Ω•∏†â¡ï…ÕΩπÖ±ïÃΩAï…ÕΩπÖ∞Å5Ωêπ©Ö»à§§Ï(ÄÄÄÄÄÄÄÅôÃËÈ›…•—î°ÕΩ’…çîπ©Ω•∏†âçΩπô•úΩΩ¡—•ΩπÃπ—·–à§∞Åàâ’Õï»ÅÕï——•πùÃà§π’π›…Ö¿†§Ï(ÄÄÄÄÄÄÄÅôÃËÈ›…•—î°ÕΩ’…çîπ©Ω•∏†âΩ¡—•ΩπÃπ—·–à§∞Åàâ’Õï»ÅÕï——•πùÃà§π’π›…Ö¿†§Ï((ÄÄÄÄÄÄÄÅ±ï–Å¡…ïŸ•ï‹ÄÙÅÕçÖπ}¡Öç≠}ÕΩ’…çî†ôÕΩ’…çî∞ÄâÕ•ïùîà∞Äàƒ∏»¿∏ƒà∞Äà–‹∏–∏ƒ¿à§π’π›…Ö¿†§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°¡…ïŸ•ï‹πô•±ïÃπ±ï∏†§∞Äƒ§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°¡…ïŸ•ï‹πô•±ïÕl¡tππÖµî∞Äâ=ôô•ç•Ö∞Å5Ωêπ©Ö»à§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°¡…ïŸ•ï‹πô•±ïÕl¡tπ±•çïπÕîπÖÕ}ëï…ïò†§∞ÅMΩµî†â5%Pà§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°¡…ïŸ•ï‹πô•±ïÕl¡tπ±•çïπÕï}Õ—Ö—’Ã∞ÅAÖç≠1•çïπÕïM—Ö—’ÃËÈIïçΩùπ•Èïê§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°¡…ïŸ•ï‹πô•±ïÕl¡tπµ•πïç…Öô—}çΩµ¡Ö—•â•±•—‰∞ÅAÖç≠Ωµ¡Ö—•â•±•—ÂM—Ö—’ÃËÈUπ≠πΩ›∏§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°¡…ïŸ•ï‹πÕΩ’…çï}ô•πùï…¡…•π–π±ï∏†§∞Äÿ–§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°¡…ïŸ•ï‹πô•±ïÕl¡tπÕ°Ñ»‘ÿ∞ÅÕ°Ñ»‘Ÿ}ô•±î†ôÕΩ’…çîπ©Ω•∏†â=ôô•ç•Ö∞Å5Ωêπ©Ö»à§§π’π›…Ö¿†§§Ï(ÄÄÄÄÄÄÄÅÖÕÕï…—}ïƒÑ°¡…ïŸ•ï‹π—Ω—Ö±}âÂ—ïÃ∞Å¡…ïŸ•ï‹πô•±ïÕl¡tπÕ•Èï}âÂ—ïÃ§Ï((ÄÄÄÄÄÄÄÅôÃËÈ…ïµΩŸï}ë•…}Ö±∞°ÕΩ’…çî§π’π›…Ö¿†§Ï(ÄÄÄÅÙ((ÄÄÄÄçm—ïÕ—t(ÄÄÄÅô∏Å¡Öç≠}ÕΩ’…çï}…ïô’ÕïÕ}—Ω}¡’â±•Õ°}—°ï}¡ï…ÕΩπÖ±}µΩëÕ}ë•…ïç—Ω…Â}ÖÕ}Ωôô•ç•Ö∞†§ÅÏ(ÄÄÄÄÄÄÄÅ±ï–ÅÕΩ’…çîÄÙÅ—ïµ¡Ω…Ö…Â}ë•…ïç—Ω…‰†âëïŸï±Ω¡ï»µ¡ï…ÕΩπÖ∞µÕΩ’…çîà§Ï(ÄÄÄÄÄÄÄÅ›…•—ï}ôΩ…ùï}©Ö»†ôÕΩ’…çîπ©Ω•∏†âAï…ÕΩπÖ∞Å5Ωêπ©Ö»à§§Ï(ÄÄÄÄÄÄÄÅ±ï–Å¡ï…ÕΩπÖ∞ÄÙÅÕΩ’…çîπ©Ω•∏†âAï…ÕΩπÖ±ïÃà§Ï(ÄÄÄÄÄÄÄÅôÃËÈç…ïÖ—ï}ë•»†ô¡ï…ÕΩπÖ∞§π’π›…Ö¿†§Ï((ÄÄÄÄÄÄÄÅÖÕÕï…–Ñ°ÕçÖπ}¡Öç≠}ÕΩ’…çî†ô¡ï…ÕΩπÖ∞∞ÄâÕ•ïùîà∞Äàƒ∏»¿∏ƒà∞Äà–‹∏–∏ƒ¿à§π•Õ}ï…»†§§Ï(ÄÄÄÄÄÄÄÅôÃËÈ…ïµΩŸï}ë•…}Ö±∞°ÕΩ’…çî§π’π›…Ö¿†§Ï(ÄÄÄÅÙ)Ù

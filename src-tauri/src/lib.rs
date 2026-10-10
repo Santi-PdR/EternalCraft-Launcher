@@ -1994,6 +1994,19 @@ fn valid_offline_uuid(uuid: &str) -> bool {
     compact.len() == 32 && compact.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn offline_uuid_for_profile(
+    username: &str,
+    saved_username: Option<&str>,
+    saved_uuid: Option<&str>,
+) -> String {
+    if saved_username == Some(username) {
+        if let Some(uuid) = saved_uuid.filter(|uuid| valid_offline_uuid(uuid)) {
+            return uuid.to_string();
+        }
+    }
+    Account::offline(username).uuid().to_string()
+}
+
 #[tauri::command]
 fn login_offline(app: AppHandle, username: String) -> Result<Bootstrap, String> {
     let username = username.trim();
@@ -2001,12 +2014,11 @@ fn login_offline(app: AppHandle, username: String) -> Result<Bootstrap, String> 
         return Err("El nombre local debe tener entre 3 y 16 caracteres: letras ASCII, números o guion bajo".into());
     }
     let mut settings = read_settings(&app)?;
-    let offline_uuid = if settings.offline_username.as_deref() == Some(username) {
-        settings.offline_uuid.clone().filter(|uuid| valid_offline_uuid(uuid))
-    } else {
-        None
-    }
-    .unwrap_or_else(|| Account::offline(username).uuid().to_string());
+    let offline_uuid = offline_uuid_for_profile(
+        username,
+        settings.offline_username.as_deref(),
+        settings.offline_uuid.as_deref(),
+    );
     settings.offline_username = Some(username.to_string());
     settings.offline_uuid = Some(offline_uuid);
     settings.account_mode = Some(AccountMode::Offline);
@@ -2145,11 +2157,11 @@ fn launch_minecraft(app: AppHandle, series_id: String) -> Result<MinecraftStatus
         else {
             return Err("Configura un nombre válido para tu perfil local antes de jugar.".into());
         };
-        let offline_uuid = settings
-            .offline_uuid
-            .clone()
-            .filter(|uuid| valid_offline_uuid(uuid))
-            .unwrap_or_else(|| Account::offline(username).uuid().to_string());
+        let offline_uuid = offline_uuid_for_profile(
+            username,
+            settings.offline_username.as_deref(),
+            settings.offline_uuid.as_deref(),
+        );
         if settings.offline_uuid.as_deref() != Some(offline_uuid.as_str()) {
             settings.offline_uuid = Some(offline_uuid.clone());
             write_settings(&app, &settings)?;
@@ -2550,6 +2562,20 @@ mod tests {
         assert!(super::valid_offline_username("Abc"));
         assert!(super::valid_offline_username("A123456789012345"));
         assert!(super::valid_offline_uuid("54f3d715-9c21-4ab5-a321-123456789abc"));
+    }
+
+    #[test]
+    fn offline_player_uuid_stays_stable_for_the_same_saved_profile() {
+        let first = super::offline_uuid_for_profile("Santi_17", None, None);
+        assert!(super::valid_offline_uuid(&first));
+        assert_eq!(
+            super::offline_uuid_for_profile("Santi_17", Some("Santi_17"), Some(&first)),
+            first
+        );
+        assert_ne!(
+            super::offline_uuid_for_profile("Other_17", Some("Santi_17"), Some(&first)),
+            first
+        );
     }
 
     #[test]

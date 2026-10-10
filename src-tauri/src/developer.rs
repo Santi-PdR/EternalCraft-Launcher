@@ -300,7 +300,7 @@ pub(super) fn begin_github_developer_login(app: AppHandle) -> Result<DeveloperLo
         .lock()
         .map_err(|_| "El estado de autorización GitHub quedó bloqueado".to_string())?
         .pending = Some(PendingDeviceAuthorization {
-            client_id,
+            client_id: client_id.to_string(),
             device_code: device.device_code,
             user_code: device.user_code.clone(),
         interval,

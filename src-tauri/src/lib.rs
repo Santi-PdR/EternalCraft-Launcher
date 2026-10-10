@@ -89,6 +89,8 @@ struct Settings {
     theme_migrated: bool,
     #[serde(default)]
     background_file: Option<String>,
+    #[serde(default)]
+    background_preset: Option<String>,
     #[serde(default, skip_serializing)]
     microsoft_client_id: Option<String>,
     #[serde(default)]
@@ -162,6 +164,7 @@ struct Bootstrap {
     log_file: String,
     theme_id: String,
     background_path: Option<String>,
+    background_preset: Option<String>,
     java: JavaStatus,
     java_manually_selected: bool,
     managed_game_directories: BTreeMap<String, String>,
@@ -1573,6 +1576,7 @@ fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
         log_file,
         theme_id: resolve_theme(settings.theme_id),
         background_path: background_path(app, settings.background_file.as_deref())?,
+        background_preset: settings.background_preset,
         java,
         java_manually_selected,
         managed_game_directories,
@@ -1619,6 +1623,32 @@ fn set_theme(app: AppHandle, theme_id: String) -> Result<Bootstrap, String> {
     settings.theme_id = Some(theme_id);
     settings.theme_migrated = true;
     write_settings(&app, &settings)?;
+    make_bootstrap(&app)
+}
+
+fn is_valid_background_preset(preset_id: &str) -> bool {
+    matches!(preset_id, "siege" | "ghouls-outbreak")
+}
+
+#[tauri::command]
+fn set_background_preset(app: AppHandle, preset_id: String) -> Result<Bootstrap, String> {
+    if preset_id != "auto" && !is_valid_background_preset(&preset_id) {
+        return Err("El fondo seleccionado no está disponible".into());
+    }
+    let mut settings = read_settings(&app)?;
+    let previous = settings.background_file.take();
+    settings.background_preset = Some(preset_id);
+    write_settings(&app, &settings)?;
+    if let Some(name) = previous.filter(|name| is_safe_background_filename(name)) {
+        if let Some(path) = app
+            .path()
+            .app_config_dir()
+            .ok()
+            .map(|dir| dir.join("appearance").join(name))
+        {
+            let _ = fs::remove_file(path);
+        }
+    }
     make_bootstrap(&app)
 }
 
@@ -1703,6 +1733,7 @@ fn select_background(app: AppHandle) -> Result<Bootstrap, String> {
         }
     };
     let previous = settings.background_file.replace(file_name);
+    settings.background_preset = None;
     if let Err(error) = write_settings(&app, &settings) {
         let _ = fs::remove_file(&destination);
         return Err(error);
@@ -1719,6 +1750,7 @@ fn select_background(app: AppHandle) -> Result<Bootstrap, String> {
 fn clear_background(app: AppHandle) -> Result<Bootstrap, String> {
     let mut settings = read_settings(&app)?;
     let previous = settings.background_file.take();
+    settings.background_preset = None;
     write_settings(&app, &settings)?;
     if let Some(name) = previous.filter(|name| is_safe_background_filename(name)) {
         if let Some(path) = app
@@ -2518,6 +2550,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_bootstrap,
             set_theme,
+            set_background_preset,
             select_background,
             clear_background,
             get_launcher_logs,
@@ -2912,6 +2945,7 @@ mod tests {
             theme_id: Some("ghouls".into()),
             theme_migrated: true,
             background_file: Some("background-123.webp".into()),
+            background_preset: Some("ghouls-outbreak".into()),
             microsoft_client_id: None,
             memory_limit_mb: Some(4096),
             offline_username: Some("Player_17".into()),
@@ -2929,6 +2963,7 @@ mod tests {
             decoded.background_file.as_deref(),
             Some("background-123.webp")
         );
+        assert_eq!(decoded.background_preset.as_deref(), Some("ghouls-outbreak"));
         assert_eq!(decoded.memory_limit_mb, Some(4096));
         assert_eq!(decoded.offline_username.as_deref(), Some("Player_17"));
         assert_eq!(decoded.offline_uuid.as_deref(), Some("54f3d715-9c21-4ab5-a321-123456789abc"));
@@ -2997,6 +3032,14 @@ mod tests {
         };
         assert!(migrate_theme_preference(&mut explicit_theme));
         assert_eq!(explicit_theme.theme_id.as_deref(), Some("ghouls"));
+    }
+
+    #[test]
+    fn only_bundled_series_background_presets_are_accepted() {
+        assert!(is_valid_background_preset("siege"));
+        assert!(is_valid_background_preset("ghouls-outbreak"));
+        assert!(!is_valid_background_preset("https://attacker.invalid/image.png"));
+        assert!(!is_valid_background_preset("unknown"));
     }
 
     #[test]

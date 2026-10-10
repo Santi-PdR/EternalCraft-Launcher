@@ -16,7 +16,6 @@
   let activePage = $state<'home' | 'mods' | 'developer' | 'settings' | 'support'>('home');
   let settingsTab = $state<'game' | 'account' | 'appearance' | 'storage'>('game');
   let welcomeOpen = $state(false);
-  let firstRunStep = $state<'account' | 'install'>('account');
   let loading = $state(true);
   let busy = $state(false);
   let error = $state('');
@@ -57,7 +56,23 @@
   let publishingPack = $state(false);
   let packPublishMessage = $state('');
   let publishVersion = $state('1.0.0');
-  let backgroundUrl = $derived(bootstrap?.backgroundPath ? convertFileSrc(bootstrap.backgroundPath) : '');
+  const backgroundPresets: Record<string, { label: string; url: string; source: string }> = {
+    siege: {
+      label: 'Asedio',
+      url: 'https://static.planetminecraft.com/files/resource_media/screenshot/1341/Screen-Shot-2013-10-11-at-93803-AM_6519535_thumb.jpg',
+      source: 'https://www.planetminecraft.com/project/siege-the-castle/'
+    },
+    'ghouls-outbreak': {
+      label: 'Apocalipsis',
+      url: 'https://images.steamusercontent.com/ugc/770525169909690704/E1780BB425DDA84B4F29DBEAD58D4619F78FC21D/?ima=fit&imcolor=%23000000&imh=1000&impolicy=Letterbox&imw=1600&letterbox=false',
+      source: 'https://steamcommunity.com/sharedfiles/filedetails/?id=928913937'
+    }
+  };
+  let backgroundUrl = $derived.by(() => {
+    if (bootstrap?.backgroundPath) return convertFileSrc(bootstrap.backgroundPath);
+    const presetId = bootstrap?.backgroundPreset === 'auto' ? selected?.id : bootstrap?.backgroundPreset;
+    return presetId ? backgroundPresets[presetId]?.url ?? '' : '';
+  });
   let themeAccent = $derived(bootstrap?.themeId === 'ghouls' ? '#bf624d' : bootstrap?.themeId === 'siege' ? '#d1a35b' : selected?.accent ?? '#d1a35b');
 
   onMount(() => {
@@ -233,12 +248,21 @@
   async function refresh() {
     loading = true;
     error = '';
+    let prepareInitialInstance = false;
     try {
       bootstrap = await invoke<Bootstrap>('get_bootstrap');
-      if (!localStorage.getItem('eternalcraft-welcome-v1')) {
-        firstRunStep = bootstrap.microsoftProfile || bootstrap.accountMode === 'offline' ? 'install' : 'account';
-        welcomeOpen = true;
+      if (!localStorage.getItem('eternalcraft-welcome-v2')) {
+        const hasAccount = Boolean(bootstrap.microsoftProfile || bootstrap.accountMode === 'offline');
+        if (hasAccount) {
+          localStorage.setItem('eternalcraft-welcome-v1', 'done');
+        } else {
+          welcomeOpen = true;
+        }
       }
+      prepareInitialInstance = Boolean(
+        (bootstrap.microsoftProfile || bootstrap.accountMode === 'offline') &&
+        !bootstrap.installedProfiles[bootstrap.activeSeriesId]
+      );
       offlineUsernameDraft = bootstrap.offlineUsername ?? '';
       memoryDraft = bootstrap.memory.selectedMb;
       developerLoginStatus = await invoke<DeveloperLoginStatus>('github_developer_status');
@@ -248,6 +272,7 @@
     } finally {
       loading = false;
     }
+    if (prepareInitialInstance) void installBase();
   }
 
   async function beginGitHubDeveloperLogin() {
@@ -308,7 +333,7 @@
     try {
       bootstrap = await invoke<Bootstrap>('login_microsoft');
       notice = `Sesión iniciada como ${bootstrap.microsoftProfile?.username ?? 'Minecraft'}`;
-      if (welcomeOpen) firstRunStep = 'install';
+      if (welcomeOpen) finishWelcomeAndPrepareInstance();
     } catch (reason) {
       error = String(reason);
       notice = '';
@@ -336,9 +361,8 @@
     try {
       bootstrap = await invoke<Bootstrap>('login_offline', { username: offlineUsernameDraft });
       offlineUsernameDraft = bootstrap.offlineUsername ?? '';
-      localStorage.setItem('eternalcraft-welcome-v1', 'done');
-      if (welcomeOpen) firstRunStep = 'install';
       notice = `Perfil local listo: ${bootstrap.offlineUsername}. Los servidores que requieren autenticación Microsoft no aceptan este perfil.`;
+      if (welcomeOpen) finishWelcomeAndPrepareInstance();
     } catch (reason) {
       error = String(reason);
     } finally {
@@ -492,6 +516,13 @@
     catch (reason) { error = String(reason); }
   }
 
+  async function saveBackgroundPreset(presetId: string) {
+    try {
+      bootstrap = await invoke<Bootstrap>('set_background_preset', { presetId });
+      notice = presetId === 'auto' ? 'Fondo de la serie activa restaurado' : 'Fondo guardado';
+    } catch (reason) { error = String(reason); }
+  }
+
   async function chooseBackground() {
     try { bootstrap = await invoke<Bootstrap>('select_background'); notice = bootstrap.backgroundPath ? 'Fondo guardado en este equipo' : ''; }
     catch (reason) { error = String(reason); }
@@ -621,13 +652,13 @@
   }
 
   function continueWithoutAccount() {
-    localStorage.setItem('eternalcraft-welcome-v1', 'done');
-    firstRunStep = 'install';
+    finishWelcomeAndPrepareInstance();
   }
 
-  function finishWelcome() {
-    localStorage.setItem('eternalcraft-welcome-v1', 'done');
+  function finishWelcomeAndPrepareInstance() {
+    localStorage.setItem('eternalcraft-welcome-v2', 'done');
     welcomeOpen = false;
+    if (selected && !bootstrap?.installedProfiles[selected.id]) void installBase();
   }
 
   async function copySupportDiagnostics() {
@@ -704,7 +735,7 @@
       {#if notice}<div class="toast" role="status">{notice}</div>{/if}
       {#if launcherUpdateState === 'available'}<div class="toast launcher-update-toast" role="status"><span>EternalCraft {launcherUpdateVersion} está listo</span><button class="button primary" onclick={installLauncherUpdate}>Actualizar</button></div>{/if}
 
-      {#if welcomeOpen}<div class="welcome-backdrop" role="presentation"><div class="welcome-dialog" role="dialog" aria-modal="true" aria-labelledby="welcome-title" tabindex="-1"><span class="eyebrow">BIENVENIDO A ETERNALCRAFT</span>{#if firstRunStep === 'account'}<h1 id="welcome-title">¿Cómo quieres empezar?</h1><p>Conecta una cuenta Microsoft para jugar en servidores autenticados o configura un perfil local para servidores en modo offline.</p><button class="button primary welcome-action" onclick={loginMicrosoft} disabled={busy || !bootstrap.microsoftLoginAvailable}>{busy ? 'Abriendo Microsoft…' : 'Iniciar sesión con Microsoft'}</button>{#if !bootstrap.microsoftLoginAvailable}<small>El acceso Microsoft requiere que el propietario configure el Client ID de la aplicación. Es distinto al Client ID de GitHub.</small>{/if}<label class="account-name-field">Nombre del perfil local<input class="text-input" bind:value={offlineUsernameDraft} maxlength="16" autocomplete="nickname" placeholder="Ejemplo: Santi" /></label><button class="button secondary welcome-action" onclick={loginOffline} disabled={busy}>{busy ? 'Guardando perfil…' : 'Usar perfil local'}</button><small>El perfil local no inicia sesión ni verifica propiedad del juego. No puede entrar a servidores que exigen autenticación Microsoft.</small><button class="text-link welcome-browse" onclick={continueWithoutAccount}>Explorar sin configurar una cuenta</button>{:else}<h1 id="welcome-title">Prepara tu primera serie</h1><p>{bootstrap.installedProfiles[selected.id] ? 'Tu instancia ya está lista.' : `Puedes instalar ahora Minecraft ${selected.minecraftVersion}, Forge y Java 17 para ${selected.name}.`}</p>{#if !bootstrap.installedProfiles[selected.id]}<button class="button primary welcome-action" onclick={() => { finishWelcome(); void installBase(); }}>Instalar Forge y Java 17</button>{/if}<button class="button secondary welcome-action" onclick={finishWelcome}>Lo haré después</button>{/if}</div></div>{/if}
+      {#if welcomeOpen}<div class="welcome-backdrop" role="presentation"><div class="welcome-dialog" role="dialog" aria-modal="true" aria-labelledby="welcome-title" tabindex="-1"><span class="eyebrow">BIENVENIDO A ETERNALCRAFT</span><h1 id="welcome-title">Elige cómo entrar</h1><p>Conecta Microsoft para servidores autenticados o entra con un nick offline. Al continuar, EternalCraft preparará una instancia nueva y aislada para {selected.name}; Java 17 se instalará automáticamente si hace falta.</p><button class="button primary welcome-action" onclick={loginMicrosoft} disabled={busy || !bootstrap.microsoftLoginAvailable}>{busy ? 'Abriendo Microsoft…' : 'Iniciar sesión con Microsoft'}</button>{#if !bootstrap.microsoftLoginAvailable}<small>El acceso Microsoft todavía no está configurado. Puedes usar tu nick offline ahora y añadir la cuenta Microsoft en Ajustes.</small>{/if}<label class="account-name-field">Nick para jugar sin cuenta<input class="text-input" bind:value={offlineUsernameDraft} minlength="3" maxlength="16" autocomplete="nickname" placeholder="De 3 a 16 letras, números o _" /></label><button class="button secondary welcome-action" onclick={loginOffline} disabled={busy || !/^[A-Za-z0-9_]{3,16}$/.test(offlineUsernameDraft.trim())}>{busy ? 'Guardando nick…' : 'Entrar con nick offline'}</button><small>El perfil offline no verifica la propiedad del juego y no entra a servidores que exigen Microsoft.</small><button class="text-link welcome-browse" onclick={continueWithoutAccount}>Continuar sin configurar cuenta ahora</button></div></div>{/if}
 
       {#if activePage === 'home'}
         <section class="page home-page">
@@ -729,7 +760,7 @@
             {/each}
           </div>
 
-          <div class="play-panel"><div class="play-copy"><span class="eyebrow">CARPETA DE JUEGO · {selected.name}</span><h3>{isLinked(selected) ? 'Carpeta seleccionada' : bootstrap.installedProfiles[selected.id] ? 'Instancia de EternalCraft' : 'Elige dónde instalar'}</h3><p>{bootstrap.installedProfiles[selected.id] && !isLinked(selected) ? bootstrap.managedGameDirectories[selected.id] : pathFor(selected) || 'Selecciona una carpeta de juego o instala una instancia administrada.'}</p>{#if minecraftStatus.running}<span class="saved-chip process-chip">MINECRAFT EN EJECUCIÓN · {minecraftStatus.seriesId === selected.id ? 'ESTA SERIE' : minecraftStatus.seriesId?.toUpperCase()} · PID {minecraftStatus.pid}</span>{:else if minecraftStatus.exitSuccess === false}<span class="warning-chip process-chip">ÚLTIMA SESIÓN CERRÓ CON ERROR · CÓDIGO {minecraftStatus.exitCode ?? 'DESCONOCIDO'}</span>{/if}</div><div class="play-actions"><button class="button secondary" onclick={selectDirectory} disabled={busy || syncingPack || minecraftStatus.running}>{isLinked(selected) ? 'Cambiar carpeta' : 'Seleccionar carpeta'}</button>{#if bootstrap.installedProfiles[selected.id]}<span class="saved-chip">FORGE INSTALADO</span>{:else}<button class="button secondary" onclick={installBase} disabled={installingSeries !== null || syncingPack || minecraftStatus.running} title="Instala una instancia aislada y descarga Java 17 de Mojang si hace falta">Instalar Forge + Java 17</button>{/if}{#if selected.packStatus === 'available'}<button class="button secondary" onclick={syncOfficialPack} disabled={syncingPack || minecraftStatus.running || !bootstrap.installedProfiles[selected.id] && !isLinked(selected)}>{syncingPack ? 'Actualizando mods…' : 'Instalar / actualizar pack'}</button>{#if bootstrap.microsoftProfile || bootstrap.accountMode === 'offline'}<button class="button primary" onclick={launchMinecraft} disabled={busy || minecraftStatus.running || syncingPack || !bootstrap.installedProfiles[selected.id] && !isLinked(selected)}>{minecraftStatus.running ? 'Minecraft ejecutándose' : busy ? 'Preparando…' : 'Jugar'}</button>{/if}{:else}<button class="button primary" disabled title="El modpack de esta serie todavía no tiene archivos oficiales publicados">Pack no publicado</button>{/if}</div></div>
+          <div class="play-panel"><div class="play-copy"><span class="eyebrow">INSTANCIA AISLADA · {selected.name}</span><h3>{bootstrap.installedProfiles[selected.id] ? 'Instancia de EternalCraft lista' : installingSeries === selected.id ? 'Preparando instancia nueva…' : 'Tu instancia nueva'}</h3><p>{bootstrap.managedGameDirectories[selected.id]}{!bootstrap.installedProfiles[selected.id] ? ` · Minecraft ${selected.minecraftVersion} · ${selected.loader} ${selected.loaderVersion}` : ''}</p>{#if minecraftStatus.running}<span class="saved-chip process-chip">MINECRAFT EN EJECUCIÓN · {minecraftStatus.seriesId === selected.id ? 'ESTA SERIE' : minecraftStatus.seriesId?.toUpperCase()} · PID {minecraftStatus.pid}</span>{:else if minecraftStatus.exitSuccess === false}<span class="warning-chip process-chip">ÚLTIMA SESIÓN CERRÓ CON ERROR · CÓDIGO {minecraftStatus.exitCode ?? 'DESCONOCIDO'}</span>{/if}</div><div class="play-actions">{#if bootstrap.installedProfiles[selected.id]}<button class="button secondary" onclick={selectDirectory} disabled={busy || syncingPack || minecraftStatus.running}>{isLinked(selected) ? 'Cambiar carpeta' : 'Vincular otra carpeta'}</button><span class="saved-chip">FORGE INSTALADO</span>{:else}<button class="button primary" onclick={installBase} disabled={installingSeries !== null || syncingPack || minecraftStatus.running} title="Crea una instancia aislada; Java 17 se instala automáticamente si falta">{installingSeries === selected.id ? 'Preparando…' : 'Crear instancia y preparar Java 17'}</button>{/if}{#if selected.packStatus === 'available'}<button class="button secondary" onclick={syncOfficialPack} disabled={syncingPack || minecraftStatus.running || !bootstrap.installedProfiles[selected.id] && !isLinked(selected)}>{syncingPack ? 'Actualizando mods…' : 'Instalar / actualizar pack'}</button>{#if bootstrap.microsoftProfile || bootstrap.accountMode === 'offline'}<button class="button primary" onclick={launchMinecraft} disabled={busy || minecraftStatus.running || syncingPack || !bootstrap.installedProfiles[selected.id] && !isLinked(selected)}>{minecraftStatus.running ? 'Minecraft ejecutándose' : busy ? 'Preparando…' : 'Jugar'}</button>{/if}{:else}<button class="button secondary" disabled title="El modpack de esta serie todavía no tiene archivos oficiales publicados">Pack no publicado</button>{/if}</div></div>
           {#if bootstrap.installedProfiles[selected.id]}<div class="managed-location"><span class="eyebrow">INSTANCIA ADMINISTRADA POR ETERNALCRAFT</span><code>{bootstrap.managedGameDirectories[selected.id]}</code></div>{/if}
           {#if installingSeries === selected.id}<div class="install-progress" role="status" aria-live="polite"><span class="spinner"></span><div><strong>{installMessage || 'Instalando Minecraft y Forge…'}</strong><p>Preparando el perfil del juego; Minecraft no se iniciará.</p></div></div>{/if}
           {#if syncingPack}<div class="install-progress" role="status" aria-live="polite"><span class="spinner"></span><div><strong>{packSyncMessage || 'Actualizando mods oficiales…'}</strong><p>El proceso verifica cada descarga antes de sustituir archivos administrados.</p></div></div>{/if}
@@ -779,8 +810,8 @@
             <div class="setting-row memory-setting"><div><span class="eyebrow">MEMORIA DE MINECRAFT</span><h2>{(memoryDraft / 1024).toFixed(1)} GiB asignados</h2><p>RAM detectada: {(bootstrap.memory.totalMb / 1024).toFixed(1)} GiB · recomendado hasta {(bootstrap.memory.maxMb / 1024).toFixed(1)} GiB.</p><input class="memory-slider" type="range" min={bootstrap.memory.minMb} max={bootstrap.memory.maxMb} step="512" aria-label="Memoria RAM asignada a Minecraft" value={memoryDraft} oninput={(event) => (memoryDraft = Number(event.currentTarget.value))} /></div><div class="play-actions"><button class="button secondary" onclick={saveMemoryLimit} disabled={busy || memoryDraft === bootstrap.memory.selectedMb}>Guardar</button>{#if bootstrap.memory.manuallySelected}<button class="button secondary" onclick={resetMemoryLimit} disabled={busy}>Automático</button>{/if}</div></div>
             <div class="setting-row"><div><span class="eyebrow">JAVA · MINECRAFT 1.20.1</span><h2>{bootstrap.java.compatible ? `Java ${bootstrap.java.version}` : 'Java 17 no está listo'}</h2><p>{bootstrap.java.detail}{#if bootstrap.java.executable}<br/><code>{bootstrap.java.executable}</code>{/if}</p></div><div class="play-actions"><span class:saved-chip={bootstrap.java.compatible} class:warning-chip={!bootstrap.java.compatible}>{bootstrap.java.compatible ? 'LISTO' : 'REVISAR'}</span><button class="button secondary" onclick={selectJava} disabled={busy}>Elegir Java</button>{#if bootstrap.javaManuallySelected}<button class="button secondary" onclick={resetJava} disabled={busy}>Automático</button>{/if}<button class="button secondary" onclick={refreshJava} disabled={javaRefreshing}>{javaRefreshing ? 'Comprobando…' : 'Comprobar'}</button></div></div>
           </div>
-          {:else if settingsTab === 'account'}<div class="settings-card"><div class="setting-row"><div><span class="eyebrow">PERFIL ACTIVO</span><h2>{bootstrap.microsoftProfile?.username ?? (bootstrap.accountMode === 'offline' ? bootstrap.offlineUsername : bootstrap.offlineUsername ? `Perfil local guardado: ${bootstrap.offlineUsername}` : 'Sin perfil')}</h2><p>{bootstrap.microsoftProfile ? 'Cuenta Microsoft autenticada.' : bootstrap.accountMode === 'offline' ? 'Perfil local activo sin autenticación Microsoft.' : bootstrap.offlineUsername ? 'El perfil local está guardado pero no activado.' : 'Elige cómo identificarte en Minecraft.'}</p></div><div class="play-actions">{#if bootstrap.microsoftProfile}<button class="button secondary" onclick={logoutMicrosoft} disabled={busy}>Cerrar sesión Microsoft</button>{:else if bootstrap.accountMode === 'offline'}<button class="button secondary" onclick={logoutOffline} disabled={busy}>Quitar perfil local</button>{/if}</div></div><div class="setting-row"><div><span class="eyebrow">CUENTA MICROSOFT</span><h2>Servidores autenticados</h2><p>Usa una cuenta con Minecraft para jugar en servidores que validan la sesión.</p></div><button class="button primary" onclick={loginMicrosoft} disabled={busy || !bootstrap.microsoftLoginAvailable || Boolean(bootstrap.microsoftProfile)}>{busy ? 'Abriendo…' : bootstrap.microsoftProfile ? 'Conectada' : 'Iniciar sesión con Microsoft'}</button></div>{#if !bootstrap.microsoftLoginAvailable}<p class="account-setup-note">Microsoft aún no está configurado: el propietario debe añadir el Client ID público de la aplicación Microsoft. Es independiente de la GitHub App de Developer.</p>{/if}<div class="setting-row offline-account-row"><div><span class="eyebrow">PERFIL LOCAL</span><h2>{bootstrap.offlineUsername ? `Guardado: ${bootstrap.offlineUsername}` : 'Jugar con un nombre'}</h2><p>No verifica la propiedad del juego y no permite entrar a servidores que exigen autenticación Microsoft.</p><label class="account-name-field">Nombre<input class="text-input" bind:value={offlineUsernameDraft} maxlength="16" autocomplete="nickname" placeholder="Entre 3 y 16 caracteres" /></label></div><div class="play-actions"><button class="button secondary" onclick={loginOffline} disabled={busy}>{busy ? 'Guardando…' : bootstrap.accountMode === 'offline' ? 'Perfil local activo' : 'Usar perfil local'}</button>{#if bootstrap.offlineUsername}<button class="button secondary" onclick={logoutOffline} disabled={busy}>Borrar</button>{/if}</div></div></div>
-          {:else if settingsTab === 'appearance'}<div class="settings-card"><div class="setting-row appearance-row"><div><span class="eyebrow">TEMAS</span><h2>El aspecto de tu launcher</h2><p>Elige una paleta para la interfaz. Puedes agregar un fondo propio desde tu equipo.</p><div class="theme-options"><button class:theme-selected={bootstrap.themeId === 'light'} class="button secondary theme-swatch light-swatch" onclick={() => saveTheme('light')}>Claro</button><button class:theme-selected={bootstrap.themeId === 'series'} class="button secondary" onclick={() => saveTheme('series')}>Serie activa</button><button class:theme-selected={bootstrap.themeId === 'siege'} class="button secondary" onclick={() => saveTheme('siege')}>SIEGE</button><button class:theme-selected={bootstrap.themeId === 'ghouls'} class="button secondary" onclick={() => saveTheme('ghouls')}>Ghouls</button></div></div><div class="play-actions"><button class="button secondary" onclick={chooseBackground}>Elegir fondo</button>{#if bootstrap.backgroundPath}<button class="button secondary" onclick={clearBackground}>Quitar fondo</button>{/if}</div></div></div>
+          {:else if settingsTab === 'account'}<div class="settings-card"><div class="setting-row"><div><span class="eyebrow">PERFIL ACTIVO</span><h2>{bootstrap.microsoftProfile?.username ?? (bootstrap.accountMode === 'offline' ? bootstrap.offlineUsername : bootstrap.offlineUsername ? `Perfil local guardado: ${bootstrap.offlineUsername}` : 'Sin perfil')}</h2><p>{bootstrap.microsoftProfile ? 'Cuenta Microsoft autenticada.' : bootstrap.accountMode === 'offline' ? 'Perfil local activo sin autenticación Microsoft.' : bootstrap.offlineUsername ? 'El perfil local está guardado pero no activado.' : 'Elige cómo identificarte en Minecraft.'}</p></div><div class="play-actions">{#if bootstrap.microsoftProfile}<button class="button secondary" onclick={logoutMicrosoft} disabled={busy}>Cerrar sesión Microsoft</button>{:else if bootstrap.accountMode === 'offline'}<button class="button secondary" onclick={logoutOffline} disabled={busy}>Quitar perfil local</button>{/if}</div></div><div class="setting-row"><div><span class="eyebrow">CUENTA MICROSOFT</span><h2>Servidores autenticados</h2><p>Usa una cuenta con Minecraft para jugar en servidores que validan la sesión.</p></div><button class="button primary" onclick={loginMicrosoft} disabled={busy || !bootstrap.microsoftLoginAvailable || Boolean(bootstrap.microsoftProfile)}>{busy ? 'Abriendo…' : bootstrap.microsoftProfile ? 'Conectada' : 'Iniciar sesión con Microsoft'}</button></div>{#if !bootstrap.microsoftLoginAvailable}<p class="account-setup-note">Microsoft aún no está configurado: el propietario debe añadir el Client ID público de la aplicación Microsoft. Es independiente de la GitHub App de Developer.</p>{/if}<div class="setting-row offline-account-row"><div><span class="eyebrow">PERFIL LOCAL</span><h2>{bootstrap.offlineUsername ? `Guardado: ${bootstrap.offlineUsername}` : 'Jugar con un nombre'}</h2><p>Sin Microsoft: el nick local usa un UUID estable en este equipo. No verifica la propiedad del juego y no entra a servidores que exigen autenticación Microsoft.</p><label class="account-name-field">Nick offline<input class="text-input" bind:value={offlineUsernameDraft} minlength="3" maxlength="16" autocomplete="nickname" placeholder="De 3 a 16 letras, números o _" /></label></div><div class="play-actions"><button class="button secondary" onclick={loginOffline} disabled={busy || !/^[A-Za-z0-9_]{3,16}$/.test(offlineUsernameDraft.trim())}>{busy ? 'Guardando…' : bootstrap.accountMode === 'offline' ? 'Guardar y usar nick' : 'Entrar con nick offline'}</button>{#if bootstrap.offlineUsername}<button class="button secondary" onclick={logoutOffline} disabled={busy}>Borrar</button>{/if}</div></div></div>
+          {:else if settingsTab === 'appearance'}<div class="settings-card appearance-settings"><div class="setting-row"><div><span class="eyebrow">TEMAS</span><h2>El aspecto de tu launcher</h2><p>Escoge una paleta; la serie activa adapta el color si eliges “Serie activa”.</p><div class="theme-options theme-cards"><button class:theme-selected={bootstrap.themeId === 'light'} class="theme-option theme-light" aria-pressed={bootstrap.themeId === 'light'} onclick={() => saveTheme('light')}><span class="theme-preview"></span><strong>Claro</strong><small>Marfil y arena</small></button><button class:theme-selected={bootstrap.themeId === 'series'} class="theme-option theme-series" aria-pressed={bootstrap.themeId === 'series'} onclick={() => saveTheme('series')}><span class="theme-preview"></span><strong>Serie activa</strong><small>Se adapta al universo</small></button><button class:theme-selected={bootstrap.themeId === 'siege'} class="theme-option theme-siege" aria-pressed={bootstrap.themeId === 'siege'} onclick={() => saveTheme('siege')}><span class="theme-preview"></span><strong>SIEGE</strong><small>Oro táctico</small></button><button class:theme-selected={bootstrap.themeId === 'ghouls'} class="theme-option theme-ghouls" aria-pressed={bootstrap.themeId === 'ghouls'} onclick={() => saveTheme('ghouls')}><span class="theme-preview"></span><strong>Ghouls</strong><small>Óxido y supervivencia</small></button></div></div></div><div class="setting-row background-setting"><div><span class="eyebrow">FONDOS ONLINE</span><h2>Elige un universo</h2><p>Las miniaturas se cargan desde sus páginas de origen al abrir esta sección. Puedes usar el fondo de la serie activa o elegir una imagen local.</p><div class="background-options">{#each Object.entries(backgroundPresets) as [presetId, preset]}<button class:background-selected={bootstrap.backgroundPreset === presetId} class="background-option" style={`--background-preview: url("${preset.url}")`} aria-pressed={bootstrap.backgroundPreset === presetId} onclick={() => saveBackgroundPreset(presetId)}><span></span><strong>{preset.label}</strong></button>{/each}<button class:background-selected={bootstrap.backgroundPreset === 'auto'} class="background-option background-auto" aria-pressed={bootstrap.backgroundPreset === 'auto'} onclick={() => saveBackgroundPreset('auto')}><span></span><strong>Fondo de la serie</strong></button></div><div class="background-credits">Imágenes: <a href={backgroundPresets.siege.source} target="_blank" rel="noreferrer">SIEGE · Planet Minecraft ↗</a> · <a href={backgroundPresets['ghouls-outbreak'].source} target="_blank" rel="noreferrer">Ghouls · Steam Community ↗</a></div></div><div class="play-actions background-actions"><button class="button secondary" onclick={chooseBackground}>Usar imagen local</button>{#if bootstrap.backgroundPath}<button class="button secondary" onclick={clearBackground}>Quitar imagen local</button>{/if}</div></div></div>
           {:else}<div class="settings-card"><div class="setting-row"><div><span class="eyebrow">INSTANCIA · {selected.name}</span><h2>Carpeta de juego</h2><p>{pathFor(selected) || bootstrap.managedGameDirectories[selected.id] || 'Elige una ubicación para esta serie.'}</p></div><div class="play-actions"><button class="button secondary" onclick={selectDirectory} disabled={busy}>{isLinked(selected) ? 'Cambiar carpeta' : 'Seleccionar carpeta'}</button><button class="button secondary" onclick={installBase} disabled={installingSeries !== null}>{bootstrap.installedProfiles[selected.id] ? 'Reparar base' : 'Instalar Forge + Java 17'}</button></div></div><div class="setting-row"><div><span class="eyebrow">PREFERENCIAS</span><h2>Guardadas en este equipo</h2><p>{bootstrap.configDirectory}</p></div><span class="saved-chip">GUARDADO</span></div><div class="setting-row"><div><span class="eyebrow">REGISTRO DEL LAUNCHER</span><h2>Diagnóstico y soporte</h2><p>Revisa estado del juego y registros locales sin compartirlos automáticamente.</p></div><button class="button secondary" onclick={openSupport}>Abrir soporte</button></div></div>{/if}
         </section>
       {/if}

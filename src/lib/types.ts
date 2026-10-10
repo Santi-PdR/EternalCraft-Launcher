@@ -20,6 +20,7 @@ export interface Bootstrap {
   logFile: string;
   themeId: string;
   backgroundPath: string | null;
+  backgroundPreset: string | null;
   java: JavaStatus;
   javaManuallySelected: boolean;
   managedGameDirectories: Record<string, string>;

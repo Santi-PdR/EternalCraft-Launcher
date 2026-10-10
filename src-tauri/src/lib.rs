@@ -95,6 +95,10 @@ struct Settings {
     memory_limit_mb: Option<u32>,
     #[serde(default)]
     offline_username: Option<String>,
+    #[serde(default)]
+    offline_uuid: Option<String>,
+    #[serde(default)]
+    account_mode: Option<AccountMode>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -102,6 +106,13 @@ struct Settings {
 struct MicrosoftProfile {
     username: String,
     uuid: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum AccountMode {
+    Microsoft,
+    Offline,
 }
 
 #[derive(Clone, Debug)]
@@ -160,6 +171,7 @@ struct Bootstrap {
     developer_github_user: Option<String>,
     microsoft_profile: Option<MicrosoftProfile>,
     offline_username: Option<String>,
+    account_mode: Option<AccountMode>,
     memory: MemoryStatus,
 }
 
@@ -1570,6 +1582,7 @@ fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
         developer_github_user: app.state::<developer::GitHubDeveloper>().username(),
         microsoft_profile,
         offline_username: settings.offline_username,
+        account_mode: settings.account_mode,
         memory,
     })
 }
@@ -1949,6 +1962,9 @@ fn login_microsoft(app: AppHandle) -> Result<Bootstrap, String> {
         .0
         .lock()
         .map_err(|_| "La sesión Microsoft quedó bloqueada".to_string())? = Some(session);
+    let mut settings = read_settings(&app)?;
+    settings.account_mode = Some(AccountMode::Microsoft);
+    write_settings(&app, &settings)?;
     make_bootstrap(&app)
 }
 
@@ -1958,6 +1974,11 @@ fn logout_microsoft(app: AppHandle) -> Result<Bootstrap, String> {
         .0
         .lock()
         .map_err(|_| "La sesión Microsoft quedó bloqueada".to_string())? = None;
+    let mut settings = read_settings(&app)?;
+    if settings.account_mode == Some(AccountMode::Microsoft) {
+        settings.account_mode = None;
+        write_settings(&app, &settings)?;
+    }
     make_bootstrap(&app)
 }
 
@@ -1968,6 +1989,11 @@ fn valid_offline_username(username: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
+fn valid_offline_uuid(uuid: &str) -> bool {
+    let compact = uuid.replace('-', "");
+    compact.len() == 32 && compact.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 #[tauri::command]
 fn login_offline(app: AppHandle, username: String) -> Result<Bootstrap, String> {
     let username = username.trim();
@@ -1975,7 +2001,15 @@ fn login_offline(app: AppHandle, username: String) -> Result<Bootstrap, String> 
         return Err("El nombre local debe tener entre 3 y 16 caracteres: letras ASCII, números o guion bajo".into());
     }
     let mut settings = read_settings(&app)?;
+    let offline_uuid = if settings.offline_username.as_deref() == Some(username) {
+        settings.offline_uuid.clone().filter(|uuid| valid_offline_uuid(uuid))
+    } else {
+        None
+    }
+    .unwrap_or_else(|| Account::offline(username).uuid().to_string());
     settings.offline_username = Some(username.to_string());
+    settings.offline_uuid = Some(offline_uuid);
+    settings.account_mode = Some(AccountMode::Offline);
     write_settings(&app, &settings)?;
     *app.state::<AuthSession>()
         .0
@@ -1988,6 +2022,10 @@ fn login_offline(app: AppHandle, username: String) -> Result<Bootstrap, String> 
 fn logout_offline(app: AppHandle) -> Result<Bootstrap, String> {
     let mut settings = read_settings(&app)?;
     settings.offline_username = None;
+    settings.offline_uuid = None;
+    if settings.account_mode == Some(AccountMode::Offline) {
+        settings.account_mode = None;
+    }
     write_settings(&app, &settings)?;
     make_bootstrap(&app)
 }
@@ -2072,7 +2110,7 @@ fn launch_minecraft(app: AppHandle, series_id: String) -> Result<MinecraftStatus
     if series.pack_status != PackStatus::Available {
         return Err("Esta serie todavía no tiene un pack oficial publicado y no se puede iniciar como serie jugable.".into());
     }
-    let settings = read_settings(&app)?;
+    let mut settings = read_settings(&app)?;
     let session = app
         .state::<AuthSession>()
         .0
@@ -2099,12 +2137,27 @@ fn launch_minecraft(app: AppHandle, series_id: String) -> Result<MinecraftStatus
             uuid: account.id,
             access_token: account.access_token,
         }
-    } else if let Some(username) = settings
-        .offline_username
-        .as_deref()
-        .filter(|username| valid_offline_username(username))
-    {
-        Account::offline(username)
+    } else if settings.account_mode == Some(AccountMode::Offline) {
+        let Some(username) = settings
+            .offline_username
+            .as_deref()
+            .filter(|username| valid_offline_username(username))
+        else {
+            return Err("Configura un nombre válido para tu perfil local antes de jugar.".into());
+        };
+        let offline_uuid = settings
+            .offline_uuid
+            .clone()
+            .filter(|uuid| valid_offline_uuid(uuid))
+            .unwrap_or_else(|| Account::offline(username).uuid().to_string());
+        if settings.offline_uuid.as_deref() != Some(offline_uuid.as_str()) {
+            settings.offline_uuid = Some(offline_uuid.clone());
+            write_settings(&app, &settings)?;
+        }
+        Account::Offline {
+            username: username.to_string(),
+            uuid: offline_uuid,
+        }
     } else {
         return Err("Inicia sesión con Microsoft o configura un perfil local con nombre para jugar.".into());
     };
@@ -2496,6 +2549,7 @@ mod tests {
         assert!(super::valid_offline_username("Santi_17"));
         assert!(super::valid_offline_username("Abc"));
         assert!(super::valid_offline_username("A123456789012345"));
+        assert!(super::valid_offline_uuid("54f3d715-9c21-4ab5-a321-123456789abc"));
     }
 
     #[test]
@@ -2503,6 +2557,7 @@ mod tests {
         for username in ["", "ab", "abcdefghijklmnopq", "two words", "name-1", "ñandú", "a.b"] {
             assert!(!super::valid_offline_username(username), "unexpectedly accepted {username:?}");
         }
+        assert!(!super::valid_offline_uuid("not-a-uuid"));
     }
 
     use super::*;
@@ -2834,6 +2889,8 @@ mod tests {
             microsoft_client_id: None,
             memory_limit_mb: Some(4096),
             offline_username: Some("Player_17".into()),
+            offline_uuid: Some("54f3d715-9c21-4ab5-a321-123456789abc".into()),
+            account_mode: Some(AccountMode::Offline),
         };
         let encoded = serde_json::to_vec(&settings).expect("settings serialize");
         let decoded: Settings = serde_json::from_slice(&encoded).expect("settings deserialize");
@@ -2848,6 +2905,8 @@ mod tests {
         );
         assert_eq!(decoded.memory_limit_mb, Some(4096));
         assert_eq!(decoded.offline_username.as_deref(), Some("Player_17"));
+        assert_eq!(decoded.offline_uuid.as_deref(), Some("54f3d715-9c21-4ab5-a321-123456789abc"));
+        assert_eq!(decoded.account_mode, Some(AccountMode::Offline));
     }
 
     #[test]

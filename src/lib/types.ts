@@ -29,6 +29,7 @@ export interface Bootstrap {
   developerGithubUser: string | null;
   microsoftProfile: { username: string; uuid: string } | null;
   offlineUsername: string | null;
+  accountMode: 'microsoft' | 'offline' | null;
   memory: MemoryStatus;
 }
 

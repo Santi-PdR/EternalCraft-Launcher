@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use minisign_verify::{PublicKey, Signature};
 use std::{env, fs, path::Path};
 
@@ -15,7 +16,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let public_key = PublicKey::from_file(Path::new(&args[0]))?;
-    let signature = Signature::from_file(Path::new(&args[1]))?;
+    let encoded_signature = fs::read_to_string(Path::new(&args[1]))?;
+    let signature_text = String::from_utf8(STANDARD.decode(encoded_signature.trim())?)?;
+    let signature = Signature::decode(&signature_text)?;
     let artifact = fs::read(Path::new(&args[2]))?;
     public_key.verify(&artifact, &signature, false)?;
     println!("Verified updater signature: {}", Path::new(&args[2]).display());

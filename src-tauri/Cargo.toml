@@ -16,6 +16,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 atomic-write-file = "0.3"
+base64 = "0.22"
 mc-launcher-core = "=0.1.2"
 minisign-verify = "0.2.5"
 serde = { version = "1", features = ["derive"] }

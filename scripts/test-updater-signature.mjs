@@ -10,7 +10,7 @@ const privateKeyPath = path.join(tempDirectory, 'ephemeral.key');
 const publicKeyPath = `${privateKeyPath}.pub`;
 const artifactPath = path.join(tempDirectory, 'updater-test.bin');
 const configPath = path.join(tempDirectory, 'tauri-test-config.json');
-const tauriCliPath = path.join(repositoryRoot, 'node_modules', '@tauri-apps', 'cli', 'main.js');
+const tauriCliPath = path.join(repositoryRoot, 'node_modules', '@tauri-apps', 'cli', 'tauri.js');
 const verifierPath = path.join(repositoryRoot, 'scripts', 'verify-updater-signature.mjs');
 
 function run(command, args, options = {}) {
@@ -31,11 +31,17 @@ try {
     tauriCliPath, 'signer', 'generate', '--ci', '--password', '', '-w', privateKeyPath
   ]);
   if (generateStatus !== 0) throw new Error('Could not generate an ephemeral Minisign keypair');
+  if (!fs.statSync(privateKeyPath, { throwIfNoEntry: false })?.isFile() || !fs.statSync(publicKeyPath, { throwIfNoEntry: false })?.isFile()) {
+    throw new Error('Tauri signer did not write the ephemeral keypair');
+  }
 
   const signStatus = run(process.execPath, [
     tauriCliPath, 'signer', 'sign', '--private-key-path', privateKeyPath, artifactPath
   ]);
   if (signStatus !== 0) throw new Error('Tauri could not sign the temporary updater artifact');
+  if (!fs.statSync(`${artifactPath}.sig`, { throwIfNoEntry: false })?.isFile()) {
+    throw new Error('Tauri signer did not write the temporary artifact signature');
+  }
 
   const publicKey = fs.readFileSync(publicKeyPath, 'utf8');
   fs.writeFileSync(configPath, JSON.stringify({

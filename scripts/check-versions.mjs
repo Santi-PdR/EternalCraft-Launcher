@@ -7,7 +7,7 @@ const cargoManifest = fs.readFileSync('src-tauri/Cargo.toml', 'utf8');
 const cargoLock = fs.readFileSync('src-tauri/Cargo.lock', 'utf8');
 
 const cargoVersion = cargoManifest.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
-const lockedCargoVersion = cargoLock.match(/\[\[package\]\]\nname = "eternalcraft-launcher"\nversion = "([^"]+)"/)?.[1];
+const lockedCargoVersion = cargoLock.match(/\[\[package\]\]\r?\nname = "eternalcraft-launcher"\r?\nversion = "([^"]+)"/)?.[1];
 const versions = {
   'package.json': packageJson.version,
   'package-lock.json': packageLock.version,

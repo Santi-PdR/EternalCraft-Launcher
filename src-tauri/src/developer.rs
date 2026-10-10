@@ -1316,21 +1316,23 @@ fn read_pack_minecraft_compatibility(
                 .get("versionRange")
                 .and_then(toml::Value::as_str)
                 .map(str::trim)
-                .filter(|range| !range.is_empty())
             else {
                 continue;
             };
+            if range.is_empty() {
+                continue;
+            }
             reported_range = Some(range.to_string());
             match maven_version_range_contains(range, target_version) {
                 Some(true) => {}
                 Some(false) => {
                     return (PackCompatibilityStatus::Incompatible, reported_range);
                 }
-                None => return unknown,
+                None => return (PackCompatibilityStatus::Unknown, reported_range),
             }
         }
     }
-    if found_minecraft_dependency && reported_range.is_some() {
+    if found_minecraft_dependency {
         (PackCompatibilityStatus::Compatible, reported_range)
     } else {
         unknown
@@ -1687,6 +1689,11 @@ mod tests {
             maven_version_range_contains("[1.20.1,1.20.2),[1.20.4,1.21)", "1.20.4"),
             Some(true)
         );
+        assert_eq!(
+            maven_version_range_contains("[1.20],[1.20.1]", "1.20.1"),
+            Some(true)
+        );
+        assert_eq!(maven_version_range_contains("1.20.1", "1.20.1"), None);
         assert_eq!(maven_version_range_contains("not-a-range", "1.20.1"), None);
     }
 
@@ -1707,9 +1714,40 @@ mod tests {
             .unwrap();
         archive.finish().unwrap();
 
+        let file = fs::File::create(source.join("Review.jar")).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file("META-INF/mods.toml", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        archive
+            .write_all(
+                b"modLoader=\"javafml\"\nlicense=\"MIT\"\n[[dependencies.example]]\nmodId=\"minecraft\"\nmandatory=true\nversionRange=\">=1.20.1 <1.21\"\n",
+            )
+            .unwrap();
+        archive.finish().unwrap();
+
+        let file = fs::File::create(source.join("Unrestricted.jar")).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file("META-INF/mods.toml", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        archive
+            .write_all(
+                b"modLoader=\"javafml\"\nlicense=\"MIT\"\n[[dependencies.example]]\nmodId=\"minecraft\"\nmandatory=true\nversionRange=\"\"\n",
+            )
+            .unwrap();
+        archive.finish().unwrap();
+
         let preview = scan_pack_source(&source, "siege", "1.20.1").unwrap();
-        assert_eq!(preview.files[0].minecraft_compatibility, PackCompatibilityStatus::Incompatible);
-        assert_eq!(preview.files[0].minecraft_version_range.as_deref(), Some("[1.20.2,1.21)"));
+        let incompatible = preview.files.iter().find(|file| file.name == "Compatible.jar").unwrap();
+        assert_eq!(incompatible.minecraft_compatibility, PackCompatibilityStatus::Incompatible);
+        assert_eq!(incompatible.minecraft_version_range.as_deref(), Some("[1.20.2,1.21)"));
+        let review = preview.files.iter().find(|file| file.name == "Review.jar").unwrap();
+        assert_eq!(review.minecraft_compatibility, PackCompatibilityStatus::Unknown);
+        assert_eq!(review.minecraft_version_range.as_deref(), Some(">=1.20.1 <1.21"));
+        let unrestricted = preview.files.iter().find(|file| file.name == "Unrestricted.jar").unwrap();
+        assert_eq!(unrestricted.minecraft_compatibility, PackCompatibilityStatus::Compatible);
+        assert_eq!(unrestricted.minecraft_version_range, None);
 
         fs::remove_dir_all(source).unwrap();
     }

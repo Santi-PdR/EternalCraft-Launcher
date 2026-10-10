@@ -86,6 +86,8 @@ struct Settings {
     #[serde(default)]
     theme_id: Option<String>,
     #[serde(default)]
+    theme_migrated: bool,
+    #[serde(default)]
     background_file: Option<String>,
     #[serde(default)]
     microsoft_client_id: Option<String>,
@@ -251,6 +253,17 @@ fn resolve_theme(theme_id: Option<String>) -> String {
     theme_id
         .filter(|theme| is_valid_theme(theme))
         .unwrap_or_else(|| "light".into())
+}
+
+fn migrate_theme_preference(settings: &mut Settings) -> bool {
+    if settings.theme_migrated {
+        return false;
+    }
+    if matches!(settings.theme_id.as_deref(), None | Some("series")) {
+        settings.theme_id = Some("light".into());
+    }
+    settings.theme_migrated = true;
+    true
 }
 
 fn is_safe_background_filename(file_name: &str) -> bool {
@@ -1410,7 +1423,10 @@ fn with_memory_arguments(
 
 fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
     let catalog = current_catalog()?;
-    let settings = read_settings(app)?;
+    let mut settings = read_settings(app)?;
+    if migrate_theme_preference(&mut settings) {
+        write_settings(app, &settings)?;
+    }
     let memory = memory_status(&settings);
     let default_series = catalog
         .series
@@ -1540,6 +1556,7 @@ fn set_theme(app: AppHandle, theme_id: String) -> Result<Bootstrap, String> {
     }
     let mut settings = read_settings(&app)?;
     settings.theme_id = Some(theme_id);
+    settings.theme_migrated = true;
     write_settings(&app, &settings)?;
     make_bootstrap(&app)
 }
@@ -2693,6 +2710,7 @@ mod tests {
             java_executable: Some("/usr/lib/jvm/java-17/bin/java".into()),
             managed_installs: BTreeMap::from([("siege".into(), "1.20.1-forge-47.4.10".into())]),
             theme_id: Some("ghouls".into()),
+            theme_migrated: true,
             background_file: Some("background-123.webp".into()),
             microsoft_client_id: Some("12345678-1234-4234-8234-123456789abc".into()),
             github_app_client_id: Some("Iv23liAbCdEfGh123456".into()),
@@ -2739,6 +2757,25 @@ mod tests {
             Some(BackgroundFormat::Webp)
         );
         assert_eq!(detect_background_format(b"not an image"), None);
+    }
+
+    #[test]
+    fn legacy_default_theme_migrates_to_light_without_overwriting_explicit_series_themes() {
+        let mut legacy_default = Settings {
+            theme_id: Some("series".into()),
+            ..Settings::default()
+        };
+        assert!(migrate_theme_preference(&mut legacy_default));
+        assert_eq!(legacy_default.theme_id.as_deref(), Some("light"));
+        assert!(legacy_default.theme_migrated);
+        assert!(!migrate_theme_preference(&mut legacy_default));
+
+        let mut explicit_theme = Settings {
+            theme_id: Some("ghouls".into()),
+            ..Settings::default()
+        };
+        assert!(migrate_theme_preference(&mut explicit_theme));
+        assert_eq!(explicit_theme.theme_id.as_deref(), Some("ghouls"));
     }
 
     #[test]

@@ -89,6 +89,8 @@ struct Settings {
     theme_migrated: bool,
     #[serde(default)]
     background_file: Option<String>,
+    #[serde(default, skip_serializing)]
+    microsoft_client_id: Option<String>,
     #[serde(default)]
     memory_limit_mb: Option<u32>,
 }
@@ -260,6 +262,10 @@ fn migrate_theme_preference(settings: &mut Settings) -> bool {
     }
     settings.theme_migrated = true;
     true
+}
+
+fn migrate_microsoft_client_id_preference(settings: &mut Settings) -> bool {
+    settings.microsoft_client_id.take().is_some()
 }
 
 fn is_safe_background_filename(file_name: &str) -> bool {
@@ -1460,7 +1466,9 @@ fn with_memory_arguments(
 fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
     let catalog = current_catalog()?;
     let mut settings = read_settings(app)?;
-    if migrate_theme_preference(&mut settings) {
+    let mut migrated = migrate_theme_preference(&mut settings);
+    migrated |= migrate_microsoft_client_id_preference(&mut settings);
+    if migrated {
         write_settings(app, &settings)?;
     }
     let memory = memory_status(&settings);
@@ -2781,7 +2789,9 @@ mod tests {
     #[test]
     fn legacy_microsoft_client_id_is_ignored_in_user_preferences() {
         let legacy = r#"{"microsoftClientId":"12345678-1234-4234-8234-123456789abc"}"#;
-        let settings: Settings = serde_json::from_str(legacy).expect("legacy settings deserialize");
+        let mut settings: Settings = serde_json::from_str(legacy).expect("legacy settings deserialize");
+        assert!(migrate_microsoft_client_id_preference(&mut settings));
+        assert!(!migrate_microsoft_client_id_preference(&mut settings));
         let encoded = serde_json::to_value(settings).expect("updated settings serialize");
         assert!(encoded.get("microsoftClientId").is_none());
     }

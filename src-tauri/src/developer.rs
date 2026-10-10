@@ -273,7 +273,7 @@ pub(super) fn begin_github_developer_login(app: AppHandle) -> Result<DeveloperLo
         .post(GITHUB_DEVICE_CODE_URL)
         .header("Accept", "application/json")
         .header("User-Agent", "EternalCraft-Launcher")
-        .form(&[("client_id", client_id)])
+        .form(&[("client_id", client_id.to_string())])
         .send()
         .map_err(|error| format!("No se pudo solicitar autorización a GitHub: {error}"))?;
     if !response.status().is_success() {

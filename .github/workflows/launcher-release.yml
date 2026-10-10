@@ -1,0 +1,186 @@
+name: Launcher release
+
+on:
+  push:
+    tags:
+      - "launcher-v*"
+
+concurrency:
+  group: eternalcraft-launcher-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    env:
+      ETERNALCRAFT_GITHUB_APP_CLIENT_ID: ${{ vars.ETERNALCRAFT_GITHUB_APP_CLIENT_ID }}
+      ETERNALCRAFT_MICROSOFT_CLIENT_ID: ${{ vars.ETERNALCRAFT_MICROSOFT_CLIENT_ID }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            bundles: appimage,deb,rpm
+          - os: windows-latest
+            bundles: nsis
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm run check:versions
+      - name: Require published official packs
+        run: npm run check:release-packs
+      - uses: dtolnay/rust-toolchain@stable
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf libfuse2 rpm xvfb
+      - name: Check release tag matches app version
+        shell: bash
+        run: |
+          [[ "${ETERNALCRAFT_GITHUB_APP_CLIENT_ID:-}" =~ ^[A-Za-z0-9_.-]{10,100}$ ]] || { echo "Set a valid ETERNALCRAFT_GITHUB_APP_CLIENT_ID Actions variable before creating an official release"; exit 1; }
+          [[ "${ETERNALCRAFT_MICROSOFT_CLIENT_ID:-}" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]] || { echo "Set a valid ETERNALCRAFT_MICROSOFT_CLIENT_ID Actions variable before creating a playable official release"; exit 1; }
+          app_version="$(node -p "JSON.parse(require('fs').readFileSync('src-tauri/tauri.conf.json', 'utf8')).version")"
+          package_version="$(node -p "JSON.parse(require('fs').readFileSync('package.json', 'utf8')).version")"
+          tag_version="${GITHUB_REF_NAME#launcher-v}"
+          [[ "$tag_version" == "$app_version" && "$tag_version" == "$package_version" ]] || { echo "Tag ($tag_version), Tauri ($app_version), and package.json ($package_version) versions must match"; exit 1; }
+          [[ "$tag_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Official launcher releases require a stable x.y.z version"; exit 1; }
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "Launcher releases must be tagged from main"; exit 1; }
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - name: Enable signed updater artifacts
+        shell: bash
+        run: printf '{"bundle":{"createUpdaterArtifacts":true}}\n' > src-tauri/tauri.release.conf.json
+      - name: Build signed bundles
+        run: npm run tauri -- build --ci --config src-tauri/tauri.release.conf.json --bundles ${{ matrix.bundles }}
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      - name: Verify update signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            files=(src-tauri/target/release/bundle/appimage/*.AppImage)
+          else
+            files=(src-tauri/target/release/bundle/nsis/*-setup.exe)
+          fi
+          [[ ${#files[@]} -eq 1 ]] || { echo "Expected one updater installer, found ${#files[@]}"; exit 1; }
+          [[ -s "${files[0]}.sig" ]] || { echo "Missing updater signature: ${files[0]}.sig"; exit 1; }
+          [[ -s "${files[0]}" ]] || { echo "Installer is empty: ${files[0]}"; exit 1; }
+          node scripts/verify-updater-signature.mjs "${files[0]}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: launcher-bundles-${{ runner.os }}
+          path: src-tauri/target/release/bundle/**
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: launcher-bundles-*
+          path: release-assets
+          merge-multiple: true
+      - name: Create signed update manifest
+        env:
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#launcher-v}"
+          appimage=(release-assets/appimage/*.AppImage)
+          windows=(release-assets/nsis/*-setup.exe)
+          [[ ${#appimage[@]} -eq 1 && ${#windows[@]} -eq 1 ]]
+          for installer in "${appimage[0]}" "${windows[0]}"; do
+            [[ -s "$installer" && -s "$installer.sig" ]]
+          done
+          python3 - "$version" "$REPOSITORY" "${appimage[0]}" "${windows[0]}" <<'PY'
+          import json, pathlib, sys
+          version, repository, appimage, windows = sys.argv[1:]
+          def entry(path):
+              file = pathlib.Path(path)
+              return {
+                  "url": f"https://github.com/{repository}/releases/download/launcher-v{version}/{file.name}",
+                  "signature": pathlib.Path(str(file) + ".sig").read_text().strip(),
+              }
+          manifest = {
+              "version": version,
+              "notes": f"EternalCraft Launcher {version}",
+              "pub_date": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+              "platforms": {"linux-x86_64": entry(appimage), "windows-x86_64": entry(windows)},
+          }
+          pathlib.Path("latest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+          PY
+      - name: Publish immutable GitHub release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          name: EternalCraft Launcher ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          overwrite_files: false
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/appimage/*.AppImage
+            release-assets/appimage/*.AppImage.sig
+            release-assets/deb/*.deb
+            release-assets/rpm/*.rpm
+            release-assets/nsis/*-setup.exe
+            release-assets/nsis/*-setup.exe.sig
+      - name: Advance signed updater channel
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const branch = 'launcher-updates';
+            const content = fs.readFileSync('latest.json');
+            const version = context.ref_name.replace(/^launcher-v/, '');
+            const parts = v => v.split(/[.+-]/).slice(0, 3).map(Number);
+            const newer = (a, b) => {
+              const aa = parts(a), bb = parts(b);
+              for (let i = 0; i < 3; i++) if (aa[i] !== bb[i]) return aa[i] > bb[i];
+              return false;
+            };
+            let branchRef;
+            try {
+              branchRef = await github.rest.git.getRef({ owner, repo, ref: `heads/${branch}` });
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              const { data: repository } = await github.rest.repos.get({ owner, repo });
+              const { data: base } = await github.rest.git.getRef({ owner, repo, ref: `heads/${repository.default_branch}` });
+              await github.rest.git.createRef({ owner, repo, ref: `refs/heads/${branch}`, sha: base.object.sha });
+              branchRef = await github.rest.git.getRef({ owner, repo, ref: `heads/${branch}` });
+            }
+            let sha;
+            try {
+              const { data: current } = await github.rest.repos.getContent({ owner, repo, path: 'latest.json', ref: branch });
+              sha = current.sha;
+              const currentManifest = JSON.parse(Buffer.from(current.content, 'base64').toString('utf8'));
+              if (newer(currentManifest.version, version)) {
+                core.notice(`Updater channel remains at newer version ${currentManifest.version}; ${version} release assets remain available.`);
+                return;
+              }
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            await github.rest.repos.createOrUpdateFileContents({
+              owner, repo, path: 'latest.json', branch, sha,
+              message: `Publish launcher updater manifest ${version}`,
+              content: content.toString('base64'),
+            });
+            core.notice(`Updater channel advanced to ${version}`);

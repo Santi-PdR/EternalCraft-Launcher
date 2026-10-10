@@ -16,7 +16,7 @@ export function validateReleasePacks(catalog, requiredSeriesIds, manifests, repo
 
   const seriesById = new Map();
   for (const series of catalog.series) {
-    if (typeof series?.id !== 'string' || !series.id) {
+    if (!isSafeSeriesId(series?.id)) {
       errors.push('El catálogo contiene una serie sin ID válido.');
     } else if (seriesById.has(series.id)) {
       errors.push(`El catálogo repite el ID de serie ${series.id}.`);
@@ -31,8 +31,13 @@ export function validateReleasePacks(catalog, requiredSeriesIds, manifests, repo
     errors.push('La lista de series requeridas contiene IDs duplicados.');
   }
 
+  for (const id of uniqueRequired) {
+    if (!isSafeSeriesId(id)) errors.push(`ID de serie requerida no válido: ${String(id)}.`);
+  }
+
   const releaseSeries = new Map();
   for (const id of uniqueRequired) {
+    if (!isSafeSeriesId(id)) continue;
     const series = seriesById.get(id);
     if (!series) {
       errors.push(`La serie requerida ${id} no aparece en el catálogo.`);
@@ -97,7 +102,7 @@ function validateManifest(series, manifest, repo) {
       const encodedName = url.pathname.startsWith(expectedReleasePath)
         ? url.pathname.slice(expectedReleasePath.length)
         : '';
-      if (url.origin !== 'https://github.com' || !encodedName || encodedName.includes('/') || decodeURIComponent(encodedName) !== name) {
+      if (url.origin !== 'https://github.com' || url.search || url.hash || !encodedName || encodedName.includes('/') || decodeURIComponent(encodedName) !== name) {
         errors.push(`${label}: URL de release no corresponde a ${file?.path ?? 'un mod'}.`);
       }
     } catch {
@@ -111,6 +116,10 @@ function isStableVersion(value) {
   return typeof value === 'string' && /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(value);
 }
 
+function isSafeSeriesId(value) {
+  return typeof value === 'string' && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value);
+}
+
 function loadJson(file) {
   return JSON.parse(fs.readFileSync(path.join(root, file), 'utf8'));
 }
@@ -118,9 +127,15 @@ function loadJson(file) {
 function run() {
   const catalog = loadJson('resources/series/catalog.json');
   const requiredIds = loadJson('scripts/release-required-series.json');
+  if (!Array.isArray(catalog?.series) || !Array.isArray(requiredIds)) {
+    const errors = validateReleasePacks(catalog, requiredIds, {});
+    console.error(`La release jugable no está lista:\n${errors.map((error) => `- ${error}`).join('\n')}`);
+    process.exitCode = 1;
+    return;
+  }
   const manifests = {};
   for (const series of catalog.series ?? []) {
-    if (requiredIds.includes(series.id) || series.packStatus === 'available') {
+    if (isSafeSeriesId(series?.id) && (requiredIds.includes(series.id) || series.packStatus === 'available')) {
       const manifestPath = path.join(root, 'packs', series.id, 'manifest.json');
       if (fs.existsSync(manifestPath)) manifests[series.id] = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
     }

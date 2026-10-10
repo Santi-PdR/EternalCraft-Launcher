@@ -57,3 +57,14 @@ test('rechaza assets alojados fuera del release inmutable de esa serie', () => {
   invalid.siege.files[0].url = 'https://example.com/mod.jar';
   assert.ok(validateReleasePacks(catalog, ['siege', 'ghouls-outbreak'], invalid).some((error) => error.includes('URL de release')));
 });
+
+
+test('rechaza IDs de serie que podrían escapar del directorio de packs', () => {
+  assert.ok(validateReleasePacks(catalog, ['../secrets'], {}).some((error) => error.includes('ID de serie requerida no válido')));
+});
+
+test('rechaza URLs de assets con parámetros o fragmentos', () => {
+  const invalid = structuredClone(manifests);
+  invalid.siege.files[0].url += '?redirect=other';
+  assert.ok(validateReleasePacks(catalog, ['siege', 'ghouls-outbreak'], invalid).some((error) => error.includes('URL de release')));
+});

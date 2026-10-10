@@ -57,6 +57,11 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf libfuse2 rpm xvfb
       - run: npm ci
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - name: Install official Minecraft, Java 17 and Forge without launching the game
+        if: runner.os == 'Linux'
+        run: >-
+          cargo test --locked --manifest-path src-tauri/Cargo.toml
+          official_forge_install_smoke_test_without_launching_game -- --ignored --nocapture
       - run: npm run test:updater-signature
       - if: runner.os == 'Linux'
         run: npm run tauri -- build --bundles deb,rpm

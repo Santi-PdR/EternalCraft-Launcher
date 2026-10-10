@@ -1,12 +1,13 @@
 {
   "name": "eternalcraft-launcher",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json",
+    "check:versions": "node scripts/check-versions.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

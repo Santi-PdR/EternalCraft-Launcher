@@ -1,6 +1,6 @@
 [package]
 name = "eternalcraft-launcher"
-version = "0.1.2"
+version = "0.1.5"
 description = "EternalCraft native game launcher"
 authors = ["EternalCraft"]
 edition = "2021"

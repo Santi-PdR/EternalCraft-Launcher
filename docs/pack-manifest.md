@@ -1,1 +1,32 @@
-ş&{ôšØ©v¿ÛjÈkrX§{ÿ¶jz×«©\­§íqªà£÷§¼Ú,¹È_ŠW¨­Ø«yËh¯/á¢g¿I©íŠ—kı¶¬†šè~)^–)Ş×ÏíšŸŞµêçjW+iû\j¸(ıéï6‹.râ•ê+v*ŞrÚ+ÈŒ=™™¥¥…°Á…¬µ…¹¥™•ÍĞ½¹ÑÉ…Ğ()Q¡”ÁÕ‰±¥Œ±…Õ¹¡•ÈÉ•…‘Ì½¹”™¥±”Á•ÈÍ•É¥•Ì™É½´è()Á…­Ì¼ñÍ•É¥•Ìµ¥ø½µ…¹¥™•ÍĞ¹©Í½¹€()Q¡”Í•É¥•Ì¥µÕÍĞ•á¥ÍĞ¥¸É•Í½ÕÉ•Ì½Í•É¥•Ì½…Ñ…±½œ¹©Í½¹€€¡Í¥••€…¹¡½Õ±Ìµ½ÕÑ‰É•…­€Ñ½‘…ä¤¸Í•É¥•ÌÍÑ…åÌÕ¹ÁÕ‰±¥Í¡•‘€Õ¹Ñ¥°¥ÑÌÉ•…°™¥±•Ì…¹µ…¹¥™•ÍĞ…É”½µµ¥ÑÑ•…¹Ñ¡”…Ñ…±½œÁ½¥¹ÑÌÑ¼Ñ¡”µ…Ñ¡¥¹œ5¥¹•É…™Ğ…¹½É”Ù•ÉÍ¥½¹Ì¸()©Í½¸)ì(€€‰Í¡•µ…Y•ÉÍ¥½¸ˆè€Ä°(€€‰Í•É¥•Í%ˆè€‰Í¥•”ˆ°(€€‰Ù•ÉÍ¥½¸ˆè€ˆÄ¸À¸Àˆ°(€€‰µ¥¹•É…™ÑY•ÉÍ¥½¸ˆè€ˆÄ¸ÈÀ¸Äˆ°(€€‰±½…‘•Èˆè€‰™½É”ˆ°(€€‰±½…‘•ÉY•ÉÍ¥½¸ˆè€ˆĞÜ¸Ğ¸ÄÀˆ°(€€‰™¥±•Ìˆèl(€€€ì(€€€€€€‰Á…Ñ ˆè€‰µ½‘Ì½•á…µÁ±”µµ½¹©…Èˆ°(€€€€€€‰ÕÉ°ˆè€‰¡ÑÑÁÌè¼½¥Ñ¡Õˆ¹½´½M…¹Ñ¤µA‘H½Ñ•É¹…±É…™Ğµ1…Õ¹¡•È½É•±•…Í•Ì½‘½İ¹±½…½Í¥•”µØÄ¸À¸À½•á…µÁ±”µµ½¹©…Èˆ°(€€€€€€‰Í¥é•	åÑ•Ìˆè€ÄÈÌĞÔØ°(€€€€€€‰Í¡„ÈÔØˆè€ˆğØĞ¡•á…‘•¥µ…°¡…É…Ñ•ÉÌøˆ(€€€ô(€t)ô)€()=¹±ä™±…Ğµ½‘Ì¼¨¹©…É€•¹ÑÉ¥•Ì…É”…•ÁÑ•¸Q¡”‘½İ¹±½…‘•È…±±½İÌ!QQALUI1Ì¡½ÍÑ•½¸¥Ñ!Õˆ½ÈÉ…Ü¹¥Ñ¡Õ‰ÕÍ•É½¹Ñ•¹Ğ¹½µ€°±¥µ¥ÑÌ„µ½Ñ¼€ÔÄÈ5¥…¹„Á…¬Ñ¼€Ğ¥°…¹¡•­Ì‘•±…É•‰åÑ”Í¥é•Ì…¹M!´ÈÔØ°…¹É•ÅÕ¥É•Ì•… …É¡¥Ù”Ñ¼½¹Ñ…¥¸•¥Ñ¡•È5Qµ%9½µ½‘Ì¹Ñ½µ±€½È„½É”µ…¹¥™•ÍĞ€¡5Qµ%9½59%MP¹5€¤µ…É­•515½‘QåÁ”è1%	IIe€‰•™½É”¡…¹¥¹œÑ¡”¥¹ÍÑ…¹”¸Q¡¥Ì¥¹±Õ‘•Ì½É”ÉÕ¹Ñ¥µ”±¥‰É…É¥•ÌÍÕ …Ì-½Ñ±¥¸™½È½É”İ¡¥±”ÍÑ¥±°É•©•Ñ¥¹œ…É‰¥ÑÉ…Éä)IÌ¸()Q¡”±…Õ¹¡•ÈÉ•½É‘ÌÑ¡”¹…µ•Ì…¹¡…Í¡•Ì¥Ğ¥¹ÍÑ…±±•¥¸¥ÑÌÁ•Èµ¥¹ÍÑ…¹”€¹•Ñ•É¹…±É…™Ğ¼ñÍ•É¥•Ìøµ½™™¥¥…°µÁ…¬¹©Í½¹€ÍÑ…Ñ”™¥±”¸=¸„±…Ñ•ÈÙ•ÉÍ¥½¸°¥ĞÕÁ‘…Ñ•Ì…¹É•µ½Ù•Ì½¹±äÑ¡½Í”ÑÉ…­•½™™¥¥…°™¥±•Ì¸UÍ•Èµ½İ¹•™¥±•Ì¥¸µ½‘Ì½Á•ÉÍ½¹…±•Ì½€…¹Õ¹ÑÉ…­•™¥±•Ì¥¸µ½‘Ì½€…É”­•ÁĞ¸%˜„™¥±•¹…µ”½±±¥‘•Ìİ¥Ñ „Á•ÉÍ½¹…°½ÈÕ¹ÑÉ…­•µ½°Ñ¡”Íå¹ŒÍÑ½ÁÌ‰•™½É”µ½‘¥™å¥¹œÑ¡”¥¹ÍÑ…¹”¸()Q¡”É•Á½Í¥Ñ½ÉäÉ•µ…¥¹ÌÕ¹ÁÕ‰±¥Í¡•Õ¹Ñ¥°„‘•Ù•±½Á•ÈÍ•±•ÑÌ„É•…°Í½ÕÉ”‘¥É•Ñ½Éä…¹½µÁ±•Ñ•Ì„É•±•…Í”¸Q¡”•Ù•±½Á•ÈÁ…”Ù•É¥™¥•ÌÑ½Àµ±•Ù•°)IÌ°‘¥ÍÁ±…åÌ•… ‘•±…É•±¥•¹Í”°…¹¡•­Ì‘•±…É•5¥¹•É…™Ğ…¹½É”±½…‘•ÈÙ•ÉÍ¥½¸É…¹•Ì¥¸µ½‘Ì¹Ñ½µ±€……¥¹ÍĞÑ¡”Í•±•Ñ•Í•É¥•Ì¸‘•±…É•¥¹½µÁ…Ñ¥‰±”)H‰±½­ÌÁÕ‰±¥…Ñ¥½¸ìµ¥ÍÍ¥¹œ½ÈÕ¹É•…‘…‰±”½µÁ…Ñ¥‰¥±¥Ñäµ•Ñ…‘…Ñ„¥ÌÍÕÉ™…•™½Èµ…¹Õ…°É•Ù¥•Ü¸AÕ‰±¥Í¡¥¹œÉ•ÅÕ¥É•Ì„½¹™¥Éµ…Ñ¥½¸Ñ¥•Ñ¼Ñ¡”•á…ĞÍ½ÕÉ”™¥¹•ÉÁÉ¥¹ĞÍ¼„¡…¹•)H…¹¹½Ğ‰åÁ…ÍÌÑ¡”É•Ù¥•Ü¸Q¡¥Ì…­¹½İ±•‘•µ•¹Ğ¥Ì¹½ĞÁÉ½½˜½˜É•‘¥ÍÑÉ¥‰ÕÑ¥½¸É¥¡ÑÌìÑ¡”‘•Ù•±½Á•ÈµÕÍĞÙ•É¥™äÁ•Éµ¥ÍÍ¥½¹Ì…¹™½±±½Ü•… ±¥•¹Í”¸%ĞÕÁ±½…‘ÌÑ¡”)IÌ¥¹Ñ¼„‘É…™Ğ¥Ñ!ÕˆÉ•±•…Í”…¹¡•­Ì•… ¥Ñ!ÕˆµÉ•Á½ÉÑ•M!´ÈÔØ¸%Ğµ…­•ÌÑ¡”Ù•É¥™¥•É•±•…Í”…ÍÍ•ÑÌÁÕ‰±¥Œ‰•™½É”…‘Ù…¹¥¹œÑ¡”Á•ÈµÍ•É¥•Ìµ…¹¥™•ÍĞÁ½¥¹Ñ•È°Ñ¡•¸µ…É­ÌÑ¡”…Ñ…±½œ•¹ÑÉä…Ù…¥±…‰±”¸Q¡¥Ì½É‘•É¥¹œ±•…Ù•ÌÑ¡”ÁÉ•Ù¥½ÕÌ½µÁ±•Ñ”Á…¬ÕÍ…‰±”¥˜„ÁÕ‰±¥…Ñ¥½¸¥Ì¥¹Ñ•ÉÉÕÁÑ•¸É•ÑÉäÉ•ÕÍ•ÌÙ•É¥™¥•…ÍÍ•ÑÌ…¹É•Á±…•ÌÍÑ…±”…ÍÍ•ÑÌ½¹±äİ¡¥±”Ñ¡”É•±•…Í”¥Ì„‘É…™Ğì…™Ñ•ÈÁÕ‰±¥…Ñ¥½¸¥ĞÉ•ÅÕ¥É•ÌÑ¡”•á…ĞÍ…µ”…ÍÍ•Ğµ¹…µ”Í•Ğ…¹‘¥•ÍÑÌ¸Q¡”Á½¥¹Ñ•È…‘Ù…¹•Ì½¹±äÑ¼„¹•İ•ÈÍÑ…‰±”Ù•ÉÍ¥½¸°…¹„ÁÕ‰±¥Í¡•Ù•ÉÍ¥½¸…¹¹½Ğ‰”É•İÉ¥ÑÑ•¸¸UÁ±½…‘ÌÉ•ÍÕµ”‰•Ñİ••¸™¥±•Ì°¹½Ğ¥¹Í¥‘”„Á…ÉÑ¥…±±äÑÉ…¹Í™•ÉÉ•™¥±”¸Q¡”ÁÕ‰±¥Í¡•È‘½•Ì¹½ĞÉ•…Ñ”„Á±…å…‰±”Á…¬Õ¹Ñ¥°Ñ¡¥Ì½µÁ±•Ñ”™±½ÜÍÕ••‘Ì¸(
+# Official pack manifest contract
+
+The public launcher reads one file per series from:
+
+`packs/<series-id>/manifest.json`
+
+The series id must exist in `resources/series/catalog.json` (`siege` and `ghouls-outbreak` today). A series stays `unpublished` until its real files and manifest are committed and the catalog points to the matching Minecraft and Forge versions.
+
+```json
+{
+  "schemaVersion": 1,
+  "seriesId": "siege",
+  "version": "1.0.0",
+  "minecraftVersion": "1.20.1",
+  "loader": "forge",
+  "loaderVersion": "47.4.10",
+  "files": [
+    {
+      "path": "mods/example-mod.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/siege-v1.0.0/example-mod.jar",
+      "sizeBytes": 123456,
+      "sha256": "<64 hexadecimal characters>"
+    }
+  ]
+}
+```
+
+Only flat `mods/*.jar` entries are accepted. The downloader allows HTTPS URLs hosted on GitHub or `raw.githubusercontent.com`, limits a mod to 512 MiB and a pack to 4 GiB, and checks declared byte sizes and SHA-256, and requires each archive to contain either `META-INF/mods.toml` or a Forge manifest (`META-INF/MANIFEST.MF`) marked `FMLModType: LIBRARY` before changing the instance. This includes Forge runtime libraries such as Kotlin for Forge while still rejecting arbitrary JARs.
+
+The launcher records the names and hashes it installed in its per-instance `.eternalcraft/<series>-official-pack.json` state file. On a later version, it updates and removes only those tracked official files. User-owned files in `mods/personales/` and untracked files in `mods/` are kept. If a filename collides with a personal or untracked mod, the sync stops before modifying the instance.
+
+The repository remains unpublished until a developer selects a real source directory and completes a release. The Developer page verifies top-level JARs, displays each declared license, and checks declared Minecraft and Forge loader version ranges in `mods.toml` against the selected series. A declared incompatible JAR blocks publication; missing or unreadable compatibility metadata is surfaced for manual review. Publishing requires a confirmation tied to the exact source fingerprint so a changed JAR cannot bypass the review. This acknowledgement is not proof of redistribution rights; the developer must verify permissions and follow each license. It uploads the JARs into a draft GitHub release and checks each GitHub-reported SHA-256. It makes the verified release assets public before advancing the per-series manifest pointer, then marks the catalog entry available. This ordering leaves the previous complete pack usable if a publication is interrupted. A retry reuses verified assets and replaces stale assets only while the release is a draft; after publication it requires the exact same asset-name set and digests. The pointer advances only to a newer stable version, and a published version cannot be rewritten. Uploads resume between files, not inside a partially transferred file. The publisher does not create a playable pack until this complete flow succeeds.

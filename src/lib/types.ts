@@ -1,1 +1,127 @@
-ş&{ôšØ©v¿ÛjÈkrX§{ÿ¶jz×«©\­§íqªà£÷§¼Ú,¹È_ŠW¨­Ø«yËh¯/á¢g¿I©íŠ—kı¶¬†šè~)^–)Ş×ÏíšŸŞµêçjW+iû\j¸(ıéï6‹.râ•ê+v*ŞrÚ+É•áÁ½ÉĞ¥¹Ñ•É™…”M•É¥•Ìì(€¥èÍÑÉ¥¹œì(€¹…µ”èÍÑÉ¥¹œì(€ÍÕ‰Ñ¥Ñ±”èÍÑÉ¥¹œì(€‘•ÍÉ¥ÁÑ¥½¸èÍÑÉ¥¹œì(€…•¹ĞèÍÑÉ¥¹œì(€µ¥¹•É…™ÑY•ÉÍ¥½¸èÍÑÉ¥¹œì(€±½…‘•ÈèÍÑÉ¥¹œì(€±½…‘•ÉY•ÉÍ¥½¸èÍÑÉ¥¹œì(€Á…­MÑ…ÑÕÌè€Õ¹ÁÕ‰±¥Í¡•œğ€…Ù…¥±…‰±”œì)ô()•áÁ½ÉĞ¥¹Ñ•É™…”	½½ÑÍÑÉ…Àì(€Í•É¥•ÌèM•É¥•Ímtì(€…Ñ¥Ù•M•É¥•Í%èÍÑÉ¥¹œì(€…Ñ…±½=¹±¥¹”è‰½½±•…¸ì(€…µ•¥É•Ñ½É¥•ÌèI•½ÉñÍÑÉ¥¹œ°ÍÑÉ¥¹œøì(€ÍÕ•ÍÑ•‘¥É•Ñ½É¥•ÌèI•½ÉñÍÑÉ¥¹œ°ÍÑÉ¥¹œøì(€½¹™¥¥É•Ñ½ÉäèÍÑÉ¥¹œì(€±½¥±”èÍÑÉ¥¹œì(€Ñ¡•µ•%èÍÑÉ¥¹œì(€‰…­É½Õ¹‘A…Ñ èÍÑÉ¥¹œğ¹Õ±°ì(€©…Ù„è)…Ù…MÑ…ÑÕÌì(€©…Ù…5…¹Õ…±±åM•±•Ñ•è‰½½±•…¸ì(€µ…¹…•‘…µ•¥É•Ñ½É¥•ÌèI•½ÉñÍÑÉ¥¹œ°ÍÑÉ¥¹œøì(€¥¹ÍÑ…±±•‘AÉ½™¥±•ÌèI•½ÉñÍÑÉ¥¹œ°ÍÑÉ¥¹œøì(€µ¥É½Í½™Ñ1½¥¹Ù…¥±…‰±”è‰½½±•…¸ì(€¥Ñ¡Õ‰•Ù•±½Á•É¹…‰±•è‰½½±•…¸ì(€‘•Ù•±½Á•É¥Ñ¡Õ‰UÍ•ÈèÍÑÉ¥¹œğ¹Õ±°ì(€µ¥É½Í½™ÑAÉ½™¥±”èìÕÍ•É¹…µ”èÍÑÉ¥¹œìÕÕ¥èÍÑÉ¥¹œôğ¹Õ±°ì(€µ•µ½Éäè5•µ½ÉåMÑ…ÑÕÌì)ô()•áÁ½ÉĞ¥¹Ñ•É™…”5•µ½ÉåMÑ…ÑÕÌì(€Ñ½Ñ…±5ˆè¹Õµ‰•Èì(€µ¥¹5ˆè¹Õµ‰•Èì(€µ…á5ˆè¹Õµ‰•Èì(€Í•±•Ñ•‘5ˆè¹Õµ‰•Èì(€µ…¹Õ…±±åM•±•Ñ•è‰½½±•…¸ì)ô()•áÁ½ÉĞ¥¹Ñ•É™…”5¥¹•É…™ÑMÑ…ÑÕÌì(€ÉÕ¹¹¥¹œè‰½½±•…¸ì(€Í•É¥•Í%èÍÑÉ¥¹œğ¹Õ±°ì(€Á¥è¹Õµ‰•Èğ¹Õ±°ì(€•á¥Ñ½‘”è¹Õµ‰•Èğ¹Õ±°ì(€•á¥ÑMÕ•ÍÌè‰½½±•…¸ğ¹Õ±°ì)ô()•áÁ½ÉĞ¥¹Ñ•É™…”•Ù•±½Á•É1½¥¹MÑ…ÑÕÌì(€ÍÑ…ÑÕÌè€Á•¹‘¥¹œœğ€…ÕÑ¡½É¥é•œğ€Í¥¹•‘=ÕĞœğ€•áÁ¥É•œğ€‘•¹¥•œğ€™…¥±•œì(€ÕÍ•É¹…µ”èÍÑÉ¥¹œğ¹Õ±°ì(€ÕÍ•É½‘”èÍÑÉ¥¹œğ¹Õ±°ì(€Ù•É¥™¥…Ñ¥½¹UÉ¤èÍÑÉ¥¹œğ¹Õ±°ì(€•áÁ¥É•Í%¹M•½¹‘Ìè¹Õµ‰•Èğ¹Õ±°ì(€¥¹Ñ•ÉÙ…±M•½¹‘Ìè¹Õµ‰•Èğ¹Õ±°ì(€µ•ÍÍ…”èÍÑÉ¥¹œğ¹Õ±°ì)ô()•áÁ½ÉĞ¥¹Ñ•É™…”A…­M½ÕÉ•¥±”ì(€¹…µ”èÍÑÉ¥¹œì(€Í¥é•	åÑ•Ìè¹Õµ‰•Èì(€Í¡„ÈÔØèÍÑÉ¥¹œì(€±¥•¹Í”èÍÑÉ¥¹œğ¹Õ±°ì(€±¥•¹Í•MÑ…ÑÕÌè€É•½¹¥é•œğ€Á•Éµ¥ÍÍ¥½¹I•ÅÕ¥É•œğ€Õ¹­¹½İ¸œì(€µ¥¹•É…™Ñ½µÁ…Ñ¥‰¥±¥Ñäè€½µÁ…Ñ¥‰±”œğ€¥¹½µÁ…Ñ¥‰±”œğ€Õ¹­¹½İ¸œì(€µ¥¹•É…™ÑY•ÉÍ¥½¹I…¹”èÍÑÉ¥¹œğ¹Õ±°ì(€™½É•½µÁ…Ñ¥‰¥±¥Ñäè€½µÁ…Ñ¥‰±”œğ€¥¹½µÁ…Ñ¥‰±”œğ€Õ¹­¹½İ¸œì(€™½É•Y•ÉÍ¥½¹I…¹”èÍÑÉ¥¹œğ¹Õ±°ì)ô()•áÁ½ÉĞ¥¹Ñ•É™…”A…­M½ÕÉ•AÉ•Ù¥•Üì(€Í•É¥•Í%èÍÑÉ¥¹œì(€‘¥É•Ñ½ÉäèÍÑÉ¥¹œì(€™¥±•ÌèA…­M½ÕÉ•¥±•mtì(€Ñ½Ñ…±	åÑ•Ìè¹Õµ‰•Èì(€Í½ÕÉ•¥¹•ÉÁÉ¥¹ĞèÍÑÉ¥¹œì)ô()•áÁ½ÉĞ¥¹Ñ•É™…”A…­AÕ‰±¥Í¡AÉ½É•ÍÌì(€Í•É¥•Í%èÍÑÉ¥¹œì(€½µÁ±•Ñ•‘¥±•Ìè¹Õµ‰•Èì(€Ñ½Ñ…±¥±•Ìè¹Õµ‰•Èì(€µ•ÍÍ…”èÍÑÉ¥¹œì)ô()•áÁ½ÉĞ¥¹Ñ•É™…”)…Ù…MÑ…ÑÕÌì(€•á•ÕÑ…‰±”èÍÑÉ¥¹œğ¹Õ±°ì(€Ù•ÉÍ¥½¸èÍÑÉ¥¹œğ¹Õ±°ì(€µ…©½Èè¹Õµ‰•Èğ¹Õ±°ì(€½µÁ…Ñ¥‰±”è‰½½±•…¸ì(€‘•Ñ…¥°èÍÑÉ¥¹œì)ô()•áÁ½ÉĞ¥¹Ñ•É™…”5½‘¥±•¹ÑÉäì(€¹…µ”èÍÑÉ¥¹œì(€Í¥é•	åÑ•Ìè¹Õµ‰•Èì)ô()•áÁ½ÉĞ¥¹Ñ•É™…”5½‘%¹Ù•¹Ñ½Éäì(€…µ•¥É•Ñ½ÉäèÍÑÉ¥¹œğ¹Õ±°ì(€µ½‘Í¥É•Ñ½ÉäèÍÑÉ¥¹œğ¹Õ±°ì(€±½…‘•‘É½µ5½‘ÍI½½Ğè5½‘¥±•¹ÑÉåmtì(€½™™¥¥…±MÑ½É”è5½‘¥±•¹ÑÉåmtì(€Á•ÉÍ½¹…±MÑ½É”è5½‘¥±•¹ÑÉåmtì)ô()•áÁ½ÉĞ¥¹Ñ•É™…”%¹ÍÑ…±±AÉ½É•ÍÌì(€Í•É¥•Í%èÍÑÉ¥¹œì(€ÍÑ…”èÍÑÉ¥¹œì(€µ•ÍÍ…”èÍÑÉ¥¹œì(€½µÁ±•Ñ•‘¥±•Ìè¹Õµ‰•Èì)ô()•áÁ½ÉĞ¥¹Ñ•É™…”A…­Må¹I•ÍÕ±Ğì(€Í•É¥•Í%èÍÑÉ¥¹œì(€Ù•ÉÍ¥½¸èÍÑÉ¥¹œì(€‘½İ¹±½…‘•‘¥±•Ìè¹Õµ‰•Èì(€É•µ½Ù•‘¥±•Ìè¹Õµ‰•Èì)ô()•áÁ½ÉĞ¥¹Ñ•É™…”A…­Må¹AÉ½É•ÍÌì(€Í•É¥•Í%èÍÑÉ¥¹œì(€½µÁ±•Ñ•‘¥±•Ìè¹Õµ‰•Èì(€Ñ½Ñ…±¥±•Ìè¹Õµ‰•Èì(€µ•ÍÍ…”èÍÑÉ¥¹œì)ô
+export interface Series {
+  id: string;
+  name: string;
+  subtitle: string;
+  description: string;
+  accent: string;
+  minecraftVersion: string;
+  loader: string;
+  loaderVersion: string;
+  packStatus: 'unpublished' | 'available';
+}
+
+export interface Bootstrap {
+  series: Series[];
+  activeSeriesId: string;
+  catalogOnline: boolean;
+  gameDirectories: Record<string, string>;
+  suggestedDirectories: Record<string, string>;
+  configDirectory: string;
+  logFile: string;
+  themeId: string;
+  backgroundPath: string | null;
+  java: JavaStatus;
+  javaManuallySelected: boolean;
+  managedGameDirectories: Record<string, string>;
+  installedProfiles: Record<string, string>;
+  microsoftLoginAvailable: boolean;
+  githubDeveloperEnabled: boolean;
+  developerGithubUser: string | null;
+  microsoftProfile: { username: string; uuid: string } | null;
+  memory: MemoryStatus;
+}
+
+export interface MemoryStatus {
+  totalMb: number;
+  minMb: number;
+  maxMb: number;
+  selectedMb: number;
+  manuallySelected: boolean;
+}
+
+export interface MinecraftStatus {
+  running: boolean;
+  seriesId: string | null;
+  pid: number | null;
+  exitCode: number | null;
+  exitSuccess: boolean | null;
+}
+
+export interface DeveloperLoginStatus {
+  status: 'pending' | 'authorized' | 'signedOut' | 'expired' | 'denied' | 'failed';
+  username: string | null;
+  userCode: string | null;
+  verificationUri: string | null;
+  expiresInSeconds: number | null;
+  intervalSeconds: number | null;
+  message: string | null;
+}
+
+export interface PackSourceFile {
+  name: string;
+  sizeBytes: number;
+  sha256: string;
+  license: string | null;
+  licenseStatus: 'recognized' | 'permissionRequired' | 'unknown';
+  minecraftCompatibility: 'compatible' | 'incompatible' | 'unknown';
+  minecraftVersionRange: string | null;
+  forgeCompatibility: 'compatible' | 'incompatible' | 'unknown';
+  forgeVersionRange: string | null;
+}
+
+export interface PackSourcePreview {
+  seriesId: string;
+  directory: string;
+  files: PackSourceFile[];
+  totalBytes: number;
+  sourceFingerprint: string;
+}
+
+export interface PackPublishProgress {
+  seriesId: string;
+  completedFiles: number;
+  totalFiles: number;
+  message: string;
+}
+
+export interface JavaStatus {
+  executable: string | null;
+  version: string | null;
+  major: number | null;
+  compatible: boolean;
+  detail: string;
+}
+
+export interface ModFileEntry {
+  name: string;
+  sizeBytes: number;
+}
+
+export interface ModInventory {
+  gameDirectory: string | null;
+  modsDirectory: string | null;
+  loadedFromModsRoot: ModFileEntry[];
+  officialStore: ModFileEntry[];
+  personalStore: ModFileEntry[];
+}
+
+export interface InstallProgress {
+  seriesId: string;
+  stage: string;
+  message: string;
+  completedFiles: number;
+}
+
+export interface PackSyncResult {
+  seriesId: string;
+  version: string;
+  downloadedFiles: number;
+  removedFiles: number;
+}
+
+export interface PackSyncProgress {
+  seriesId: string;
+  completedFiles: number;
+  totalFiles: number;
+  message: string;
+}

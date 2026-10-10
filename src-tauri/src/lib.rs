@@ -247,6 +247,12 @@ fn is_valid_theme(theme_id: &str) -> bool {
     matches!(theme_id, "series" | "siege" | "ghouls" | "light")
 }
 
+fn resolve_theme(theme_id: Option<String>) -> String {
+    theme_id
+        .filter(|theme| is_valid_theme(theme))
+        .unwrap_or_else(|| "light".into())
+}
+
 fn is_safe_background_filename(file_name: &str) -> bool {
     let Some(rest) = file_name.strip_prefix("background-") else {
         return false;
@@ -1490,10 +1496,7 @@ fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
         suggested_directories: suggested_directories(),
         config_directory,
         log_file,
-        theme_id: settings
-            .theme_id
-            .filter(|id| is_valid_theme(id))
-            .unwrap_or_else(|| "series".into()),
+        theme_id: resolve_theme(settings.theme_id),
         background_path: background_path(app, settings.background_file.as_deref())?,
         java,
         java_manually_selected,
@@ -2713,6 +2716,9 @@ mod tests {
 
     #[test]
     fn appearance_validation_accepts_only_supported_themes_and_local_image_signatures() {
+        assert_eq!(resolve_theme(None), "light");
+        assert_eq!(resolve_theme(Some("ghouls".into())), "ghouls");
+        assert_eq!(resolve_theme(Some("unknown".into())), "light");
         assert!(is_valid_theme("series"));
         assert!(is_valid_theme("siege"));
         assert!(is_valid_theme("ghouls"));

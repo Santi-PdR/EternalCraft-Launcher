@@ -90,8 +90,6 @@ struct Settings {
     #[serde(default)]
     background_file: Option<String>,
     #[serde(default)]
-    microsoft_client_id: Option<String>,
-    #[serde(default)]
     memory_limit_mb: Option<u32>,
 }
 
@@ -153,7 +151,7 @@ struct Bootstrap {
     java_manually_selected: bool,
     managed_game_directories: BTreeMap<String, String>,
     installed_profiles: BTreeMap<String, String>,
-    microsoft_client_id: Option<String>,
+    microsoft_login_available: bool,
     github_developer_enabled: bool,
     developer_github_user: Option<String>,
     microsoft_profile: Option<MicrosoftProfile>,
@@ -1556,7 +1554,7 @@ fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
         java_manually_selected,
         managed_game_directories,
         installed_profiles,
-        microsoft_client_id: settings.microsoft_client_id,
+        microsoft_login_available: configured_microsoft_client_id().is_some(),
         github_developer_enabled: developer::github_app_client_id_configured(),
         developer_github_user: app.state::<developer::GitHubDeveloper>().username(),
         microsoft_profile,
@@ -1860,26 +1858,16 @@ fn is_valid_microsoft_client_id(id: &str) -> bool {
         })
 }
 
-#[tauri::command]
-fn set_microsoft_client_id(app: AppHandle, client_id: String) -> Result<Bootstrap, String> {
-    let id = client_id.trim();
-    if !is_valid_microsoft_client_id(id) {
-        return Err("El Client ID debe ser el identificador UUID de una aplicación de escritorio registrada en Microsoft.".into());
-    }
-    let mut settings = read_settings(&app)?;
-    settings.microsoft_client_id = Some(id.to_ascii_lowercase());
-    write_settings(&app, &settings)?;
-    make_bootstrap(&app)
+fn configured_microsoft_client_id() -> Option<&'static str> {
+    option_env!("ETERNALCRAFT_MICROSOFT_CLIENT_ID")
+        .map(str::trim)
+        .filter(|id| is_valid_microsoft_client_id(id))
 }
 
 #[tauri::command]
 fn login_microsoft(app: AppHandle) -> Result<Bootstrap, String> {
-    let settings = read_settings(&app)?;
-    let client_id = settings
-        .microsoft_client_id
-        .as_deref()
-        .ok_or_else(|| "Configura primero el Client ID público de Microsoft en Ajustes.".to_string())?
-        .to_string();
+    let client_id = configured_microsoft_client_id()
+        .ok_or_else(|| "El inicio de sesión Microsoft no está habilitado en esta compilación.".to_string())?;
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
         .map_err(|error| format!("No se pudo abrir el callback local de inicio de sesión: {error}"))?;
     listener
@@ -1888,7 +1876,7 @@ fn login_microsoft(app: AppHandle) -> Result<Bootstrap, String> {
     let port = listener.local_addr().map_err(|error| error.to_string())?.port();
     let redirect_uri = format!("http://localhost:{port}");
     let (login_url, expected_state, verifier) =
-        get_secure_login_data(&client_id, &redirect_uri, None);
+        get_secure_login_data(client_id, &redirect_uri, None);
     open_system_browser(&login_url)
         .map_err(|error| format!("No se pudo abrir el navegador para iniciar sesión: {error}"))?;
 
@@ -2049,10 +2037,8 @@ fn launch_minecraft(app: AppHandle, series_id: String) -> Result<MinecraftStatus
         .map_err(|_| "La sesión Microsoft quedó bloqueada".to_string())?
         .clone()
         .ok_or_else(|| "Inicia sesión con una cuenta Microsoft propietaria de Minecraft antes de jugar.".to_string())?;
-    let client_id = settings
-        .microsoft_client_id
-        .as_deref()
-        .ok_or_else(|| "Falta el Client ID público de Microsoft.".to_string())?;
+    let client_id = configured_microsoft_client_id()
+        .ok_or_else(|| "El inicio de sesión Microsoft no está habilitado en esta compilación.".to_string())?;
     let account = complete_refresh(client_id, None, &session.refresh_token)
         .map_err(|error| format!("La sesión Microsoft necesita renovarse. Vuelve a iniciar sesión: {error}"))?;
     session.profile = MicrosoftProfile {
@@ -2429,7 +2415,6 @@ pub fn run() {
             set_active_series,
             select_game_directory,
             link_detected_directory,
-            set_microsoft_client_id,
             login_microsoft,
             logout_microsoft,
             developer::begin_github_developer_login,
@@ -2777,7 +2762,6 @@ mod tests {
             theme_id: Some("ghouls".into()),
             theme_migrated: true,
             background_file: Some("background-123.webp".into()),
-            microsoft_client_id: Some("12345678-1234-4234-8234-123456789abc".into()),
             memory_limit_mb: Some(4096),
         };
         let encoded = serde_json::to_vec(&settings).expect("settings serialize");
@@ -2791,8 +2775,15 @@ mod tests {
             decoded.background_file.as_deref(),
             Some("background-123.webp")
         );
-        assert_eq!(decoded.microsoft_client_id, settings.microsoft_client_id);
         assert_eq!(decoded.memory_limit_mb, Some(4096));
+    }
+
+    #[test]
+    fn legacy_microsoft_client_id_is_ignored_in_user_preferences() {
+        let legacy = r#"{"microsoftClientId":"12345678-1234-4234-8234-123456789abc"}"#;
+        let settings: Settings = serde_json::from_str(legacy).expect("legacy settings deserialize");
+        let encoded = serde_json::to_value(settings).expect("updated settings serialize");
+        assert!(encoded.get("microsoftClientId").is_none());
     }
 
     #[test]

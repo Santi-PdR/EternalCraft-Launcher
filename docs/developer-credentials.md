@@ -4,12 +4,11 @@ El launcher usa dos identificadores públicos distintos. No son contraseñas ni 
 
 ## Inicio de sesión Microsoft
 
-1. Abre el [portal Microsoft Entra](https://entra.microsoft.com/) y entra a **App registrations → New registration**.
-2. Registra `EternalCraft Launcher` y elige **Personal Microsoft accounts only** para usuarios de Xbox/Minecraft. Si también necesitas cuentas laborales, elige la opción que incluye cuentas organizacionales y personales.
-3. En **Authentication → Add a platform**, elige **Mobile and desktop applications** y agrega el URI `http://localhost`. El launcher abre el navegador del sistema y usa un puerto local disponible con PKCE.
-4. En la página **Overview**, copia **Application (client) ID**. Pégalo en Developer → Inicio de sesión Microsoft y pulsa **Guardar configuración Microsoft**.
+El launcher no muestra el Client ID en Ajustes ni lo guarda en preferencias. El propietario configura el ID público de la app de escritorio una sola vez como variable de GitHub Actions `ETERNALCRAFT_MICROSOFT_CLIENT_ID`. No es un secreto y no se debe crear un client secret. El workflow de release rechaza IDs que no tengan formato UUID y no publica una versión jugable sin esta variable.
 
-No crees un client secret para el launcher. El inicio requiere una cuenta Microsoft con licencia de Minecraft; configurar el ID no concede una licencia.
+Para registrar la app: abre [Microsoft Entra](https://entra.microsoft.com/), entra a **App registrations → New registration**, registra `EternalCraft Launcher` para cuentas Microsoft personales y agrega `http://localhost` en **Authentication → Mobile and desktop applications**. Copia **Application (client) ID** desde Overview y guárdalo como variable de Actions en `Santi-PdR/EternalCraft-Launcher`. El launcher usa un puerto local disponible y PKCE al iniciar sesión.
+
+El inicio requiere una cuenta Microsoft con licencia de Minecraft; configurar el ID no concede una licencia. Si el ID no está en una compilación, el launcher permite explorar pero desactiva el inicio de sesión y el lanzamiento.
 
 Guía oficial: [registrar una aplicación en Microsoft Entra](https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app) y [registrar una aplicación de escritorio](https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-desktop-app-sign-in).
 

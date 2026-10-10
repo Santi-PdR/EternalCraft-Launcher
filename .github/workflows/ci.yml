@@ -35,6 +35,9 @@ jobs:
 
   native-build:
     name: Native bundle (${{ matrix.os }})
+    env:
+      ETERNALCRAFT_GITHUB_APP_CLIENT_ID: ${{ vars.ETERNALCRAFT_GITHUB_APP_CLIENT_ID }}
+      ETERNALCRAFT_MICROSOFT_CLIENT_ID: ${{ vars.ETERNALCRAFT_MICROSOFT_CLIENT_ID }}
     strategy:
       fail-fast: false
       matrix:

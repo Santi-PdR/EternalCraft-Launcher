@@ -41,7 +41,6 @@
   let launcherUpdateNotes = $state('');
   let launcherUpdateDownloaded = $state(0);
   let launcherUpdateSize = $state<number | null>(null);
-  let clientIdDraft = $state('');
   let developerLoginStatus = $state<DeveloperLoginStatus>({ status: 'signedOut', username: null, userCode: null, verificationUri: null, expiresInSeconds: null, intervalSeconds: null, message: null });
   let developerLoginBusy = $state(false);
   let developerPollBusy = false;
@@ -235,7 +234,6 @@
         firstRunStep = bootstrap.microsoftProfile ? 'install' : 'account';
         welcomeOpen = true;
       }
-      clientIdDraft = bootstrap.microsoftClientId ?? '';
       memoryDraft = bootstrap.memory.selectedMb;
       developerLoginStatus = await invoke<DeveloperLoginStatus>('github_developer_status');
       await loadMods(bootstrap.activeSeriesId);
@@ -243,19 +241,6 @@
       error = String(reason);
     } finally {
       loading = false;
-    }
-  }
-
-  async function saveMicrosoftClientId() {
-    busy = true;
-    error = '';
-    try {
-      bootstrap = await invoke<Bootstrap>('set_microsoft_client_id', { clientId: clientIdDraft });
-      notice = 'Configuración pública de Microsoft guardada';
-    } catch (reason) {
-      error = String(reason);
-    } finally {
-      busy = false;
     }
   }
 
@@ -307,8 +292,8 @@
   }
 
   async function loginMicrosoft() {
-    if (!bootstrap?.microsoftClientId) {
-      error = 'El inicio de sesión de Microsoft todavía no está configurado para EternalCraft. Puedes explorar el launcher; para jugar hace falta una cuenta Microsoft con Minecraft.';
+    if (!bootstrap?.microsoftLoginAvailable) {
+      error = 'El inicio de sesión Microsoft no está habilitado en esta versión. Puedes explorar el launcher; para jugar hace falta una cuenta Microsoft con Minecraft.';
       return;
     }
     busy = true;
@@ -682,7 +667,7 @@
       {#if notice}<div class="toast" role="status">{notice}</div>{/if}
       {#if launcherUpdateState === 'available'}<div class="toast launcher-update-toast" role="status"><span>EternalCraft {launcherUpdateVersion} está listo</span><button class="button primary" onclick={installLauncherUpdate}>Actualizar</button></div>{/if}
 
-      {#if welcomeOpen}<div class="welcome-backdrop" role="presentation"><div class="welcome-dialog" role="dialog" aria-modal="true" aria-labelledby="welcome-title" tabindex="-1"><span class="eyebrow">BIENVENIDO A ETERNALCRAFT</span>{#if firstRunStep === 'account'}<h1 id="welcome-title">¿Cómo quieres empezar?</h1><p>Inicia sesión con Microsoft para jugar, o explora las series y ajustes antes de vincular una cuenta.</p><button class="button primary welcome-action" onclick={loginMicrosoft} disabled={busy}>{busy ? 'Abriendo Microsoft…' : 'Iniciar sesión con Microsoft'}</button>{#if !bootstrap.microsoftClientId}<small>El propietario todavía debe configurar el inicio de sesión Microsoft.</small>{/if}<button class="button secondary welcome-action" onclick={continueWithoutAccount}>Explorar sin iniciar sesión</button><small>Sin cuenta podrás recorrer el launcher. Para iniciar Minecraft se requiere una cuenta Microsoft con licencia.</small>{:else}<h1 id="welcome-title">Prepara tu primera serie</h1><p>{bootstrap.installedProfiles[selected.id] ? 'Tu instancia ya está lista.' : `Puedes instalar ahora Minecraft ${selected.minecraftVersion}, Forge y Java 17 para ${selected.name}.`}</p>{#if !bootstrap.installedProfiles[selected.id]}<button class="button primary welcome-action" onclick={() => { finishWelcome(); void installBase(); }}>Instalar Forge y Java 17</button>{/if}<button class="button secondary welcome-action" onclick={finishWelcome}>Lo haré después</button>{/if}</div></div>{/if}
+      {#if welcomeOpen}<div class="welcome-backdrop" role="presentation"><div class="welcome-dialog" role="dialog" aria-modal="true" aria-labelledby="welcome-title" tabindex="-1"><span class="eyebrow">BIENVENIDO A ETERNALCRAFT</span>{#if firstRunStep === 'account'}<h1 id="welcome-title">¿Cómo quieres empezar?</h1><p>Inicia sesión con Microsoft para jugar, o explora las series y ajustes antes de vincular una cuenta.</p><button class="button primary welcome-action" onclick={loginMicrosoft} disabled={busy || !bootstrap.microsoftLoginAvailable}>{busy ? 'Abriendo Microsoft…' : 'Iniciar sesión con Microsoft'}</button>{#if !bootstrap.microsoftLoginAvailable}<small>El inicio de sesión todavía no está habilitado en esta versión.</small>{/if}<button class="button secondary welcome-action" onclick={continueWithoutAccount}>Explorar sin iniciar sesión</button><small>Sin cuenta podrás recorrer el launcher. Para iniciar Minecraft se requiere una cuenta Microsoft con licencia.</small>{:else}<h1 id="welcome-title">Prepara tu primera serie</h1><p>{bootstrap.installedProfiles[selected.id] ? 'Tu instancia ya está lista.' : `Puedes instalar ahora Minecraft ${selected.minecraftVersion}, Forge y Java 17 para ${selected.name}.`}</p>{#if !bootstrap.installedProfiles[selected.id]}<button class="button primary welcome-action" onclick={() => { finishWelcome(); void installBase(); }}>Instalar Forge y Java 17</button>{/if}<button class="button secondary welcome-action" onclick={finishWelcome}>Lo haré después</button>{/if}</div></div>{/if}
 
       {#if activePage === 'home'}
         <section class="page home-page">
@@ -732,13 +717,6 @@
             {#if developerLoginStatus.message}<p class="privacy-note">{developerLoginStatus.message}</p>{/if}
             <a class="text-link" href="https://github.com/Santi-PdR/EternalCraft-Launcher/blob/main/docs/developer-credentials.md" target="_blank" rel="noreferrer">Instrucciones completas ↗</a>
           </details>
-          <details class="developer-integrations"><summary>Inicio de sesión Microsoft</summary>
-            <p>El Client ID es el identificador público de la aplicación registrada; no es una contraseña ni una clave secreta. Registra una app de escritorio con cuentas Microsoft personales y agrega el callback <code>http://localhost</code>.</p>
-            <ol class="credential-steps"><li><a href="https://entra.microsoft.com/" target="_blank" rel="noreferrer">Abrir Microsoft Entra</a> y registrar EternalCraft Launcher.</li><li>En <b>Authentication → Add a platform → Mobile and desktop applications</b>, agrega <code>http://localhost</code>. Copia el <b>Application (client) ID</b> desde Overview y guárdalo aquí.</li></ol>
-            <label class="input-label">Client ID de la aplicación registrada<input class="text-input" type="text" autocomplete="off" spellcheck="false" placeholder="ID público de Microsoft" bind:value={clientIdDraft} /></label>
-            <button class="button secondary" onclick={saveMicrosoftClientId} disabled={busy || clientIdDraft.trim() === (bootstrap.microsoftClientId ?? '')}>Guardar configuración Microsoft</button>
-            <a class="text-link" href="https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app" target="_blank" rel="noreferrer">Guía oficial de registro ↗</a>
-          </details>
           {#if !developerLoginStatus.username}<div class="empty-card developer-empty"><div class="empty-icon">⬆</div><h2>Acceso de publicación pendiente</h2><p>Configura la aplicación de GitHub y autoriza una cuenta con acceso al repositorio para publicar el pack de {selected.name}.</p></div>
           {:else}<div class="settings-card developer-pack-card"><div class="setting-row"><div><span class="eyebrow">FUENTE LOCAL · {selected.name}</span><h2>{packSourcePreview?.seriesId === selected.id ? `${packSourcePreview.files.length} JAR oficiales` : 'Selecciona la carpeta de mods'}</h2><p>{packSourcePreview?.seriesId === selected.id ? packSourcePreview.directory : 'Se leerán únicamente archivos .jar del directorio elegido. No se cargan configuraciones ni subcarpetas.'}</p></div><div class="play-actions"><button class="button secondary" onclick={choosePackSource} disabled={packSourceBusy}>{packSourceBusy ? 'Verificando…' : 'Elegir carpeta'}</button>{#if packSourcePreview?.seriesId === selected.id}<button class="button secondary" onclick={refreshPackSource} disabled={packSourceBusy}>Volver a verificar</button>{/if}</div></div>
             {#if packSourcePreview?.seriesId === selected.id}
@@ -764,7 +742,7 @@
             <div class="setting-row memory-setting"><div><span class="eyebrow">MEMORIA DE MINECRAFT</span><h2>{(memoryDraft / 1024).toFixed(1)} GiB asignados</h2><p>RAM detectada: {(bootstrap.memory.totalMb / 1024).toFixed(1)} GiB · recomendado hasta {(bootstrap.memory.maxMb / 1024).toFixed(1)} GiB.</p><input class="memory-slider" type="range" min={bootstrap.memory.minMb} max={bootstrap.memory.maxMb} step="512" aria-label="Memoria RAM asignada a Minecraft" value={memoryDraft} oninput={(event) => (memoryDraft = Number(event.currentTarget.value))} /></div><div class="play-actions"><button class="button secondary" onclick={saveMemoryLimit} disabled={busy || memoryDraft === bootstrap.memory.selectedMb}>Guardar</button>{#if bootstrap.memory.manuallySelected}<button class="button secondary" onclick={resetMemoryLimit} disabled={busy}>Automático</button>{/if}</div></div>
             <div class="setting-row"><div><span class="eyebrow">JAVA · MINECRAFT 1.20.1</span><h2>{bootstrap.java.compatible ? `Java ${bootstrap.java.version}` : 'Java 17 no está listo'}</h2><p>{bootstrap.java.detail}{#if bootstrap.java.executable}<br/><code>{bootstrap.java.executable}</code>{/if}</p></div><div class="play-actions"><span class:saved-chip={bootstrap.java.compatible} class:warning-chip={!bootstrap.java.compatible}>{bootstrap.java.compatible ? 'LISTO' : 'REVISAR'}</span><button class="button secondary" onclick={selectJava} disabled={busy}>Elegir Java</button>{#if bootstrap.javaManuallySelected}<button class="button secondary" onclick={resetJava} disabled={busy}>Automático</button>{/if}<button class="button secondary" onclick={refreshJava} disabled={javaRefreshing}>{javaRefreshing ? 'Comprobando…' : 'Comprobar'}</button></div></div>
           </div>
-          {:else if settingsTab === 'account'}<div class="settings-card"><div class="setting-row"><div><span class="eyebrow">CUENTA DE MINECRAFT</span><h2>{bootstrap.microsoftProfile?.username ?? 'No has iniciado sesión'}</h2><p>{bootstrap.microsoftProfile ? 'Cuenta Microsoft vinculada a esta sesión.' : 'Usa una cuenta Microsoft propietaria de Minecraft para jugar. Puedes recorrer el launcher sin iniciar sesión.'}</p></div><div class="play-actions">{#if bootstrap.microsoftProfile}<button class="button secondary" onclick={logoutMicrosoft} disabled={busy}>Cerrar sesión</button>{:else}<button class="button primary" onclick={loginMicrosoft} disabled={busy || !bootstrap.microsoftClientId}>{busy ? 'Abriendo…' : 'Iniciar sesión con Microsoft'}</button>{/if}</div></div>{#if !bootstrap.microsoftProfile && !bootstrap.microsoftClientId}<p class="account-setup-note">El inicio de Microsoft aún no está habilitado por el propietario del launcher. Puedes explorar; el modo de juego requiere una cuenta legítima.</p>{/if}</div>
+          {:else if settingsTab === 'account'}<div class="settings-card"><div class="setting-row"><div><span class="eyebrow">CUENTA DE MINECRAFT</span><h2>{bootstrap.microsoftProfile?.username ?? 'No has iniciado sesión'}</h2><p>{bootstrap.microsoftProfile ? 'Cuenta Microsoft vinculada a esta sesión.' : 'Usa una cuenta Microsoft propietaria de Minecraft para jugar. Puedes recorrer el launcher sin iniciar sesión.'}</p></div><div class="play-actions">{#if bootstrap.microsoftProfile}<button class="button secondary" onclick={logoutMicrosoft} disabled={busy}>Cerrar sesión</button>{:else}<button class="button primary" onclick={loginMicrosoft} disabled={busy || !bootstrap.microsoftLoginAvailable}>{busy ? 'Abriendo…' : 'Iniciar sesión con Microsoft'}</button>{/if}</div></div>{#if !bootstrap.microsoftProfile && !bootstrap.microsoftLoginAvailable}<p class="account-setup-note">El inicio de Microsoft todavía no está habilitado en esta versión. Puedes recorrer el launcher; el modo de juego requiere una cuenta con licencia.</p>{/if}</div>
           {:else if settingsTab === 'appearance'}<div class="settings-card"><div class="setting-row appearance-row"><div><span class="eyebrow">TEMAS</span><h2>El aspecto de tu launcher</h2><p>Elige una paleta para la interfaz. Puedes agregar un fondo propio desde tu equipo.</p><div class="theme-options"><button class:theme-selected={bootstrap.themeId === 'light'} class="button secondary theme-swatch light-swatch" onclick={() => saveTheme('light')}>Claro</button><button class:theme-selected={bootstrap.themeId === 'series'} class="button secondary" onclick={() => saveTheme('series')}>Serie activa</button><button class:theme-selected={bootstrap.themeId === 'siege'} class="button secondary" onclick={() => saveTheme('siege')}>SIEGE</button><button class:theme-selected={bootstrap.themeId === 'ghouls'} class="button secondary" onclick={() => saveTheme('ghouls')}>Ghouls</button></div></div><div class="play-actions"><button class="button secondary" onclick={chooseBackground}>Elegir fondo</button>{#if bootstrap.backgroundPath}<button class="button secondary" onclick={clearBackground}>Quitar fondo</button>{/if}</div></div></div>
           {:else}<div class="settings-card"><div class="setting-row"><div><span class="eyebrow">INSTANCIA · {selected.name}</span><h2>Carpeta de juego</h2><p>{pathFor(selected) || bootstrap.managedGameDirectories[selected.id] || 'Elige una ubicación para esta serie.'}</p></div><div class="play-actions"><button class="button secondary" onclick={selectDirectory} disabled={busy}>{isLinked(selected) ? 'Cambiar carpeta' : 'Seleccionar carpeta'}</button><button class="button secondary" onclick={installBase} disabled={installingSeries !== null}>{bootstrap.installedProfiles[selected.id] ? 'Reparar base' : 'Instalar Forge + Java 17'}</button></div></div><div class="setting-row"><div><span class="eyebrow">PREFERENCIAS</span><h2>Guardadas en este equipo</h2><p>{bootstrap.configDirectory}</p></div><span class="saved-chip">GUARDADO</span></div><div class="setting-row"><div><span class="eyebrow">REGISTRO DEL LAUNCHER</span><h2>Diagnóstico y soporte</h2><p>Revisa estado del juego y registros locales sin compartirlos automáticamente.</p></div><button class="button secondary" onclick={openSupport}>Abrir soporte</button></div></div>{/if}
         </section>

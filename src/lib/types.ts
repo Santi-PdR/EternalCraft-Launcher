@@ -24,7 +24,7 @@ export interface Bootstrap {
   javaManuallySelected: boolean;
   managedGameDirectories: Record<string, string>;
   installedProfiles: Record<string, string>;
-  microsoftClientId: string | null;
+  microsoftLoginAvailable: boolean;
   githubDeveloperEnabled: boolean;
   developerGithubUser: string | null;
   microsoftProfile: { username: string; uuid: string } | null;

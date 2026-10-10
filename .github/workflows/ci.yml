@@ -133,6 +133,35 @@ jobs:
           }
           if ($header[0] -ne 0x4d -or $header[1] -ne 0x5a) { throw "NSIS setup is not a Windows PE executable" }
           Write-Output "$($installer.Name): $($installer.Length) bytes; PE header valid"
+
+          $installPath = Join-Path $env:RUNNER_TEMP "EternalCraft Launcher Install Test"
+          if (Test-Path $installPath) { Remove-Item $installPath -Recurse -Force }
+          $install = Start-Process -FilePath $installer.FullName -ArgumentList @("/S", "/D=$installPath") -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "Silent NSIS installation failed with exit code $($install.ExitCode)" }
+          $installedLauncher = @(Get-ChildItem -Path $installPath -Filter "eternalcraft-launcher.exe" -Recurse -File)
+          if ($installedLauncher.Count -ne 1) { throw "Expected one installed launcher executable, found $($installedLauncher.Count)" }
+          $uninstaller = @(Get-ChildItem -Path $installPath -Filter "uninstall.exe" -Recurse -File)
+          if ($uninstaller.Count -ne 1) { throw "Expected one installed uninstaller, found $($uninstaller.Count)" }
+
+          $process = Start-Process -FilePath $installedLauncher[0].FullName -PassThru
+          try {
+            Start-Sleep -Seconds 15
+            $process.Refresh()
+            if ($process.HasExited) { throw "Installed launcher exited during startup with code $($process.ExitCode)" }
+            Write-Output "Installed launcher remained open for 15 seconds; Minecraft was not started."
+          } finally {
+            $process.Refresh()
+            if (-not $process.HasExited) {
+              Stop-Process -Id $process.Id -Force
+              Wait-Process -Id $process.Id -ErrorAction SilentlyContinue
+            }
+          }
+
+          $remove = Start-Process -FilePath $uninstaller[0].FullName -ArgumentList "/S" -Wait -PassThru
+          if ($remove.ExitCode -ne 0) { throw "Silent NSIS uninstallation failed with exit code $($remove.ExitCode)" }
+          if (Test-Path (Join-Path $installPath "eternalcraft-launcher.exe")) { throw "Uninstaller left the launcher executable behind" }
+          if (Test-Path $installPath) { Remove-Item $installPath -Recurse -Force }
+          Write-Output "Silent install, installed-app startup and uninstall all passed."
       - uses: actions/upload-artifact@v4
         if: success()
         with:

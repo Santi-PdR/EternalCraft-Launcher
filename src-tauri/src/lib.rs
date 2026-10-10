@@ -1367,14 +1367,14 @@ fn inspect_java(path: &Path) -> JavaStatus {
     }
 }
 
-fn ensure_java_executable(path: &Path) -> Result<(), String> {
+fn ensure_java_executable(_path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
-        let metadata = fs::metadata(path)
+        let metadata = fs::metadata(_path)
             .map_err(|error| format!("No se pudo inspeccionar el runtime Java: {error}"))?;
         let mode = metadata.permissions().mode();
         if mode & 0o111 == 0 {
-            fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o111))
+            fs::set_permissions(_path, fs::Permissions::from_mode(mode | 0o111))
                 .map_err(|error| format!("No se pudo habilitar la ejecución de Java: {error}"))?;
         }
     }
@@ -2770,6 +2770,7 @@ mod tests {
             theme_id: Some("ghouls".into()),
             theme_migrated: true,
             background_file: Some("background-123.webp".into()),
+            microsoft_client_id: None,
             memory_limit_mb: Some(4096),
         };
         let encoded = serde_json::to_vec(&settings).expect("settings serialize");

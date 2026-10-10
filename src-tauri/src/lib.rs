@@ -840,6 +840,7 @@ fn install_forge_profile(
             "Forge",
             &format!("Aplicando Forge {forge_version} con Java 17"),
         );
+        ensure_forge_launcher_profiles(&game_dir)?;
         let invocation = InstallerInvocation {
             loader: LoaderKind::Forge,
             java_executable: java_executable.clone(),
@@ -884,6 +885,35 @@ fn install_forge_profile(
         "Base de Minecraft y Forge instalada y verificada",
     );
     Ok(())
+}
+
+fn ensure_forge_launcher_profiles(game_dir: &Path) -> Result<(), String> {
+    let standard = game_dir.join("launcher_profiles.json");
+    let microsoft_store = game_dir.join("launcher_profiles_microsoft_store.json");
+    if standard.is_file() || microsoft_store.is_file() {
+        return Ok(());
+    }
+    let mut file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&standard)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists && standard.is_file() => {
+            return Ok(())
+        }
+        Err(error) => {
+            return Err(format!(
+                "No se pudo preparar el perfil de Minecraft que necesita Forge: {error}"
+            ))
+        }
+    };
+    file.write_all(br#"{"profiles":{},"settings":{},"version":3}"#)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| {
+            let _ = fs::remove_file(&standard);
+            format!("No se pudo escribir el perfil de Minecraft para Forge: {error}")
+        })
 }
 
 fn list_jar_files(directory: &Path) -> Result<Vec<ModFileEntry>, String> {
@@ -2900,6 +2930,7 @@ mod tests {
             &mut progress,
         )
         .unwrap();
+        ensure_forge_launcher_profiles(&game_dir).unwrap();
         let invocation = InstallerInvocation {
             loader: LoaderKind::Forge,
             java_executable: java,
@@ -2922,6 +2953,14 @@ mod tests {
         assert!(game_dir
             .join("versions/1.20.1-forge-47.4.10/1.20.1-forge-47.4.10.json")
             .is_file());
+        let profiles: serde_json::Value =
+            serde_json::from_slice(&fs::read(game_dir.join("launcher_profiles.json")).unwrap())
+                .unwrap();
+        assert!(profiles["profiles"]
+            .as_object()
+            .unwrap()
+            .values()
+            .any(|profile| profile["lastVersionId"] == "1.20.1-forge-47.4.10"));
         fs::remove_dir_all(game_dir).unwrap();
     }
 
@@ -2929,6 +2968,30 @@ mod tests {
     fn game_directory_requires_an_existing_directory() {
         assert!(valid_game_dir(Path::new("/path/that/does/not/exist/eternalcraft")).is_err());
         assert!(valid_game_dir(Path::new(env!("CARGO_MANIFEST_DIR"))).is_ok());
+    }
+
+    #[test]
+    fn forge_profile_scaffold_is_created_only_when_no_launcher_profile_exists() {
+        let game_dir = std::env::temp_dir().join(format!(
+            "eternalcraft-launcher-profiles-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&game_dir).unwrap();
+        ensure_forge_launcher_profiles(&game_dir).unwrap();
+        let profile_path = game_dir.join("launcher_profiles.json");
+        let profiles: serde_json::Value =
+            serde_json::from_slice(&fs::read(&profile_path).unwrap()).unwrap();
+        assert!(profiles["profiles"].is_object());
+
+        let existing = br#"{"profiles":{"keep":{"name":"Keep"}}}"#;
+        fs::write(&profile_path, existing).unwrap();
+        ensure_forge_launcher_profiles(&game_dir).unwrap();
+        assert_eq!(fs::read(&profile_path).unwrap(), existing);
+        fs::remove_dir_all(game_dir).unwrap();
     }
 
     #[test]

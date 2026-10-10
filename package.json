@@ -8,6 +8,8 @@
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "check:versions": "node scripts/check-versions.mjs",
+    "check:release-packs": "node scripts/check-release-packs.mjs",
+    "test:release-packs": "node scripts/check-release-packs.test.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

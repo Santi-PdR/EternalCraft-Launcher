@@ -35,6 +35,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm run check:versions
+      - name: Require published official packs
+        run: npm run check:release-packs
       - uses: dtolnay/rust-toolchain@stable
       - if: runner.os == 'Linux'
         run: |

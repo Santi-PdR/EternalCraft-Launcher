@@ -25,7 +25,7 @@ export interface Bootstrap {
   managedGameDirectories: Record<string, string>;
   installedProfiles: Record<string, string>;
   microsoftClientId: string | null;
-  githubAppClientId: string | null;
+  githubDeveloperEnabled: boolean;
   developerGithubUser: string | null;
   microsoftProfile: { username: string; uuid: string } | null;
   memory: MemoryStatus;

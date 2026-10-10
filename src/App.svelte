@@ -42,7 +42,6 @@
   let launcherUpdateDownloaded = $state(0);
   let launcherUpdateSize = $state<number | null>(null);
   let clientIdDraft = $state('');
-  let githubAppClientIdDraft = $state('');
   let developerLoginStatus = $state<DeveloperLoginStatus>({ status: 'signedOut', username: null, userCode: null, verificationUri: null, expiresInSeconds: null, intervalSeconds: null, message: null });
   let developerLoginBusy = $state(false);
   let developerPollBusy = false;
@@ -237,7 +236,6 @@
         welcomeOpen = true;
       }
       clientIdDraft = bootstrap.microsoftClientId ?? '';
-      githubAppClientIdDraft = bootstrap.githubAppClientId ?? '';
       memoryDraft = bootstrap.memory.selectedMb;
       developerLoginStatus = await invoke<DeveloperLoginStatus>('github_developer_status');
       await loadMods(bootstrap.activeSeriesId);
@@ -254,20 +252,6 @@
     try {
       bootstrap = await invoke<Bootstrap>('set_microsoft_client_id', { clientId: clientIdDraft });
       notice = 'Configuración pública de Microsoft guardada';
-    } catch (reason) {
-      error = String(reason);
-    } finally {
-      busy = false;
-    }
-  }
-
-  async function saveGitHubAppClientId() {
-    busy = true;
-    error = '';
-    try {
-      bootstrap = await invoke<Bootstrap>('set_github_app_client_id', { clientId: githubAppClientIdDraft });
-      githubAppClientIdDraft = bootstrap.githubAppClientId ?? '';
-      notice = 'Client ID público de GitHub guardado';
     } catch (reason) {
       error = String(reason);
     } finally {
@@ -740,12 +724,10 @@
         <section class="page narrow-page"><div class="page-heading"><div><span class="eyebrow">DIAGNÓSTICO LOCAL</span><h1>Soporte</h1><p>Estado de la serie activa y registros para localizar problemas.</p></div><div class="play-actions"><button class="button secondary" onclick={async () => { await openSupport(); }} disabled={logsLoading}>{logsLoading ? 'Leyendo…' : 'Actualizar diagnóstico'}</button><button class="button secondary" onclick={copySupportDiagnostics}>Copiar resumen</button></div></div><div class="diagnostic-grid"><article><span>CUENTA</span><strong>{bootstrap.microsoftProfile?.username ?? 'Sin sesión'}</strong></article><article><span>JAVA</span><strong>{bootstrap.java.compatible ? `Java ${bootstrap.java.version}` : 'Revisar Java 17'}</strong></article><article><span>INSTANCIA</span><strong>{bootstrap.installedProfiles[selected.id] ? 'Forge instalado' : pathFor(selected) ? 'Carpeta vinculada' : 'Sin configurar'}</strong></article><article><span>PACK</span><strong>{selected.packStatus === 'available' ? 'Disponible' : 'No publicado'}</strong></article></div><div class="settings-card log-card"><div class="inventory-path"><span class="eyebrow">ARCHIVO LOCAL · {selected.name}</span><code>{bootstrap.logFile}</code></div><pre class="log-viewer" aria-live="polite">{launcherLogs}</pre></div><p class="privacy-note">El resumen copiado omite credenciales. Los registros quedan en este equipo y solo se comparten si tú los envías.</p></section>
       {:else if activePage === 'developer'}
         <section class="page narrow-page"><div class="page-heading"><div><span class="eyebrow">PUBLICACIÓN DE CONTENIDO · {selected.name}</span><h1>Developer</h1><p>Prepara una fuente oficial de mods para la serie seleccionada. Solo se inspeccionan JAR en el nivel raíz; configs y carpetas personales quedan fuera.</p></div><span class="connection-pill">{developerLoginStatus.username ? `GITHUB · ${developerLoginStatus.username}` : 'GITHUB · DESCONECTADO'}</span></div>
-          <details class="developer-integrations"><summary>Configuración de acceso de publicación</summary>
-            <p>El launcher no usa una contraseña compartida. La aplicación de GitHub valida la cuenta y el permiso real del repositorio.</p>
-            <ol class="credential-steps"><li><a href="https://github.com/settings/apps/new" target="_blank" rel="noreferrer">Crear una GitHub App</a>, activar <b>Enable Device Flow</b>, conceder solo <b>Contents: Read and write</b> e instalarla en <b>Santi-PdR/EternalCraft-Launcher</b>.</li><li>Copia el Client ID público de la App, guárdalo aquí y luego autoriza tu cuenta con el código de dispositivo.</li></ol>
-            <p class="privacy-note">No generes ni compartas una clave privada para el launcher. La cuenta autorizada también debe tener permiso de escritura en el repositorio.</p>
-            <label class="input-label">GitHub App Client ID público<input class="text-input" type="text" autocomplete="off" spellcheck="false" placeholder="ID de la aplicación" bind:value={githubAppClientIdDraft} /></label>
-            <div class="play-actions"><button class="button secondary" onclick={saveGitHubAppClientId} disabled={busy || !githubAppClientIdDraft.trim() || githubAppClientIdDraft.trim() === (bootstrap.githubAppClientId ?? '')}>Guardar ID de GitHub</button>{#if developerLoginStatus.username}<button class="button secondary" onclick={logoutGitHubDeveloper} disabled={developerLoginBusy}>Desconectar {developerLoginStatus.username}</button>{:else}<button class="button primary" onclick={beginGitHubDeveloperLogin} disabled={developerLoginBusy || !bootstrap.githubAppClientId || developerLoginStatus.status === 'pending'}>{developerLoginStatus.status === 'pending' ? 'Esperando autorización…' : 'Autorizar GitHub'}</button>{/if}</div>
+          <details class="developer-integrations"><summary>Acceso Developer</summary>
+            <p>GitHub comprueba tu cuenta y el permiso de escritura real sobre el repositorio. No se usa una contraseña compartida ni se guardan credenciales en la configuración del launcher.</p>
+            {#if bootstrap.githubDeveloperEnabled}<p class="privacy-note">La autorización usa la GitHub App oficial. Solo las cuentas con permiso de escritura en el repositorio pueden publicar.</p>{:else}<p class="warning-chip">El acceso Developer no está configurado en esta compilación.</p>{/if}
+            <div class="play-actions">{#if developerLoginStatus.username}<button class="button secondary" onclick={logoutGitHubDeveloper} disabled={developerLoginBusy}>Desconectar {developerLoginStatus.username}</button>{:else}<button class="button primary" onclick={beginGitHubDeveloperLogin} disabled={!bootstrap.githubDeveloperEnabled || developerLoginBusy || developerLoginStatus.status === 'pending'}>{developerLoginStatus.status === 'pending' ? 'Esperando autorización…' : 'Autorizar GitHub'}</button>{/if}</div>
             {#if developerLoginStatus.userCode}<div class="device-code" role="status"><strong>{developerLoginStatus.userCode}</strong><span>Ingresa este código en <a href={developerLoginStatus.verificationUri ?? 'https://github.com/login/device'} target="_blank" rel="noreferrer">GitHub Device Login ↗</a>. Caduca en {Math.ceil((developerLoginStatus.expiresInSeconds ?? 0) / 60)} min.</span></div>{/if}
             {#if developerLoginStatus.message}<p class="privacy-note">{developerLoginStatus.message}</p>{/if}
             <a class="text-link" href="https://github.com/Santi-PdR/EternalCraft-Launcher/blob/main/docs/developer-credentials.md" target="_blank" rel="noreferrer">Instrucciones completas ↗</a>

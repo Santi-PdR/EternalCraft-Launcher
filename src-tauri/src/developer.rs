@@ -255,41 +255,25 @@ fn valid_github_app_client_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
 }
 
-#[tauri::command]
-pub(super) fn set_github_app_client_id(
-    app: AppHandle,
-    client_id: String,
-) -> Result<Bootstrap, String> {
-    let client_id = client_id.trim();
-    if !valid_github_app_client_id(client_id) {
-        return Err("El Client ID de GitHub App no tiene un formato válido".into());
-    }
-    let mut settings = read_settings(&app)?;
-    settings.github_app_client_id = Some(client_id.to_string());
-    write_settings(&app, &settings)?;
-    let developer = app.state::<GitHubDeveloper>();
-    let mut auth = developer
-        .0
-        .lock()
-        .map_err(|_| "El estado de autorización GitHub quedó bloqueado".to_string())?;
-    auth.pending = None;
-    auth.session = None;
-    auth.source_directories.clear();
-    drop(auth);
-    make_bootstrap(&app)
+fn configured_github_app_client_id() -> Option<&'static str> {
+    option_env!("ETERNALCRAFT_GITHUB_APP_CLIENT_ID")
+        .filter(|value| valid_github_app_client_id(value))
+}
+
+pub(super) fn github_app_client_id_configured() -> bool {
+    configured_github_app_client_id().is_some()
 }
 
 #[tauri::command]
 pub(super) fn begin_github_developer_login(app: AppHandle) -> Result<DeveloperLoginStatus, String> {
-    let client_id = read_settings(&app)?
-        .github_app_client_id
-        .ok_or_else(|| "Configura el Client ID de la GitHub App en Ajustes".to_string())?;
+    let client_id = configured_github_app_client_id()
+        .ok_or_else(|| "El acceso Developer no está configurado para esta compilación".to_string())?;
     let client = http::client().map_err(|error| error.to_string())?;
     let response = client
         .post(GITHUB_DEVICE_CODE_URL)
         .header("Accept", "application/json")
         .header("User-Agent", "EternalCraft-Launcher")
-        .form(&[("client_id", client_id.as_str())])
+        .form(&[("client_id", client_id)])
         .send()
         .map_err(|error| format!("No se pudo solicitar autorización a GitHub: {error}"))?;
     if !response.status().is_success() {

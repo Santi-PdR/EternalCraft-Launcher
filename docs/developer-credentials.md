@@ -15,11 +15,9 @@ Guía oficial: [registrar una aplicación en Microsoft Entra](https://learn.micr
 
 ## Autorización de publicación GitHub
 
-1. Abre [New GitHub App](https://github.com/settings/apps/new) desde la cuenta que administra el repositorio.
-2. Ponle un nombre identificable. Activa **Enable Device Flow**. No hace falta configurar callback URL para este flujo.
-3. En **Repository permissions**, establece únicamente **Contents: Read and write**. Esa autorización permite publicar releases y escribir los manifiestos del repositorio.
-4. Guarda la App e instálala en `Santi-PdR/EternalCraft-Launcher` seleccionando solo ese repositorio.
-5. Copia su **Client ID** público en Developer → Configuración de acceso de publicación y pulsa **Guardar ID de GitHub**. Después pulsa **Autorizar GitHub** y completa el código de dispositivo en github.com.
+1. El propietario registra la GitHub App y activa **Enable Device Flow**, con únicamente **Contents: Read and write**, instalada solo en `Santi-PdR/EternalCraft-Launcher`.
+2. El Client ID público se configura en el build oficial mediante la variable de Actions `ETERNALCRAFT_GITHUB_APP_CLIENT_ID`; no se solicita a los usuarios ni se guarda en sus preferencias.
+3. En Developer, pulsa **Autorizar GitHub** y completa el código de dispositivo en github.com. La cuenta también debe tener permiso de escritura en el repositorio.
 
 No generes ni compartas una clave privada para instalar el launcher. La autorización exige tanto el permiso limitado de la App como que la cuenta conectada tenga acceso de escritura al repositorio. Revoca el acceso desde GitHub si un developer deja de colaborar.
 

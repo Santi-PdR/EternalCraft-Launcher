@@ -92,8 +92,6 @@ struct Settings {
     #[serde(default)]
     microsoft_client_id: Option<String>,
     #[serde(default)]
-    github_app_client_id: Option<String>,
-    #[serde(default)]
     memory_limit_mb: Option<u32>,
 }
 
@@ -156,7 +154,7 @@ struct Bootstrap {
     managed_game_directories: BTreeMap<String, String>,
     installed_profiles: BTreeMap<String, String>,
     microsoft_client_id: Option<String>,
-    github_app_client_id: Option<String>,
+    github_developer_enabled: bool,
     developer_github_user: Option<String>,
     microsoft_profile: Option<MicrosoftProfile>,
     memory: MemoryStatus,
@@ -1559,7 +1557,7 @@ fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
         managed_game_directories,
         installed_profiles,
         microsoft_client_id: settings.microsoft_client_id,
-        github_app_client_id: settings.github_app_client_id,
+        github_developer_enabled: developer::github_app_client_id_configured(),
         developer_github_user: app.state::<developer::GitHubDeveloper>().username(),
         microsoft_profile,
         memory,
@@ -2434,7 +2432,6 @@ pub fn run() {
             set_microsoft_client_id,
             login_microsoft,
             logout_microsoft,
-            developer::set_github_app_client_id,
             developer::begin_github_developer_login,
             developer::poll_github_developer_login,
             developer::github_developer_status,
@@ -2781,7 +2778,6 @@ mod tests {
             theme_migrated: true,
             background_file: Some("background-123.webp".into()),
             microsoft_client_id: Some("12345678-1234-4234-8234-123456789abc".into()),
-            github_app_client_id: Some("Iv23liAbCdEfGh123456".into()),
             memory_limit_mb: Some(4096),
         };
         let encoded = serde_json::to_vec(&settings).expect("settings serialize");
@@ -2796,8 +2792,15 @@ mod tests {
             Some("background-123.webp")
         );
         assert_eq!(decoded.microsoft_client_id, settings.microsoft_client_id);
-        assert_eq!(decoded.github_app_client_id, settings.github_app_client_id);
         assert_eq!(decoded.memory_limit_mb, Some(4096));
+    }
+
+    #[test]
+    fn legacy_github_app_client_id_is_ignored_in_user_preferences() {
+        let legacy = r#"{"githubAppClientId":"Iv23liAbCdEfGh123456"}"#;
+        let settings: Settings = serde_json::from_str(legacy).expect("legacy settings deserialize");
+        let encoded = serde_json::to_value(settings).expect("updated settings serialize");
+        assert!(encoded.get("githubAppClientId").is_none());
     }
 
     #[test]

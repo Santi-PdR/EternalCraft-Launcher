@@ -14,6 +14,8 @@ permissions:
 
 jobs:
   build:
+    env:
+      ETERNALCRAFT_GITHUB_APP_CLIENT_ID: ${{ vars.ETERNALCRAFT_GITHUB_APP_CLIENT_ID }}
     strategy:
       fail-fast: false
       matrix:
@@ -40,6 +42,7 @@ jobs:
       - name: Check release tag matches app version
         shell: bash
         run: |
+          [[ -n "${ETERNALCRAFT_GITHUB_APP_CLIENT_ID:-}" ]] || { echo "Set the ETERNALCRAFT_GITHUB_APP_CLIENT_ID Actions variable before creating an official release"; exit 1; }
           app_version="$(node -p "JSON.parse(require('fs').readFileSync('src-tauri/tauri.conf.json', 'utf8')).version")"
           package_version="$(node -p "JSON.parse(require('fs').readFileSync('package.json', 'utf8')).version")"
           tag_version="${GITHUB_REF_NAME#launcher-v}"

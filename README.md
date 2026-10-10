@@ -23,6 +23,8 @@ The mods page can import, activate and remove personal Forge JARs. Imported mods
 
 Developer authorization uses a GitHub App configured by its public Client ID, GitHub's device flow, and repository permissions; the app checks write access to `Santi-PdR/EternalCraft-Launcher` and keeps the access token in memory only. Create/install an App with Device Flow enabled and only `Contents: Read and write` on this repository. Do not add an App private key, shared password, or client secret to the launcher. At startup the launcher fetches the series catalog from GitHub and falls back to the embedded catalog when offline. The Developer page scans only top-level JAR files, validates Forge archives and SHA-256, and displays each declared mod license. Publishing requires an acknowledgement tied to the exact reviewed source fingerprint; if any file changes, the source must be reviewed again. This is a review gate, not a legal determination: the publisher does not establish redistribution rights. It uploads to a draft release, verifies GitHub asset digests, publishes the release, then advances the series manifest and enables the catalog entry. Retries reuse matching release assets and replace stale assets only in an unpublished draft.
 
+The Developer page explains the Microsoft and GitHub registration steps. See [developer credential setup](docs/developer-credentials.md) for the exact account types, localhost redirect, device-flow toggle and minimum GitHub permission.
+
 Forge installation progress and installer output are kept in a rotating local log under the app data directory and can be read from Support. Linux release builds use verified `.deb` and `.rpm` bundles; the Windows workflow builds an NSIS installer.
 
 ## Launcher updates and releases

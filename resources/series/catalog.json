@@ -10,7 +10,7 @@
       "minecraftVersion": "1.20.1",
       "loader": "Forge",
       "loaderVersion": "47.4.10",
-      "packStatus": "unpublished"
+      "packStatus": "available"
     },
     {
       "id": "ghouls-outbreak",
@@ -21,7 +21,7 @@
       "minecraftVersion": "1.20.1",
       "loader": "Forge",
       "loaderVersion": "47.4.10",
-      "packStatus": "unpublished"
+      "packStatus": "available"
     }
   ]
 }

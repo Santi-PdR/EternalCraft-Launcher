@@ -8,12 +8,13 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::Mutex,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 const MANIFEST_LIMIT: u64 = 2 * 1024 * 1024;
 const MOD_LIMIT: u64 = 512 * 1024 * 1024;
 const PACK_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
+const STALE_STAGING_AGE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
 static PACK_SYNC_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -373,6 +374,82 @@ fn files_to_download(game_dir: &Path, manifest: &PackManifest) -> Result<Vec<Pac
     Ok(downloads)
 }
 
+fn is_launcher_staging_directory(name: &str) -> bool {
+    let Some(suffix) = name.strip_prefix(".eternalcraft-pack-") else {
+        return false;
+    };
+    let mut parts = suffix.split('-');
+    matches!((parts.next(), parts.next(), parts.next()), (Some(pid), Some(nonce), None)
+        if !pid.is_empty()
+            && pid.bytes().all(|byte| byte.is_ascii_digit())
+            && !nonce.is_empty()
+            && nonce.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+fn is_stale_staging_directory(
+    modified: SystemTime,
+    now: SystemTime,
+    max_age: Duration,
+) -> bool {
+    now.duration_since(modified)
+        .is_ok_and(|age| age >= max_age)
+}
+
+fn clean_stale_staging_directories(
+    game_dir: &Path,
+    now: SystemTime,
+    max_age: Duration,
+) -> Result<usize, String> {
+    let entries = match fs::read_dir(game_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => {
+            return Err(format!(
+                "No se pudieron revisar descargas interrumpidas: {error}"
+            ))
+        }
+    };
+    let mut removed = 0;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            format!("No se pudo revisar una descarga interrumpida: {error}")
+        })?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !is_launcher_staging_directory(&name) {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "No se pudo validar una descarga interrumpida: {error}"
+                ))
+            }
+        };
+        if !metadata.file_type().is_dir() {
+            continue;
+        }
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        if !is_stale_staging_directory(modified, now, max_age) {
+            continue;
+        }
+        match fs::remove_dir_all(&path) {
+            Ok(()) => removed += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "No se pudo retirar una descarga interrumpida: {error}"
+                ))
+            }
+        }
+    }
+    Ok(removed)
+}
+
 fn atomic_save_state(path: &Path, state: &PackState) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(state).map_err(|error| error.to_string())?;
     let mut file = AtomicWriteFile::options()
@@ -637,13 +714,23 @@ pub(super) fn sync_pack(
         );
     }
     let downloads = files_to_download(game_dir, &manifest)?;
+    let stale_directories = clean_stale_staging_directories(
+        game_dir,
+        SystemTime::now(),
+        STALE_STAGING_AGE,
+    )?;
     report_progress(PackProgress {
         series_id: series_id.into(),
         completed_files: 0,
         total_files: downloads.len(),
         message: format!(
-            "Manifiesto {} verificado; preparando descargas",
-            manifest.version
+            "Manifiesto {} verificado; preparando descargas{}",
+            manifest.version,
+            if stale_directories == 0 {
+                String::new()
+            } else {
+                format!(" · limpiadas {stale_directories} descargas interrumpidas")
+            }
         ),
     });
 
@@ -744,6 +831,37 @@ mod tests {
         ));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn interrupted_pack_staging_cleanup_only_targets_old_launcher_directories() {
+        let game = temp_dir();
+        let now = SystemTime::now();
+        let stale_name = ".eternalcraft-pack-1234-987654321";
+        let fresh_name = ".eternalcraft-pack-1234-987654322";
+        let unrelated_name = ".eternalcraft-pack-not-owned";
+
+        assert!(is_launcher_staging_directory(stale_name));
+        assert!(!is_launcher_staging_directory(unrelated_name));
+        assert!(!is_stale_staging_directory(
+            now - Duration::from_secs(60),
+            now,
+            STALE_STAGING_AGE
+        ));
+        assert!(is_stale_staging_directory(now - STALE_STAGING_AGE, now, STALE_STAGING_AGE));
+
+        fs::create_dir(game.join(stale_name)).unwrap();
+        fs::create_dir(game.join(fresh_name)).unwrap();
+        fs::create_dir(game.join(unrelated_name)).unwrap();
+        let removed = clean_stale_staging_directories(&game, now, Duration::ZERO).unwrap();
+        assert_eq!(
+            removed, 2,
+            "only precisely named launcher staging directories are removed"
+        );
+        assert!(!game.join(stale_name).exists());
+        assert!(!game.join(fresh_name).exists());
+        assert!(game.join(unrelated_name).exists());
+        fs::remove_dir_all(game).unwrap();
     }
 
     fn mod_jar(mod_id: &str) -> Vec<u8> {

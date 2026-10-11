@@ -65,7 +65,7 @@ jobs:
           official_forge_install_smoke_test_without_launching_game -- --ignored --nocapture
       - run: npm run test:updater-signature
       - if: runner.os == 'Linux'
-        run: npm run tauri -- build --bundles deb,rpm
+        run: npm run tauri -- build --bundles appimage,deb,rpm
       - if: runner.os == 'Windows'
         run: npm run tauri -- build --bundles nsis
       - name: Smoke test Linux launcher startup
@@ -99,14 +99,18 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
+          appimage=(src-tauri/target/release/bundle/appimage/*.AppImage)
           deb=(src-tauri/target/release/bundle/deb/*.deb)
           rpm=(src-tauri/target/release/bundle/rpm/*.rpm)
+          [[ ${#appimage[@]} -eq 1 ]] || { echo "Expected one AppImage package, found ${#appimage[@]}"; exit 1; }
           [[ ${#deb[@]} -eq 1 ]] || { echo "Expected one .deb package, found ${#deb[@]}"; exit 1; }
           [[ ${#rpm[@]} -eq 1 ]] || { echo "Expected one .rpm package, found ${#rpm[@]}"; exit 1; }
-          for package in "${deb[0]}" "${rpm[0]}"; do
+          for package in "${appimage[0]}" "${deb[0]}" "${rpm[0]}"; do
             [[ -s "$package" ]] || { echo "Package is empty: $package"; exit 1; }
             file "$package"
           done
+          file "${appimage[0]}" | grep -F "ELF"
+          [[ -x "${appimage[0]}" ]] || { echo "AppImage is not executable"; exit 1; }
           file "${deb[0]}" | grep -F "Debian binary package"
           file "${rpm[0]}" | grep -F "RPM"
           deb_entries="$(dpkg-deb --fsys-tarfile "${deb[0]}" | tar -tf -)"

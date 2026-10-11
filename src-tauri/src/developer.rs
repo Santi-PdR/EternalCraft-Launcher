@@ -1005,6 +1005,18 @@ fn classify_asset_confirmation(
     }
 }
 
+fn should_retry_asset_confirmation(
+    retryable_upload: bool,
+    upload_response_ambiguous: bool,
+    previous_attempt_unconfirmed: bool,
+    asset_exists_without_digest: bool,
+) -> bool {
+    retryable_upload
+        || upload_response_ambiguous
+        || previous_attempt_unconfirmed
+        || asset_exists_without_digest
+}
+
 fn retryable_upload_status(status: reqwest::StatusCode) -> bool {
     status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
 }
@@ -1075,6 +1087,7 @@ fn upload_release_asset_resumable(
 ) -> Result<GitHubReleaseAsset, String> {
     const MAX_ATTEMPTS: usize = 3;
     let mut last_error = String::new();
+    let mut previous_attempt_unconfirmed = false;
     for attempt in 1..=MAX_ATTEMPTS {
         let (retryable, upload_response_was_ambiguous) =
             match upload_release_asset_once(token, upload_url, name, path, size) {
@@ -1104,7 +1117,12 @@ fn upload_release_asset_resumable(
             Ok(assets) => match classify_asset_confirmation(&assets, name, expected_digest) {
                 AssetConfirmation::Verified(asset) => return Ok(asset),
                 AssetConfirmation::Pending { asset_exists } => {
-                    retryable || upload_response_was_ambiguous || asset_exists
+                    should_retry_asset_confirmation(
+                        retryable,
+                        upload_response_was_ambiguous,
+                        previous_attempt_unconfirmed,
+                        asset_exists,
+                    )
                 }
                 AssetConfirmation::DigestMismatch(asset) => {
                     let actual_digest = asset.digest.as_deref().unwrap_or("desconocido");
@@ -1115,7 +1133,14 @@ fn upload_release_asset_resumable(
                     true
                 }
             },
-            Err(verify_error) if !retryable && !upload_response_was_ambiguous => {
+            Err(verify_error)
+                if !should_retry_asset_confirmation(
+                    retryable,
+                    upload_response_was_ambiguous,
+                    previous_attempt_unconfirmed,
+                    false,
+                ) =>
+            {
                 return Err(format!(
                     "{last_error}. No se pudo confirmar si GitHub aceptó el archivo: {verify_error}"
                 ));
@@ -1131,6 +1156,7 @@ fn upload_release_asset_resumable(
         if !should_retry {
             return Err(last_error);
         }
+        previous_attempt_unconfirmed = true;
         if attempt < MAX_ATTEMPTS {
             std::thread::sleep(Duration::from_secs(2_u64.pow(attempt as u32)));
         }
@@ -1904,6 +1930,11 @@ mod tests {
             classify_asset_confirmation(&[], "example.jar", "sha256:abc"),
             AssetConfirmation::Pending { asset_exists: false }
         ));
+
+        assert!(should_retry_asset_confirmation(true, false, false, false));
+        assert!(should_retry_asset_confirmation(false, false, true, false));
+        assert!(should_retry_asset_confirmation(false, false, false, true));
+        assert!(!should_retry_asset_confirmation(false, false, false, false));
     }
 
     #[test]

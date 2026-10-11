@@ -1815,6 +1815,29 @@ fn pack_license_status(license: Option<&str>) -> PackLicenseStatus {
         .filter(|word| !word.is_empty())
         .collect();
     let has_arr_marker = words.contains(&"arr");
+    let normalized_phrases = normalized.replace('-', " ").replace('_', " ");
+    let explicit_redistribution_restriction = [
+        "no redistribution",
+        "not for redistribution",
+        "do not redistribute",
+        "may not redistribute",
+        "redistribution prohibited",
+        "redistribution forbidden",
+        "no distribution",
+        "not for distribution",
+        "distribution prohibited",
+        "distribution forbidden",
+        "no rehosting",
+        "not for rehosting",
+        "rehosting prohibited",
+        "no modpacks",
+        "not for modpacks",
+        "modpacks prohibited",
+        "not redistributable",
+        "non redistributable",
+    ]
+    .iter()
+    .any(|phrase| normalized_phrases.contains(phrase));
     if normalized.contains("all rights reserved")
         || normalized.replace('-', " ").contains("all rights reserved")
         || normalized.contains("noncommercial")
@@ -1824,6 +1847,7 @@ fn pack_license_status(license: Option<&str>) -> PackLicenseStatus {
         || normalized.contains("protective")
         || words.contains(&"agnya")
         || has_arr_marker
+        || explicit_redistribution_restriction
     {
         return PackLicenseStatus::PermissionRequired;
     }
@@ -2062,6 +2086,10 @@ mod tests {
         );
         assert_eq!(pack_license_status(Some("ARR")), PackLicenseStatus::PermissionRequired);
         assert_eq!(pack_license_status(Some("CC BY-NC-ND 4.0")), PackLicenseStatus::PermissionRequired);
+        assert_eq!(pack_license_status(Some("No Redistribution")), PackLicenseStatus::PermissionRequired);
+        assert_eq!(pack_license_status(Some("Redistribution-Prohibited")), PackLicenseStatus::PermissionRequired);
+        assert_eq!(pack_license_status(Some("Not Redistributable")), PackLicenseStatus::PermissionRequired);
+        assert_eq!(pack_license_status(Some("Not for Modpacks")), PackLicenseStatus::PermissionRequired);
         assert_eq!(pack_license_status(Some("Not specified")), PackLicenseStatus::Unknown);
         assert_eq!(pack_license_status(Some("AGNYA License")), PackLicenseStatus::PermissionRequired);
         assert_eq!(pack_license_status(Some("agnya")), PackLicenseStatus::PermissionRequired);

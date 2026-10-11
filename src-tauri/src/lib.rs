@@ -627,40 +627,20 @@ fn append_install_log_at(
 }
 
 fn read_install_log_at(path: &Path) -> Result<String, String> {
-    match fs::read_to_string(path) {
-        Ok(content) => {
-            const DISPLAY_LIMIT: usize = 256 * 1024;
-            if content.len() <= DISPLAY_LIMIT {
-                return Ok(content);
-            }
-            let minimum_start = content.len() - DISPLAY_LIMIT;
-            let start = content
-                .char_indices()
-                .find(|(index, _)| *index >= minimum_start)
-                .map(|(index, _)| index)
-                .unwrap_or(content.len());
-            let start = content[start..]
-                .find('\n')
-                .map(|offset| start + offset + 1)
-                .unwrap_or(start);
-            Ok(content[start..].to_string())
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok("Todavía no hay registros de instalación.".into())
-        }
-        Err(error) => Err(format!("No se pudo leer el registro local: {error}")),
-    }
+    const DISPLAY_LIMIT: u64 = 256 * 1024;
+    read_log_tail(path, DISPLAY_LIMIT)
+        .map(|content| content.unwrap_or_else(|| "Todavía no hay registros de instalación.".into()))
 }
 
 fn read_log_tail(path: &Path, max_bytes: u64) -> Result<Option<String>, String> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_file() => metadata,
-        Ok(_) => return Err("El registro de Minecraft no es un archivo normal".into()),
+        Ok(_) => return Err("El registro no es un archivo normal".into()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("No se pudo revisar el registro de Minecraft: {error}")),
+        Err(error) => return Err(format!("No se pudo revisar el registro: {error}")),
     };
     let mut file = fs::File::open(path)
-        .map_err(|error| format!("No se pudo abrir el registro de Minecraft: {error}"))?;
+        .map_err(|error| format!("No se pudo abrir el registro: {error}"))?;
     let start = metadata.len().saturating_sub(max_bytes);
     let starts_at_line_boundary = if start == 0 {
         true
@@ -669,7 +649,7 @@ fn read_log_tail(path: &Path, max_bytes: u64) -> Result<Option<String>, String> 
             .map_err(|error| format!("No se pudo buscar el final del registro: {error}"))?;
         let mut previous_byte = [0_u8; 1];
         file.read_exact(&mut previous_byte)
-            .map_err(|error| format!("No se pudo leer el registro de Minecraft: {error}"))?;
+            .map_err(|error| format!("No se pudo leer el registro: {error}"))?;
         previous_byte[0] == b'\n'
     };
     file.seek(SeekFrom::Start(start))
@@ -677,7 +657,7 @@ fn read_log_tail(path: &Path, max_bytes: u64) -> Result<Option<String>, String> 
     let mut bytes = Vec::with_capacity(metadata.len().saturating_sub(start) as usize);
     file.take(max_bytes)
         .read_to_end(&mut bytes)
-        .map_err(|error| format!("No se pudo leer el registro de Minecraft: {error}"))?;
+        .map_err(|error| format!("No se pudo leer el registro: {error}"))?;
     let text = String::from_utf8_lossy(&bytes);
     let text = if start > 0 && !starts_at_line_boundary {
         text.find('\n')
@@ -706,6 +686,30 @@ mod log_tests {
         fs::write(&path, b"123456\nabcdef\n").unwrap();
         assert_eq!(read_log_tail(&path, 7).unwrap().as_deref(), Some("abcdef\n"));
         assert_eq!(read_log_tail(&path, 8).unwrap().as_deref(), Some("abcdef\n"));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn install_log_reads_a_bounded_tail_without_partial_lines() {
+        let path = std::env::temp_dir().join(format!(
+            "eternalcraft-install-log-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let contents = (0..40_000)
+            .map(|line| format!("installation log line {line:05}\n"))
+            .collect::<String>();
+        fs::write(&path, contents).unwrap();
+
+        let tail = read_install_log_at(&path).unwrap();
+        assert!(tail.len() <= 256 * 1024);
+        assert!(tail.starts_with("installation log line "));
+        assert!(tail.ends_with("installation log line 39999\n"));
+        assert!(!tail.contains("installation log line 00000\n"));
+
         fs::remove_file(path).unwrap();
     }
 }

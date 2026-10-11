@@ -123,9 +123,7 @@ fn validate_manifest(manifest: &PackManifest, expected_series: &str) -> Result<(
         if file.sha256.len() != 64 || !file.sha256.bytes().all(|c| c.is_ascii_hexdigit()) {
             return Err(format!("SHA-256 no válido para {name}"));
         }
-        if !(file.url.starts_with("https://github.com/")
-            || file.url.starts_with("https://raw.githubusercontent.com/"))
-        {
+        if !is_allowed_download_url(&file.url) {
             return Err(format!("Origen de descarga no permitido para {name}"));
         }
     }
@@ -133,6 +131,76 @@ fn validate_manifest(manifest: &PackManifest, expected_series: &str) -> Result<(
         return Err("El tamaño total del pack supera 4 GiB".into());
     }
     Ok(())
+}
+
+pub(super) fn is_allowed_download_url(raw: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(raw) else {
+        return false;
+    };
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return false;
+    }
+    match url.host_str() {
+        Some("github.com") => {
+            let segments: Vec<&str> = url.path_segments().into_iter().flatten().collect();
+            segments.len() == 6
+                && is_github_component(segments[0])
+                && is_github_component(segments[1])
+                && segments[2] == "releases"
+                && segments[3] == "download"
+                && is_github_component(segments[4])
+                && is_github_component(segments[5])
+        }
+        Some("raw.githubusercontent.com") => {
+            let segments: Vec<&str> = url.path_segments().into_iter().flatten().collect();
+            segments.len() >= 4
+                && segments.iter().take(3).all(|segment| is_github_component(segment))
+                && segments[3..].iter().all(|segment| is_github_component(segment))
+        }
+        Some("cdn.modrinth.com") => {
+            let segments: Vec<&str> = url.path_segments().into_iter().flatten().collect();
+            segments.len() == 5
+                && segments[0] == "data"
+                && is_modrinth_id(segments[1])
+                && segments[2] == "versions"
+                && is_safe_modrinth_version(segments[3])
+                && !segments[4].is_empty()
+                && !segments[4].contains('/')
+        }
+        _ => false,
+    }
+}
+
+fn is_github_component(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'.' | b'_' | b'-' | b'+' | b'%' | b'~')
+        })
+}
+
+fn is_modrinth_id(value: &str) -> bool {
+    value.len() == 8
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric())
+}
+
+fn is_safe_modrinth_version(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'+'))
 }
 
 #[cfg(test)]
@@ -724,6 +792,14 @@ mod tests {
         assert!(validate_manifest(&value, "siege").is_err());
         value = manifest("siege", &[("good.jar", valid)]);
         value.files[0].url = "https://example.invalid/mod.jar".into();
+        assert!(validate_manifest(&value, "siege").is_err());
+        value.files[0].url = "https://cdn.modrinth.com/data/AbCd1234/versions/EfGh5678/mod.jar".into();
+        validate_manifest(&value, "siege").unwrap();
+        value.files[0].url = "https://cdn.modrinth.com/data/AbCd1234/versions/1.20.1/mod.jar".into();
+        validate_manifest(&value, "siege").unwrap();
+        value.files[0].url = "https://cdn.modrinth.com.evil.invalid/data/AbCd1234/versions/EfGh5678/mod.jar".into();
+        assert!(validate_manifest(&value, "siege").is_err());
+        value.files[0].url = "https://cdn.modrinth.com/data/AbCd1234/versions/EfGh5678/mod.jar?token=secret".into();
         assert!(validate_manifest(&value, "siege").is_err());
         assert!(validate_manifest(&value, "ghouls").is_err());
     }

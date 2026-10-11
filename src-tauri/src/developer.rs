@@ -7,6 +7,7 @@ const GITHUB_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const GITHUB_ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 const GITHUB_DEVICE_VERIFICATION_URL: &str = "https://github.com/login/device";
 const GITHUB_API: &str = "https://api.github.com";
+const MODRINTH_VERSION_FILES_API: &str = "https://api.modrinth.com/v2/version_files";
 const PUBLISH_REPOSITORY: &str = "Santi-PdR/EternalCraft-Launcher";
 const MAX_SOURCE_JAR_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_SOURCE_PACK_BYTES: u64 = 4 * 1024 * 1024 * 1024;
@@ -92,6 +93,7 @@ pub(super) struct PackSourceFile {
     name: String,
     size_bytes: u64,
     sha256: String,
+    external_download_url: Option<String>,
     license: Option<String>,
     license_reference_url: Option<String>,
     license_status: PackLicenseStatus,
@@ -174,6 +176,22 @@ struct ManifestFile {
     url: String,
     size_bytes: u64,
     sha256: String,
+}
+
+#[derive(Deserialize)]
+struct ModrinthVersionRecord {
+    game_versions: Vec<String>,
+    loaders: Vec<String>,
+    files: Vec<ModrinthVersionFile>,
+}
+
+#[derive(Deserialize)]
+struct ModrinthVersionFile {
+    hashes: BTreeMap<String, String>,
+    url: String,
+    size: u64,
+    #[serde(default)]
+    primary: bool,
 }
 
 #[derive(Deserialize)]
@@ -676,9 +694,10 @@ pub(super) async fn publish_pack_release(
     series_id: String,
     version: String,
     confirmed_source_fingerprint: String,
+    external_download_urls: BTreeMap<String, String>,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        publish_pack_release_sync(app, series_id, version, confirmed_source_fingerprint)
+        publish_pack_release_sync(app, series_id, version, confirmed_source_fingerprint, external_download_urls)
     })
         .await
         .map_err(|error| format!("La tarea de publicación se interrumpió: {error}"))?
@@ -689,6 +708,7 @@ fn publish_pack_release_sync(
     series_id: String,
     version: String,
     confirmed_source_fingerprint: String,
+    external_download_urls: BTreeMap<String, String>,
 ) -> Result<String, String> {
     let _publish_lease = PublishLease::acquire(&app)?;
     let access_token = app.state::<GitHubDeveloper>().access_token()?;
@@ -736,14 +756,80 @@ fn publish_pack_release_sync(
     if source.source_fingerprint != confirmed_source_fingerprint {
         return Err("La carpeta o sus JAR cambiaron desde la revisión de licencias. Vuelve a verificar la fuente y confirma otra vez.".into());
     }
-    if source.files.len() > MAX_GITHUB_ASSETS_PER_RELEASE {
-        return Err(format!("GitHub permite hasta {MAX_GITHUB_ASSETS_PER_RELEASE} assets por release"));
+    for (name, url) in &external_download_urls {
+        if !source.files.iter().any(|file| &file.name == name) {
+            return Err(format!("La fuente directa hace referencia a un JAR fuera de la carpeta seleccionada: {name}"));
+        }
+        if !super::pack::is_allowed_download_url(url) {
+            return Err(format!("La fuente directa de {name} debe ser un archivo HTTPS versionado de GitHub Releases o Modrinth CDN"));
+        }
+    }
+    emit_publish_progress(
+        &app,
+        &series_id,
+        0,
+        source.files.len(),
+        "Buscando archivos oficiales de Modrinth mediante SHA-512",
+    );
+    let (mut external_urls, modrinth_notice) = match find_modrinth_downloads(
+        &source,
+        &series.minecraft_version,
+        &series.loader,
+    ) {
+        Ok(urls) => (urls, None),
+        Err(error) => {
+            emit_publish_progress(
+                &app,
+                &series_id,
+                0,
+                source.files.len(),
+                &format!("Modrinth no respondió; se usarán enlaces directos declarados o assets autorizados ({error})"),
+            );
+            (BTreeMap::new(), Some(error))
+        }
+    };
+    for (name, url) in &external_download_urls {
+        let source_file = source.files.iter().find(|file| &file.name == name).unwrap();
+        emit_publish_progress(
+            &app,
+            &series_id,
+            0,
+            source.files.len(),
+            &format!("Verificando el enlace directo de {name} por tamaño y SHA-256"),
+        );
+        verify_direct_download_matches(url, source_file)?;
+        external_urls.insert(name.clone(), url.clone());
+    }
+    let github_asset_count = source.files.len().saturating_sub(external_urls.len());
+    if github_asset_count > MAX_GITHUB_ASSETS_PER_RELEASE {
+        return Err(format!("La publicación necesita {github_asset_count} assets de GitHub; el límite es {MAX_GITHUB_ASSETS_PER_RELEASE}"));
+    }
+    let restricted_without_official_source = source
+        .files
+        .iter()
+        .filter(|file| {
+            file.license_status == PackLicenseStatus::PermissionRequired
+                && !external_urls.contains_key(&file.name)
+        })
+        .map(|file| file.name.as_str())
+        .collect::<Vec<_>>();
+    if !restricted_without_official_source.is_empty() {
+        return Err(format!(
+            "No se alojarán JAR con redistribución restringida en GitHub. Publica esos mods en Modrinth o resuelve permisos/fuentes oficiales primero: {}",
+            restricted_without_official_source.join(", ")
+        ));
     }
 
     let tag = format!("{series_id}-v{version}");
     let release = get_or_create_draft_release(&access_token, &tag, &series.name)?;
     let assets = list_release_assets(&access_token, release.id)?;
-    if !release.draft && !published_asset_names_match(&source.files, &assets) {
+    let github_files = source
+        .files
+        .iter()
+        .filter(|file| !external_urls.contains_key(&file.name))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !release.draft && !published_asset_names_match(&github_files, &assets) {
         return Err(format!(
             "El release publicado {tag} ya tiene un conjunto de mods distinto; crea una versión nueva"
         ));
@@ -751,6 +837,17 @@ fn publish_pack_release_sync(
     let mut verified_names = std::collections::BTreeSet::new();
     let total = source.files.len();
     for (index, source_file) in source.files.iter().enumerate() {
+        if external_urls.contains_key(&source_file.name) {
+            let path = Path::new(&source.directory).join(&source_file.name);
+            let current = fs::metadata(&path).map_err(|error| {
+                format!("No se pudo inspeccionar {} para verificarlo: {error}", source_file.name)
+            })?;
+            if current.len() != source_file.size_bytes || sha256_file(&path)? != source_file.sha256 {
+                return Err(format!("{} cambió después de la revisión; vuelve a escanear la carpeta", source_file.name));
+            }
+            emit_publish_progress(&app, &series_id, index + 1, total, &format!("Fuente directa verificada · {}", source_file.name));
+            continue;
+        }
         let expected_digest = format!("sha256:{}", source_file.sha256);
         if let Some(asset) = assets.iter().find(|asset| asset.name == source_file.name) {
             if asset.digest.as_deref() == Some(expected_digest.as_str()) {
@@ -808,7 +905,7 @@ fn publish_pack_release_sync(
             .iter()
             .map(|file| ManifestFile {
                 path: format!("mods/{}", file.name),
-                url: format!("https://github.com/{PUBLISH_REPOSITORY}/releases/download/{tag}/{}", encode_path_component(&file.name)),
+                url: external_urls.get(&file.name).cloned().unwrap_or_else(|| format!("https://github.com/{PUBLISH_REPOSITORY}/releases/download/{tag}/{}", encode_path_component(&file.name))),
                 size_bytes: file.size_bytes,
                 sha256: file.sha256.clone(),
             })
@@ -834,7 +931,138 @@ fn publish_pack_release_sync(
     update_catalog_status(&access_token, &series_id)?;
     super::mark_runtime_series_available(&series_id)?;
     emit_publish_progress(&app, &series_id, total, total, "Publicación verificada");
-    Ok(format!("Release {tag} publicado: {total} mods, {}. La serie ya está disponible para el launcher.", format_bytes(source.total_bytes)))
+    let lookup_note = modrinth_notice
+        .map(|error| format!(" Modrinth no respondió ({error}); se utilizó el plan alternativo verificado."))
+        .unwrap_or_default();
+    Ok(format!("Release {tag} publicado: {total} mods, {} con fuente directa y {} alojados por EternalCraft ({}).{lookup_note} La serie ya está disponible para el launcher.", external_urls.len(), total.saturating_sub(external_urls.len()), format_bytes(source.total_bytes)))
+}
+
+fn find_modrinth_downloads(
+    source: &PackSourcePreview,
+    minecraft_version: &str,
+    loader: &str,
+) -> Result<BTreeMap<String, String>, String> {
+    let mut hashes = Vec::with_capacity(source.files.len());
+    let mut source_files = BTreeMap::new();
+    for file in &source.files {
+        let hash = sha512_file(&Path::new(&source.directory).join(&file.name))?;
+        source_files.insert(hash.clone(), file);
+        hashes.push(hash);
+    }
+
+    let client = http::client().map_err(|error| error.to_string())?;
+    let mut urls = BTreeMap::new();
+    for batch in hashes.chunks(100) {
+        let response = client
+            .post(MODRINTH_VERSION_FILES_API)
+            .header("User-Agent", format!("Santi-PdR/EternalCraft-Launcher/{} (github.com/Santi-PdR/EternalCraft-Launcher)", env!("CARGO_PKG_VERSION")))
+            .json(&serde_json::json!({ "hashes": batch, "algorithm": "sha512" }))
+            .send()
+            .map_err(|error| format!("No se pudieron resolver los mods en Modrinth: {error}"))?;
+        let records: BTreeMap<String, ModrinthVersionRecord> = github_json(response, "Consultar hashes de Modrinth")
+            .map_err(|error| format!("No se pudieron resolver los mods en Modrinth: {error}"))?;
+        for (hash, record) in records {
+            let Some(source_file) = source_files.get(&hash.to_ascii_lowercase()) else {
+                continue;
+            };
+            if let Some(url) = modrinth_download_url(
+                &record,
+                &hash,
+                source_file.size_bytes,
+                minecraft_version,
+                loader,
+            ) {
+                urls.insert(source_file.name.clone(), url.to_string());
+            }
+        }
+    }
+    Ok(urls)
+}
+
+fn modrinth_download_url<'a>(
+    record: &'a ModrinthVersionRecord,
+    expected_sha512: &str,
+    expected_size: u64,
+    minecraft_version: &str,
+    loader: &str,
+) -> Option<&'a str> {
+    if !record.game_versions.iter().any(|version| version == minecraft_version)
+        || !record.loaders.iter().any(|candidate| candidate.eq_ignore_ascii_case(loader))
+    {
+        return None;
+    }
+    let mut files = record.files.iter().filter(|file| {
+        file.hashes
+            .get("sha512")
+            .is_some_and(|digest| digest.eq_ignore_ascii_case(expected_sha512))
+            && file.size == expected_size
+            && super::pack::is_allowed_download_url(&file.url)
+    }).collect::<Vec<_>>();
+    files.sort_by_key(|file| !file.primary);
+    files.first().map(|file| file.url.as_str())
+}
+
+fn verify_direct_download_matches(url: &str, source_file: &PackSourceFile) -> Result<(), String> {
+    let client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 || !is_trusted_download_redirect(attempt.url()) {
+                attempt.stop()
+            } else {
+                attempt.follow()
+            }
+        }))
+        .build()
+        .map_err(|error| format!("No se pudo preparar la verificación del enlace: {error}"))?;
+    let response = client
+        .get(url)
+        .header("User-Agent", format!("Santi-PdR/EternalCraft-Launcher/{} (github.com/Santi-PdR/EternalCraft-Launcher)", env!("CARGO_PKG_VERSION")))
+        .send()
+        .map_err(|error| format!("No se pudo verificar el enlace directo de {}: {error}", source_file.name))?;
+    if !response.status().is_success() {
+        return Err(format!("El enlace directo de {} devolvió {}", source_file.name, response.status()));
+    }
+    let final_url = response.url();
+    if !is_trusted_download_redirect(final_url) {
+        return Err(format!("El enlace directo de {} redirige a un host no permitido", source_file.name));
+    }
+    if response.content_length().is_some_and(|size| size != source_file.size_bytes) {
+        return Err(format!("El enlace directo de {} anuncia un tamaño diferente al JAR fuente", source_file.name));
+    }
+    let mut response = response.take(source_file.size_bytes + 1);
+    let mut hasher = sha2::Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut total = 0_u64;
+    loop {
+        let read = response
+            .read(&mut buffer)
+            .map_err(|error| format!("No se pudo leer el enlace directo de {}: {error}", source_file.name))?;
+        if read == 0 {
+            break;
+        }
+        total = total.saturating_add(read as u64);
+        if total > source_file.size_bytes {
+            return Err(format!("El enlace directo de {} supera el tamaño del JAR fuente", source_file.name));
+        }
+        hasher.update(&buffer[..read]);
+    }
+    if total != source_file.size_bytes || format!("{:x}", hasher.finalize()) != source_file.sha256 {
+        return Err(format!("El enlace directo de {} no coincide con su tamaño y SHA-256 verificados", source_file.name));
+    }
+    Ok(())
+}
+
+fn is_trusted_download_redirect(url: &reqwest::Url) -> bool {
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && matches!(
+            url.host_str(),
+            Some("github.com"
+                | "release-assets.githubusercontent.com"
+                | "objects.githubusercontent.com"
+                | "cdn.modrinth.com")
+        )
 }
 
 fn valid_pack_version(version: &str) -> bool {
@@ -1355,6 +1583,7 @@ fn scan_pack_source(
             name: name.to_string(),
             size_bytes: before.len(),
             sha256: digest,
+            external_download_url: None,
             license_reference_url: pack_license_reference_url(license.as_deref())
                 .map(str::to_string),
             license,
@@ -1662,6 +1891,23 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+fn sha512_file(path: &Path) -> Result<String, String> {
+    let mut file = fs::File::open(path)
+        .map_err(|error| format!("No se pudo abrir {} para calcular SHA-512: {error}", path.display()))?;
+    let mut hasher = sha2::Sha512::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("No se pudo calcular SHA-512 de {}: {error}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1708,6 +1954,7 @@ mod tests {
                 name: "alpha.jar".into(),
                 size_bytes: 10,
                 sha256: "a".repeat(64),
+                external_download_url: None,
                 license: Some("MIT".into()),
                 license_reference_url: None,
                 license_status: PackLicenseStatus::Recognized,
@@ -1720,6 +1967,7 @@ mod tests {
                 name: "beta.jar".into(),
                 size_bytes: 20,
                 sha256: "b".repeat(64),
+                external_download_url: None,
                 license: Some("MIT".into()),
                 license_reference_url: None,
                 license_status: PackLicenseStatus::Recognized,
@@ -1745,6 +1993,7 @@ mod tests {
             name: "Alpha.jar".into(),
             size_bytes: 10,
             sha256: "a".repeat(64),
+            external_download_url: None,
             license: Some("MIT".into()),
             license_reference_url: None,
             license_status: PackLicenseStatus::Recognized,
@@ -1757,6 +2006,7 @@ mod tests {
             name: "beta.jar".into(),
             size_bytes: 20,
             sha256: "b".repeat(64),
+            external_download_url: None,
             license: Some("MIT".into()),
             license_reference_url: None,
             license_status: PackLicenseStatus::Recognized,
@@ -1818,6 +2068,38 @@ mod tests {
         assert_eq!(pack_license_reference_url(Some("AGNYA License")), Some("https://github.com/nvb-uy/AGNYA-License"));
         assert_eq!(pack_license_reference_url(Some("MIT")), None);
         assert_eq!(pack_license_status(None), PackLicenseStatus::Unknown);
+    }
+
+    #[test]
+    fn modrinth_source_requires_exact_hash_size_and_target_compatibility() {
+        let sha512 = "a".repeat(128);
+        let record = ModrinthVersionRecord {
+            game_versions: vec!["1.20.1".into()],
+            loaders: vec!["forge".into()],
+            files: vec![ModrinthVersionFile {
+                hashes: BTreeMap::from([("sha512".into(), sha512.clone())]),
+                url: "https://cdn.modrinth.com/data/AbCd1234/versions/EfGh5678/example.jar".into(),
+                size: 123,
+                primary: true,
+            }],
+        };
+        assert_eq!(
+            modrinth_download_url(&record, &sha512, 123, "1.20.1", "forge"),
+            Some("https://cdn.modrinth.com/data/AbCd1234/versions/EfGh5678/example.jar")
+        );
+        assert!(modrinth_download_url(&record, &"b".repeat(128), 123, "1.20.1", "forge").is_none());
+        assert!(modrinth_download_url(&record, &sha512, 124, "1.20.1", "forge").is_none());
+        assert!(modrinth_download_url(&record, &sha512, 123, "1.19.4", "forge").is_none());
+        assert!(modrinth_download_url(&record, &sha512, 123, "1.20.1", "fabric").is_none());
+    }
+
+    #[test]
+    fn direct_download_redirects_are_limited_to_https_provider_hosts() {
+        assert!(is_trusted_download_redirect(&reqwest::Url::parse("https://release-assets.githubusercontent.com/asset").unwrap()));
+        assert!(is_trusted_download_redirect(&reqwest::Url::parse("https://cdn.modrinth.com/data/AbCd1234/file.jar").unwrap()));
+        assert!(!is_trusted_download_redirect(&reqwest::Url::parse("http://cdn.modrinth.com/data/AbCd1234/file.jar").unwrap()));
+        assert!(!is_trusted_download_redirect(&reqwest::Url::parse("https://127.0.0.1/internal").unwrap()));
+        assert!(!is_trusted_download_redirect(&reqwest::Url::parse("https://cdn.modrinth.com:444/data/AbCd1234/file.jar").unwrap()));
     }
 
     #[test]

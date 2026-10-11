@@ -99,17 +99,59 @@ function validateManifest(series, manifest, repo) {
     }
     try {
       const url = new URL(file.url);
-      const encodedName = url.pathname.startsWith(expectedReleasePath)
-        ? url.pathname.slice(expectedReleasePath.length)
-        : '';
-      if (url.origin !== 'https://github.com' || url.search || url.hash || !encodedName || encodedName.includes('/') || decodeURIComponent(encodedName) !== name) {
-        errors.push(`${label}: URL de release no corresponde a ${file?.path ?? 'un mod'}.`);
+      if (!isAllowedDownloadUrl(url, expectedReleasePath, name)) {
+        errors.push(`${label}: URL de release o descarga no permitida o no correspondiente a ${file?.path ?? 'un mod'}.`);
       }
     } catch {
       errors.push(`${label}: URL no válida para ${file?.path ?? 'un mod'}.`);
     }
   }
   return errors;
+}
+
+function isAllowedDownloadUrl(url, expectedReleasePath, name) {
+  if (url.protocol !== 'https:' || url.username || url.password || url.port || url.search || url.hash) return false;
+  if (url.origin === 'https://github.com') {
+    const encodedName = url.pathname.startsWith(expectedReleasePath)
+      ? url.pathname.slice(expectedReleasePath.length)
+      : '';
+    try {
+      if (encodedName && !encodedName.includes('/') && decodeURIComponent(encodedName) === name) return true;
+      return isDirectGitHubReleaseUrl(url.pathname);
+    } catch {
+      return false;
+    }
+  }
+  if (url.origin === 'https://raw.githubusercontent.com') {
+    return isSafeRawGitHubUrl(url.pathname);
+  }
+  if (url.origin === 'https://cdn.modrinth.com') {
+    return /^\/data\/[A-Za-z0-9]{8}\/versions\/[A-Za-z0-9._+-]+\/[^/]+$/.test(url.pathname);
+  }
+  return false;
+}
+
+function isDirectGitHubReleaseUrl(pathname) {
+  const segments = pathname.split('/').slice(1);
+  if (segments.length !== 6 || segments[2] !== 'releases' || segments[3] !== 'download') return false;
+  try {
+    const decoded = segments.map((segment) => decodeURIComponent(segment));
+    return decoded.every((segment) => segment && segment !== '.' && segment !== '..' && !segment.includes('/') && !segment.includes('\\'))
+      && /^[A-Za-z0-9_.-]+$/.test(decoded[0])
+      && /^[A-Za-z0-9_.-]+$/.test(decoded[1]);
+  } catch {
+    return false;
+  }
+}
+
+function isSafeRawGitHubUrl(pathname) {
+  const segments = pathname.split('/').slice(1);
+  if (segments.length < 4) return false;
+  try {
+    return segments.map((segment) => decodeURIComponent(segment)).every((segment) => segment && segment !== '.' && segment !== '..' && !segment.includes('/') && !segment.includes('\\'));
+  } catch {
+    return false;
+  }
 }
 
 function isStableVersion(value) {

@@ -1590,6 +1590,7 @@ fn pack_license_status(license: Option<&str>) -> PackLicenseStatus {
         || normalized.contains("by-nc")
         || normalized.contains("by nc")
         || normalized.contains("protective")
+        || words.contains(&"agnya")
         || has_arr_marker
     {
         return PackLicenseStatus::PermissionRequired;
@@ -1793,7 +1794,8 @@ mod tests {
         assert_eq!(pack_license_status(Some("ARR")), PackLicenseStatus::PermissionRequired);
         assert_eq!(pack_license_status(Some("CC BY-NC-ND 4.0")), PackLicenseStatus::PermissionRequired);
         assert_eq!(pack_license_status(Some("Not specified")), PackLicenseStatus::Unknown);
-        assert_eq!(pack_license_status(Some("AGNYA License")), PackLicenseStatus::Unknown);
+        assert_eq!(pack_license_status(Some("AGNYA License")), PackLicenseStatus::PermissionRequired);
+        assert_eq!(pack_license_status(Some("agnya")), PackLicenseStatus::PermissionRequired);
         assert_eq!(pack_license_status(None), PackLicenseStatus::Unknown);
     }
 

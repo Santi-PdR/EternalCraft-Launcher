@@ -975,6 +975,7 @@ dependencies = [
  "mc-launcher-core",
  "minisign-verify",
  "reqwest",
+ "same-file",
  "sha1 0.10.7",
  "serde",
  "serde_json",

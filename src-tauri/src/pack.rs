@@ -288,6 +288,32 @@ fn load_previous_state(path: &Path, series_id: &str) -> Result<Option<PackState>
     }
 }
 
+fn verify_installed_mod_pair(
+    official_file: &Path,
+    loaded_file: &Path,
+    expected_hash: &str,
+    name: &str,
+) -> Result<(), String> {
+    check_normal_file_if_present(official_file)?;
+    check_normal_file_if_present(loaded_file)?;
+    if same_file::is_same_file(official_file, loaded_file)
+        .map_err(|error| format!("No se pudo verificar el mod oficial {name}: {error}"))?
+    {
+        if digest_file(official_file)? != expected_hash {
+            return Err(format!(
+                "El mod oficial {name} cambió o está dañado. Actualiza el pack antes de jugar."
+            ));
+        }
+        return Ok(());
+    }
+    if digest_file(official_file)? != expected_hash || digest_file(loaded_file)? != expected_hash {
+        return Err(format!(
+            "El mod oficial {name} cambió o está dañado. Actualiza el pack antes de jugar."
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn verify_installed_pack(game_dir: &Path, series_id: &str) -> Result<(), String> {
     let _guard = PACK_SYNC_LOCK
         .lock()
@@ -323,11 +349,7 @@ pub(super) fn verify_installed_pack(game_dir: &Path, series_id: &str) -> Result<
     for (name, expected_hash) in &state.files {
         let official_file = officials.join(name);
         let loaded_file = mods.join(name);
-        check_normal_file_if_present(&official_file)?;
-        check_normal_file_if_present(&loaded_file)?;
-        if digest_file(&official_file)? != *expected_hash || digest_file(&loaded_file)? != *expected_hash {
-            return Err(format!("El mod oficial {name} cambió o está dañado. Actualiza el pack antes de jugar."));
-        }
+        verify_installed_mod_pair(&official_file, &loaded_file, expected_hash, name)?;
     }
     Ok(())
 }
@@ -831,6 +853,26 @@ mod tests {
         ));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn installed_pack_checks_one_hash_for_hard_links_and_both_for_copies() {
+        let root = temp_dir();
+        let official = root.join("official.jar");
+        let loaded = root.join("loaded.jar");
+        let bytes = b"verified mod bytes";
+        let hash = digest(bytes);
+
+        fs::write(&official, bytes).unwrap();
+        fs::hard_link(&official, &loaded).unwrap();
+        verify_installed_mod_pair(&official, &loaded, &hash, "mod.jar").unwrap();
+
+        fs::remove_file(&loaded).unwrap();
+        fs::write(&loaded, bytes).unwrap();
+        verify_installed_mod_pair(&official, &loaded, &hash, "mod.jar").unwrap();
+        fs::write(&loaded, b"modified mod bytes").unwrap();
+        assert!(verify_installed_mod_pair(&official, &loaded, &hash, "mod.jar").is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

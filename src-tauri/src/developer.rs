@@ -1821,7 +1821,17 @@ fn pack_license_status(license: Option<&str>) -> PackLicenseStatus {
         "not for redistribution",
         "do not redistribute",
         "may not redistribute",
+        "may not be redistributed",
+        "cannot redistribute",
+        "can not redistribute",
+        "not allowed to redistribute",
+        "not permitted to redistribute",
+        "redistribution not allowed",
+        "redistribution is not allowed",
+        "redistribution not permitted",
+        "redistribution is not permitted",
         "redistribution prohibited",
+        "redistribution is prohibited",
         "redistribution forbidden",
         "no distribution",
         "not for distribution",
@@ -1830,8 +1840,14 @@ fn pack_license_status(license: Option<&str>) -> PackLicenseStatus {
         "no rehosting",
         "not for rehosting",
         "rehosting prohibited",
+        "no rehost",
+        "not rehostable",
         "no modpacks",
         "not for modpacks",
+        "not allowed in modpacks",
+        "do not include in modpacks",
+        "may not be included in modpacks",
+        "no modpack distribution",
         "modpacks prohibited",
         "not redistributable",
         "non redistributable",
@@ -2088,8 +2104,13 @@ mod tests {
         assert_eq!(pack_license_status(Some("CC BY-NC-ND 4.0")), PackLicenseStatus::PermissionRequired);
         assert_eq!(pack_license_status(Some("No Redistribution")), PackLicenseStatus::PermissionRequired);
         assert_eq!(pack_license_status(Some("Redistribution-Prohibited")), PackLicenseStatus::PermissionRequired);
+        assert_eq!(pack_license_status(Some("Redistribution Is Not Permitted")), PackLicenseStatus::PermissionRequired);
+        assert_eq!(pack_license_status(Some("Not Allowed to Redistribute")), PackLicenseStatus::PermissionRequired);
         assert_eq!(pack_license_status(Some("Not Redistributable")), PackLicenseStatus::PermissionRequired);
         assert_eq!(pack_license_status(Some("Not for Modpacks")), PackLicenseStatus::PermissionRequired);
+        assert_eq!(pack_license_status(Some("Do Not Include in Modpacks")), PackLicenseStatus::PermissionRequired);
+        assert_eq!(pack_license_status(Some("May Not Be Included in Modpacks")), PackLicenseStatus::PermissionRequired);
+        assert_eq!(pack_license_status(Some("Not-Rehostable")), PackLicenseStatus::PermissionRequired);
         assert_eq!(pack_license_status(Some("Not specified")), PackLicenseStatus::Unknown);
         assert_eq!(pack_license_status(Some("AGNYA License")), PackLicenseStatus::PermissionRequired);
         assert_eq!(pack_license_status(Some("agnya")), PackLicenseStatus::PermissionRequired);

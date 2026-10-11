@@ -90,8 +90,7 @@ fn validate_manifest(manifest: &PackManifest, expected_series: &str) -> Result<(
     if manifest.series_id != expected_series {
         return Err("El manifiesto remoto corresponde a otra serie".into());
     }
-    if manifest.version.trim().is_empty()
-        || manifest.version.len() > 80
+    if !valid_pack_version(&manifest.version)
         || manifest.minecraft_version.trim().is_empty()
         || manifest.loader.trim().is_empty()
         || manifest.loader_version.trim().is_empty()
@@ -123,7 +122,7 @@ fn validate_manifest(manifest: &PackManifest, expected_series: &str) -> Result<(
         if file.sha256.len() != 64 || !file.sha256.bytes().all(|c| c.is_ascii_hexdigit()) {
             return Err(format!("SHA-256 no válido para {name}"));
         }
-        if !is_allowed_download_url(&file.url) {
+        if !is_allowed_download_url(&file.url, expected_series, &manifest.version, name) {
             return Err(format!("Origen de descarga no permitido para {name}"));
         }
     }
@@ -133,7 +132,12 @@ fn validate_manifest(manifest: &PackManifest, expected_series: &str) -> Result<(
     Ok(())
 }
 
-pub(super) fn is_allowed_download_url(raw: &str) -> bool {
+pub(super) fn is_allowed_download_url(
+    raw: &str,
+    expected_series: &str,
+    expected_version: &str,
+    expected_name: &str,
+) -> bool {
     let Ok(url) = reqwest::Url::parse(raw) else {
         return false;
     };
@@ -146,28 +150,34 @@ pub(super) fn is_allowed_download_url(raw: &str) -> bool {
     {
         return false;
     }
-    match url.host_str() {
-        Some("github.com") => {
-            let segments: Vec<&str> = url.path_segments().into_iter().flatten().collect();
-            segments.len() == 6
-                && segments[0] == "Santi-PdR"
-                && segments[1] == "EternalCraft-Launcher"
-                && segments[2] == "releases"
-                && segments[3] == "download"
-                && is_github_component(segments[4])
-                && is_github_component(segments[5])
-        }
-        _ => false,
-    }
+    url.host_str() == Some("github.com")
+        && url.path()
+            == format!(
+                "/Santi-PdR/EternalCraft-Launcher/releases/download/{expected_series}-v{expected_version}/{}",
+                encode_path_component(expected_name)
+            )
 }
 
-fn is_github_component(value: &str) -> bool {
-    !value.is_empty()
-        && value != "."
-        && value != ".."
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(byte, b'.' | b'_' | b'-' | b'+' | b'%' | b'~')
+fn encode_path_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn valid_pack_version(version: &str) -> bool {
+    let parts: Vec<&str> = version.split('.').collect();
+    parts.len() == 3
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && part.len() <= 6
+                && part.bytes().all(|byte| byte.is_ascii_digit())
+                && (*part == "0" || !part.starts_with('0'))
         })
 }
 
@@ -715,7 +725,7 @@ mod tests {
                 .iter()
                 .map(|(name, bytes)| PackFile {
                     path: format!("mods/{name}"),
-                    url: "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/test/mod.jar".into(),
+                    url: format!("https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/{series_id}-v1.0.0/{name}"),
                     size_bytes: bytes.len() as u64,
                     sha256: digest(bytes),
                 })
@@ -763,6 +773,13 @@ mod tests {
         assert!(validate_manifest(&value, "siege").is_err());
         value.files[0].url = "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/siege-v1.0.0/mod.jar".into();
         validate_manifest(&value, "siege").unwrap();
+        value.files[0].url = "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/good.jar".into();
+        assert!(validate_manifest(&value, "siege").is_err());
+        value.files[0].url = "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/siege-v1.0.1/good.jar".into();
+        assert!(validate_manifest(&value, "siege").is_err());
+        value.files[0].url = "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/siege-v1.0.0/other.jar".into();
+        assert!(validate_manifest(&value, "siege").is_err());
+        value.files[0].url = "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/siege-v1.0.0/good.jar".into();
         value.files[0].url = "https://github.com/another-owner/another-repo/releases/download/siege-v1.0.0/mod.jar".into();
         assert!(validate_manifest(&value, "siege").is_err());
         value.files[0].url = "https://cdn.modrinth.com/data/AbCd1234/versions/EfGh5678/mod.jar".into();
@@ -770,6 +787,13 @@ mod tests {
         value.files[0].url = "https://raw.githubusercontent.com/Santi-PdR/EternalCraft-Launcher/main/mod.jar".into();
         assert!(validate_manifest(&value, "siege").is_err());
         assert!(validate_manifest(&value, "ghouls").is_err());
+
+        let spaced_name = manifest("siege", &[("my mod.jar", valid)]);
+        assert!(validate_manifest(&spaced_name, "siege").is_ok());
+
+        value = manifest("siege", &[("good.jar", valid)]);
+        value.version = "1.0.0/other".into();
+        assert!(validate_manifest(&value, "siege").is_err());
     }
 
     #[test]

@@ -62,6 +62,7 @@ export interface DeveloperLoginStatus {
 
 export interface PackSourceFile {
   name: string;
+  publishedName: string;
   sizeBytes: number;
   sha256: string;
   license: string | null;

@@ -90,6 +90,7 @@ pub(super) struct DeveloperLoginStatus {
 #[serde(rename_all = "camelCase")]
 pub(super) struct PackSourceFile {
     name: String,
+    published_name: String,
     size_bytes: u64,
     sha256: String,
     license: Option<String>,
@@ -760,14 +761,14 @@ fn publish_pack_release_sync(
     let total = source.files.len();
     for (index, source_file) in source.files.iter().enumerate() {
         let expected_digest = format!("sha256:{}", source_file.sha256);
-        if let Some(asset) = assets.iter().find(|asset| asset.name == source_file.name) {
+        if let Some(asset) = assets.iter().find(|asset| asset.name == source_file.published_name) {
             if asset.digest.as_deref() == Some(expected_digest.as_str()) {
-                verified_names.insert(source_file.name.clone());
+                verified_names.insert(source_file.published_name.clone());
                 emit_publish_progress(&app, &series_id, index + 1, total, &source_file.name);
                 continue;
             }
             if !release.draft {
-                return Err(format!("El release publicado {tag} ya contiene {} con otro hash; crea una versión nueva", source_file.name));
+                return Err(format!("El release publicado {tag} ya contiene {} con otro hash; crea una versión nueva", source_file.published_name));
             }
             if asset.digest.is_none() {
                 match wait_for_asset_confirmation(
@@ -777,11 +778,11 @@ fn publish_pack_release_sync(
                     total,
                     &access_token,
                     release.id,
-                    &source_file.name,
+                    &source_file.published_name,
                     &expected_digest,
                 )? {
                     AssetConfirmation::Verified(_) => {
-                        verified_names.insert(source_file.name.clone());
+                        verified_names.insert(source_file.published_name.clone());
                         emit_publish_progress(&app, &series_id, index + 1, total, &source_file.name);
                         continue;
                     }
@@ -791,7 +792,7 @@ fn publish_pack_release_sync(
                     AssetConfirmation::Pending { asset_exists: true } => {
                         return Err(format!(
                             "GitHub aún está calculando el SHA-256 de {}. El archivo quedó guardado en el release borrador; vuelve a revisar o reintentar la publicación sin borrarlo.",
-                            source_file.name
+                            source_file.published_name
                         ));
                     }
                     AssetConfirmation::Pending { asset_exists: false } => {}
@@ -801,7 +802,7 @@ fn publish_pack_release_sync(
             }
         }
         if !release.draft {
-            return Err(format!("El release publicado {tag} no contiene el mod esperado {}; crea una versión nueva", source_file.name));
+            return Err(format!("El release publicado {tag} no contiene el mod esperado {}; crea una versión nueva", source_file.published_name));
         }
         let path = Path::new(&source.directory).join(&source_file.name);
         let current = fs::metadata(&path)
@@ -817,16 +818,16 @@ fn publish_pack_release_sync(
             &access_token,
             &release.upload_url,
             release.id,
-            &source_file.name,
+            &source_file.published_name,
             &expected_digest,
             &path,
             source_file.size_bytes,
         )?;
-        if uploaded.name != source_file.name || uploaded.digest.as_deref() != Some(expected_digest.as_str()) {
+        if uploaded.name != source_file.published_name || uploaded.digest.as_deref() != Some(expected_digest.as_str()) {
             let _ = delete_release_asset(&access_token, release.id, uploaded.id);
             return Err(format!("GitHub no confirmó el SHA-256 esperado para {}", source_file.name));
         }
-        verified_names.insert(source_file.name.clone());
+        verified_names.insert(source_file.published_name.clone());
         emit_publish_progress(&app, &series_id, index + 1, total, &source_file.name);
     }
     if release.draft {
@@ -848,8 +849,8 @@ fn publish_pack_release_sync(
             .files
             .iter()
             .map(|file| ManifestFile {
-                path: format!("mods/{}", file.name),
-                url: format!("https://github.com/{PUBLISH_REPOSITORY}/releases/download/{tag}/{}", encode_path_component(&file.name)),
+                path: format!("mods/{}", file.published_name),
+                url: format!("https://github.com/{PUBLISH_REPOSITORY}/releases/download/{tag}/{}", encode_path_component(&file.published_name)),
                 size_bytes: file.size_bytes,
                 sha256: file.sha256.clone(),
             })
@@ -899,7 +900,7 @@ fn emit_publish_progress(app: &AppHandle, series_id: &str, completed: usize, tot
 }
 
 fn published_asset_names_match(source: &[PackSourceFile], assets: &[GitHubReleaseAsset]) -> bool {
-    let source_names: BTreeSet<&str> = source.iter().map(|file| file.name.as_str()).collect();
+    let source_names: BTreeSet<&str> = source.iter().map(|file| file.published_name.as_str()).collect();
     let asset_names: BTreeSet<&str> = assets.iter().map(|asset| asset.name.as_str()).collect();
     source_names == asset_names
 }
@@ -1432,6 +1433,7 @@ fn scan_pack_source(
 
     let mut files = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
+    let mut published_names = std::collections::BTreeSet::new();
     let mut total_bytes = 0_u64;
     for entry in fs::read_dir(&directory)
         .map_err(|error| format!("No se pudo leer la carpeta fuente: {error}"))?
@@ -1453,6 +1455,12 @@ fn scan_pack_source(
         }
         if !seen.insert(name.to_ascii_lowercase()) {
             return Err(format!("Hay nombres de mod duplicados sin distinguir mayúsculas: {name}"));
+        }
+        let published_name = github_asset_name(name);
+        if !valid_official_asset_name(&published_name)
+            || !published_names.insert(published_name.to_ascii_lowercase())
+        {
+            return Err(format!("El nombre de {name} colisiona o no es válido después de normalizarlo para GitHub ({published_name})"));
         }
         let jar_path = entry.path();
         let before = entry
@@ -1483,6 +1491,7 @@ fn scan_pack_source(
         }
         files.push(PackSourceFile {
             name: name.to_string(),
+            published_name,
             size_bytes: before.len(),
             sha256: digest,
             license_reference_url: pack_license_reference_url(license.as_deref())
@@ -1689,10 +1698,23 @@ fn pack_source_fingerprint(files: &[PackSourceFile]) -> String {
     for file in sorted_files {
         hasher.update(file.name.to_ascii_lowercase().as_bytes());
         hasher.update([0]);
+        hasher.update(file.published_name.to_ascii_lowercase().as_bytes());
+        hasher.update([0]);
         hasher.update(file.sha256.as_bytes());
         hasher.update([0]);
     }
     format!("{:x}", hasher.finalize())
+}
+
+fn github_asset_name(source_name: &str) -> String {
+    source_name
+        .chars()
+        .filter_map(|character| match character {
+            ' ' | '\'' => Some('.'),
+            '[' | ']' | '(' | ')' => None,
+            other => Some(other),
+        })
+        .collect()
 }
 
 fn read_pack_license(path: &Path) -> Option<String> {
@@ -1876,6 +1898,7 @@ mod tests {
         let source = vec![
             PackSourceFile {
                 name: "alpha.jar".into(),
+                published_name: "alpha.jar".into(),
                 size_bytes: 10,
                 sha256: "a".repeat(64),
                 license: Some("MIT".into()),
@@ -1888,6 +1911,7 @@ mod tests {
             },
             PackSourceFile {
                 name: "beta.jar".into(),
+                published_name: "beta.jar".into(),
                 size_bytes: 20,
                 sha256: "b".repeat(64),
                 license: Some("MIT".into()),
@@ -1913,6 +1937,7 @@ mod tests {
     fn pack_source_fingerprint_changes_when_a_mod_changes_and_is_order_independent() {
         let first = PackSourceFile {
             name: "Alpha.jar".into(),
+            published_name: "Alpha.jar".into(),
             size_bytes: 10,
             sha256: "a".repeat(64),
             license: Some("MIT".into()),
@@ -1925,6 +1950,7 @@ mod tests {
         };
         let second = PackSourceFile {
             name: "beta.jar".into(),
+            published_name: "beta.jar".into(),
             size_bytes: 20,
             sha256: "b".repeat(64),
             license: Some("MIT".into()),
@@ -1943,6 +1969,26 @@ mod tests {
             ..first
         };
         assert_ne!(original, pack_source_fingerprint(&[changed, second]));
+    }
+
+    #[test]
+    fn github_release_asset_name_normalization_matches_observed_uploads() {
+        assert_eq!(
+            github_asset_name("[1.20.1] SecurityCraft v1.9.12.jar"),
+            "1.20.1.SecurityCraft.v1.9.12.jar"
+        );
+        assert_eq!(
+            github_asset_name("Item-Obliterator-NeoForge-MC1.20.1-2.3.1 (1).jar"),
+            "Item-Obliterator-NeoForge-MC1.20.1-2.3.1.1.jar"
+        );
+        assert_eq!(
+            github_asset_name("alltheleaks-1.1.1+1.20.1-forge.jar"),
+            "alltheleaks-1.1.1+1.20.1-forge.jar"
+        );
+        assert_eq!(
+            github_asset_name("M'TEG-1.1.2-1.20.1.jar"),
+            "M.TEG-1.1.2-1.20.1.jar"
+        );
     }
 
     #[test]
@@ -2225,6 +2271,7 @@ mod tests {
         let preview = scan_pack_source(&source, "siege", "1.20.1", "47.4.10").unwrap();
         assert_eq!(preview.files.len(), 1);
         assert_eq!(preview.files[0].name, "Official Mod.jar");
+        assert_eq!(preview.files[0].published_name, "Official.Mod.jar");
         assert_eq!(preview.files[0].license.as_deref(), Some("MIT"));
         assert_eq!(preview.files[0].license_status, PackLicenseStatus::Recognized);
         assert_eq!(preview.files[0].minecraft_compatibility, PackCompatibilityStatus::Unknown);
@@ -2232,6 +2279,17 @@ mod tests {
         assert_eq!(preview.files[0].sha256, sha256_file(&source.join("Official Mod.jar")).unwrap());
         assert_eq!(preview.total_bytes, preview.files[0].size_bytes);
 
+        fs::remove_dir_all(source).unwrap();
+    }
+
+    #[test]
+    fn pack_source_rejects_names_that_collide_after_github_normalization() {
+        let source = temporary_directory("developer-pack-source-name-collision");
+        write_forge_jar(&source.join("Shared Mod.jar"));
+        write_forge_jar(&source.join("Shared.Mod.jar"));
+
+        let result = scan_pack_source(&source, "siege", "1.20.1", "47.4.10");
+        assert!(result.unwrap_err().contains("colisiona"));
         fs::remove_dir_all(source).unwrap();
     }
 

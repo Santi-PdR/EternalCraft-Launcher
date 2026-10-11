@@ -771,7 +771,7 @@ mod tests {
         value = manifest("siege", &[("good.jar", valid)]);
         value.files[0].url = "https://example.invalid/mod.jar".into();
         assert!(validate_manifest(&value, "siege").is_err());
-        value.files[0].url = "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/siege-v1.0.0/mod.jar".into();
+        value.files[0].url = "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/siege-v1.0.0/good.jar".into();
         validate_manifest(&value, "siege").unwrap();
         value.files[0].url = "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/good.jar".into();
         assert!(validate_manifest(&value, "siege").is_err());

@@ -634,7 +634,7 @@
       error = 'Revisa las licencias y confirma que tienes permiso para redistribuir todos los JAR incluidos.';
       return;
     }
-    if (!window.confirm(`Publicar ${selected.name} ${publishVersion} en GitHub? Esta versión quedará disponible para todos los usuarios del launcher.`)) return;
+    if (!window.confirm(`Publicar ${selected.name} ${publishVersion} en GitHub? Esta versión quedará disponible para todos los usuarios del launcher.\n\nPara buscar descargas oficiales, se enviarán a Modrinth los hashes SHA-512 de los JAR, no los archivos. Los JAR sin enlace directo se alojarán en un release de EternalCraft, según la confirmación de licencias.`)) return;
     publishingPack = true;
     packPublishMessage = 'Preparando release borrador…';
     error = '';

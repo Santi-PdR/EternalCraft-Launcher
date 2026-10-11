@@ -895,7 +895,8 @@ mod tests {
         fs::create_dir(game.join(stale_name)).unwrap();
         fs::create_dir(game.join(fresh_name)).unwrap();
         fs::create_dir(game.join(unrelated_name)).unwrap();
-        let removed = clean_stale_staging_directories(&game, now, Duration::ZERO).unwrap();
+        let cleanup_time = now + Duration::from_secs(5);
+        let removed = clean_stale_staging_directories(&game, cleanup_time, Duration::ZERO).unwrap();
         assert_eq!(
             removed, 2,
             "only precisely named launcher staging directories are removed"

@@ -29,6 +29,8 @@
   let modsBusy = $state(false);
   let modsError = $state('');
   let installingSeries = $state<string | null>(null);
+  let installError = $state('');
+  let installErrorSeries = $state<string | null>(null);
   let syncingPack = $state(false);
   let packSyncMessage = $state('');
   let installMessage = $state('');
@@ -539,6 +541,8 @@
     if (!selected || installingSeries !== null) return;
     const seriesId = selected.id;
     installingSeries = seriesId;
+    installError = '';
+    installErrorSeries = null;
     installMessage = 'Iniciando la instalación verificada de Forge…';
     error = '';
     try {
@@ -546,7 +550,9 @@
       await loadMods(seriesId);
       notice = 'La base de Minecraft y Forge quedó instalada y verificada. El pack todavía no está publicado.';
     } catch (reason) {
-      error = String(reason);
+      installError = String(reason);
+      installErrorSeries = seriesId;
+      error = installError;
     } finally {
       installingSeries = null;
     }
@@ -737,7 +743,33 @@
       {#if notice}<div class="toast" role="status">{notice}</div>{/if}
       {#if launcherUpdateState === 'available'}<div class="toast launcher-update-toast" role="status"><span>EternalCraft {launcherUpdateVersion} está listo</span><button class="button primary" onclick={installLauncherUpdate}>Actualizar</button></div>{/if}
 
-      {#if welcomeOpen}<div class="welcome-backdrop" role="presentation"><div class="welcome-dialog" role="dialog" aria-modal="true" aria-labelledby="welcome-title" tabindex="-1"><span class="eyebrow">BIENVENIDO A ETERNALCRAFT</span><h1 id="welcome-title">Elige cómo entrar</h1><p>Conecta Microsoft para servidores autenticados o entra con un nick offline. Al continuar, EternalCraft preparará una instancia nueva y aislada para {selected.name}; Java 17 se instalará automáticamente si hace falta.</p><button class="button primary welcome-action" onclick={loginMicrosoft} disabled={busy || !bootstrap.microsoftLoginAvailable}>{busy ? 'Abriendo Microsoft…' : 'Iniciar sesión con Microsoft'}</button>{#if !bootstrap.microsoftLoginAvailable}<small>El inicio con Microsoft no está disponible en esta versión. Puedes continuar con un nick offline.</small>{/if}<label class="account-name-field">Nick para jugar sin cuenta<input class="text-input" bind:value={offlineUsernameDraft} minlength="3" maxlength="16" autocomplete="nickname" placeholder="De 3 a 16 letras, números o _" /></label><button class="button secondary welcome-action" onclick={loginOffline} disabled={busy || !/^[A-Za-z0-9_]{3,16}$/.test(offlineUsernameDraft.trim())}>{busy ? 'Guardando nick…' : 'Entrar con nick offline'}</button><small>El perfil offline no verifica la propiedad del juego y no entra a servidores que exigen Microsoft.</small><button class="text-link welcome-browse" onclick={continueWithoutAccount}>Continuar sin configurar cuenta ahora</button></div></div>{/if}
+      {#if welcomeOpen}
+        <div class="welcome-backdrop" role="presentation">
+          <div class="welcome-dialog" role="dialog" aria-modal="true" aria-labelledby="welcome-title" tabindex="-1">
+            <span class="eyebrow">BIENVENIDO A ETERNALCRAFT</span>
+            <h1 id="welcome-title">Elige cómo entrar</h1>
+            <p>Conecta Microsoft para servidores autenticados o entra con un nick offline. EternalCraft prepara una instancia nueva y aislada para {selected.name}; Java 17 se instala automáticamente si hace falta.</p>
+            {#if installingSeries === selected.id}
+              <div class="install-progress welcome-install-progress" role="status" aria-live="polite">
+                <span class="spinner"></span>
+                <div><strong>{installMessage || 'Instalando Minecraft y Forge…'}</strong><p>La preparación sigue en segundo plano. Minecraft no se iniciará.</p></div>
+              </div>
+            {:else if installError && installErrorSeries === selected.id}
+              <div class="welcome-install-error" role="alert">
+                <strong>No se pudo preparar la instancia</strong>
+                <p>{installError}</p>
+                <button class="button secondary" onclick={installBase}>Reintentar instalación</button>
+              </div>
+            {/if}
+            <button class="button primary welcome-action" onclick={loginMicrosoft} disabled={busy || !bootstrap.microsoftLoginAvailable}>{busy ? 'Abriendo Microsoft…' : 'Iniciar sesión con Microsoft'}</button>
+            {#if !bootstrap.microsoftLoginAvailable}<small>El inicio con Microsoft no está disponible en esta versión. Puedes continuar con un nick offline.</small>{/if}
+            <label class="account-name-field">Nick para jugar sin cuenta<input class="text-input" bind:value={offlineUsernameDraft} minlength="3" maxlength="16" autocomplete="nickname" placeholder="De 3 a 16 letras, números o _" /></label>
+            <button class="button secondary welcome-action" onclick={loginOffline} disabled={busy || !/^[A-Za-z0-9_]{3,16}$/.test(offlineUsernameDraft.trim())}>{busy ? 'Guardando nick…' : 'Entrar con nick offline'}</button>
+            <small>El perfil offline no verifica la propiedad del juego y no entra a servidores que exigen Microsoft.</small>
+            <button class="text-link welcome-browse" onclick={continueWithoutAccount}>Continuar sin configurar cuenta ahora</button>
+          </div>
+        </div>
+      {/if}
 
       {#if activePage === 'home'}
         <section class="page home-page">

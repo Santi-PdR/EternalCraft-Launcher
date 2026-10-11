@@ -4,9 +4,10 @@ import { join } from 'node:path';
 const workflowDirectory = '.github/workflows';
 const workflowNames = (await readdir(workflowDirectory)).filter((name) => name.endsWith('.yml') || name.endsWith('.yaml'));
 const failures = [];
+const readWorkflow = async (name) => (await readFile(join(workflowDirectory, name), 'utf8')).replace(/\r\n/g, '\n');
 
 for (const name of workflowNames) {
-  const contents = await readFile(join(workflowDirectory, name), 'utf8');
+  const contents = await readWorkflow(name);
   for (const [, reference] of contents.matchAll(/^\s*-\s+uses:\s*([^\s#]+)/gm)) {
     const [repository, revision, ...extra] = reference.split('@');
     if (!repository.includes('/') || !/^[a-f0-9]{40}$/.test(revision ?? '') || extra.length > 0) {
@@ -15,7 +16,7 @@ for (const name of workflowNames) {
   }
 }
 
-const releaseWorkflow = await readFile(join(workflowDirectory, 'launcher-release.yml'), 'utf8');
+const releaseWorkflow = await readWorkflow('launcher-release.yml');
 if (!/^permissions:\n  contents: read$/m.test(releaseWorkflow)) {
   failures.push('launcher-release.yml: los permisos globales deben ser de solo lectura');
 }

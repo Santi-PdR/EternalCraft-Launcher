@@ -1999,15 +1999,81 @@ fn configured_microsoft_client_id() -> Option<&'static str> {
         .filter(|id| is_valid_microsoft_client_id(id))
 }
 
+fn bind_microsoft_callback_listeners(
+) -> Result<(std::net::TcpListener, Option<std::net::TcpListener>), String> {
+    let ipv4 = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .map_err(|error| format!("No se pudo abrir el callback local de inicio de sesión: {error}"))?;
+    ipv4.set_nonblocking(true)
+        .map_err(|error| format!("No se pudo preparar el callback local: {error}"))?;
+    let port = ipv4
+        .local_addr()
+        .map_err(|error| format!("No se pudo identificar el puerto local: {error}"))?
+        .port();
+    // localhost may resolve to either address family. Keep both listeners bound
+    // to loopback only so browser address preference cannot strand the callback.
+    let ipv6 = std::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port))
+        .ok()
+        .and_then(|listener| listener.set_nonblocking(true).ok().map(|()| listener));
+    Ok((ipv4, ipv6))
+}
+
+fn accept_microsoft_callback(
+    listener: &std::net::TcpListener,
+    redirect_uri: &str,
+    expected_state: &str,
+) -> Result<Option<String>, String> {
+    let (mut stream, peer) = match listener.accept() {
+        Ok(connection) => connection,
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+        Err(error) => return Err(format!("Falló el callback local de Microsoft: {error}")),
+    };
+    if !peer.ip().is_loopback() {
+        return Ok(None);
+    }
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .map_err(|error| format!("No se pudo limitar la espera del callback: {error}"))?;
+    let mut request = [0_u8; 8192];
+    let read = match stream.read(&mut request) {
+        Ok(read) => read,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) =>
+        {
+            return Ok(None)
+        }
+        Err(error) => return Err(format!("No se pudo leer el callback de Microsoft: {error}")),
+    };
+    let request = String::from_utf8_lossy(&request[..read]);
+    let first_line = request.lines().next().unwrap_or_default();
+    let mut parts = first_line.split_ascii_whitespace();
+    if parts.next() != Some("GET") {
+        let _ = stream.write_all(b"HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\n\r\n");
+        return Ok(None);
+    }
+    let Some(target) = parts.next().filter(|target| target.starts_with('/')) else {
+        let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+        return Ok(None);
+    };
+    let callback = format!("{redirect_uri}{target}");
+    let auth_code = match parse_auth_code_url(&callback, Some(expected_state.to_string())) {
+        Ok(code) => code,
+        Err(_) => {
+            let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nNo se pudo validar el inicio de sesion.");
+            return Ok(None);
+        }
+    };
+    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\nInicio de sesion recibido. Puedes volver a EternalCraft Launcher.");
+    Ok(Some(auth_code))
+}
+
 #[tauri::command]
 fn login_microsoft(app: AppHandle) -> Result<Bootstrap, String> {
     let client_id = configured_microsoft_client_id()
         .ok_or_else(|| "El inicio de sesión Microsoft no está habilitado en esta compilación.".to_string())?;
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
-        .map_err(|error| format!("No se pudo abrir el callback local de inicio de sesión: {error}"))?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|error| format!("No se pudo preparar el callback local: {error}"))?;
+    let (listener, ipv6_listener) = bind_microsoft_callback_listeners()?;
     let port = listener.local_addr().map_err(|error| error.to_string())?.port();
     let redirect_uri = format!("http://localhost:{port}");
     let (login_url, expected_state, verifier) =
@@ -2020,42 +2086,21 @@ fn login_microsoft(app: AppHandle) -> Result<Bootstrap, String> {
         if std::time::Instant::now() >= deadline {
             return Err("Se agotó el tiempo esperando el regreso del navegador. Intenta iniciar sesión otra vez.".into());
         }
-        match listener.accept() {
-            Ok((mut stream, peer)) => {
-                if !peer.ip().is_loopback() {
-                    continue;
-                }
-                let mut request = [0_u8; 8192];
-                let read = stream
-                    .read(&mut request)
-                    .map_err(|error| format!("No se pudo leer el callback de Microsoft: {error}"))?;
-                let request = String::from_utf8_lossy(&request[..read]);
-                let first_line = request.lines().next().unwrap_or_default();
-                let mut parts = first_line.split_ascii_whitespace();
-                if parts.next() != Some("GET") {
-                    let _ = stream.write_all(b"HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\n\r\n");
-                    continue;
-                }
-                let Some(target) = parts.next().filter(|target| target.starts_with('/')) else {
-                    let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
-                    continue;
-                };
-                let callback = format!("{redirect_uri}{target}");
-                let code = match parse_auth_code_url(&callback, Some(expected_state.clone())) {
-                    Ok(code) => code,
-                    Err(_) => {
-                        let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nNo se pudo validar el inicio de sesion.");
-                        return Err("Microsoft devolvió un callback sin código válido o el estado de seguridad no coincide.".into());
-                    }
-                };
-                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\nInicio de sesion recibido. Puedes volver a EternalCraft Launcher.");
-                break code;
+        let mut auth_code = None;
+        for callback_listener in std::iter::once(&listener).chain(ipv6_listener.iter()) {
+            if let Some(code) = accept_microsoft_callback(
+                callback_listener,
+                &redirect_uri,
+                &expected_state,
+            )? {
+                auth_code = Some(code);
+                break;
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            Err(error) => return Err(format!("Falló el callback local de Microsoft: {error}")),
         }
+        if let Some(code) = auth_code {
+            break code;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     };
 
     let account = complete_login(&client_id, None, &redirect_uri, &auth_code, Some(&verifier));
@@ -2814,6 +2859,41 @@ mod tests {
             Some("expected".to_string())
         )
         .is_err());
+    }
+
+    #[test]
+    fn microsoft_callback_listens_on_localhost_address_families_and_ignores_bad_state() {
+        let (ipv4, ipv6) = bind_microsoft_callback_listeners().unwrap();
+        let port = ipv4.local_addr().unwrap().port();
+        assert!(ipv4.local_addr().unwrap().ip().is_loopback());
+        if let Some(ipv6) = &ipv6 {
+            let address = ipv6.local_addr().unwrap();
+            assert!(address.ip().is_loopback());
+            assert_eq!(address.port(), port);
+        }
+
+        let redirect = format!("http://localhost:{port}");
+        for listener in std::iter::once(&ipv4).chain(ipv6.iter()) {
+            let address = listener.local_addr().unwrap();
+            let mut invalid = std::net::TcpStream::connect(address).unwrap();
+            invalid
+                .write_all(b"GET /?code=bad&state=wrong HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .unwrap();
+            drop(invalid);
+            assert!(accept_microsoft_callback(listener, &redirect, "expected")
+                .unwrap()
+                .is_none());
+
+            let mut valid = std::net::TcpStream::connect(address).unwrap();
+            valid
+                .write_all(b"GET /?code=one-time-code&state=expected HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .unwrap();
+            drop(valid);
+            assert_eq!(
+                accept_microsoft_callback(listener, &redirect, "expected").unwrap(),
+                Some("one-time-code".into())
+            );
+        }
     }
 
     #[test]

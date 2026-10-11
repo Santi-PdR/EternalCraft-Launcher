@@ -93,6 +93,7 @@ pub(super) struct PackSourceFile {
     size_bytes: u64,
     sha256: String,
     license: Option<String>,
+    license_reference_url: Option<String>,
     license_status: PackLicenseStatus,
     minecraft_compatibility: PackCompatibilityStatus,
     minecraft_version_range: Option<String>,
@@ -1354,6 +1355,8 @@ fn scan_pack_source(
             name: name.to_string(),
             size_bytes: before.len(),
             sha256: digest,
+            license_reference_url: pack_license_reference_url(license.as_deref())
+                .map(str::to_string),
             license,
             license_status,
             minecraft_compatibility,
@@ -1617,6 +1620,18 @@ fn pack_license_status(license: Option<&str>) -> PackLicenseStatus {
     }
 }
 
+fn pack_license_reference_url(license: Option<&str>) -> Option<&'static str> {
+    let license = license?.trim();
+    let words: Vec<&str> = license
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
+    words
+        .iter()
+        .any(|word| word.eq_ignore_ascii_case("agnya"))
+        .then_some("https://github.com/nvb-uy/AGNYA-License")
+}
+
 fn valid_official_asset_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 180
@@ -1694,6 +1709,7 @@ mod tests {
                 size_bytes: 10,
                 sha256: "a".repeat(64),
                 license: Some("MIT".into()),
+                license_reference_url: None,
                 license_status: PackLicenseStatus::Recognized,
                 minecraft_compatibility: PackCompatibilityStatus::Unknown,
                 minecraft_version_range: None,
@@ -1705,6 +1721,7 @@ mod tests {
                 size_bytes: 20,
                 sha256: "b".repeat(64),
                 license: Some("MIT".into()),
+                license_reference_url: None,
                 license_status: PackLicenseStatus::Recognized,
                 minecraft_compatibility: PackCompatibilityStatus::Unknown,
                 minecraft_version_range: None,
@@ -1729,6 +1746,7 @@ mod tests {
             size_bytes: 10,
             sha256: "a".repeat(64),
             license: Some("MIT".into()),
+            license_reference_url: None,
             license_status: PackLicenseStatus::Recognized,
             minecraft_compatibility: PackCompatibilityStatus::Unknown,
             minecraft_version_range: None,
@@ -1740,6 +1758,7 @@ mod tests {
             size_bytes: 20,
             sha256: "b".repeat(64),
             license: Some("MIT".into()),
+            license_reference_url: None,
             license_status: PackLicenseStatus::Recognized,
             minecraft_compatibility: PackCompatibilityStatus::Unknown,
             minecraft_version_range: None,
@@ -1796,6 +1815,8 @@ mod tests {
         assert_eq!(pack_license_status(Some("Not specified")), PackLicenseStatus::Unknown);
         assert_eq!(pack_license_status(Some("AGNYA License")), PackLicenseStatus::PermissionRequired);
         assert_eq!(pack_license_status(Some("agnya")), PackLicenseStatus::PermissionRequired);
+        assert_eq!(pack_license_reference_url(Some("AGNYA License")), Some("https://github.com/nvb-uy/AGNYA-License"));
+        assert_eq!(pack_license_reference_url(Some("MIT")), None);
         assert_eq!(pack_license_status(None), PackLicenseStatus::Unknown);
     }
 

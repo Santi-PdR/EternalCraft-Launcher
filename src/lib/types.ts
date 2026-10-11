@@ -65,6 +65,7 @@ export interface PackSourceFile {
   sizeBytes: number;
   sha256: string;
   license: string | null;
+  licenseReferenceUrl: string | null;
   licenseStatus: 'recognized' | 'permissionRequired' | 'unknown';
   minecraftCompatibility: 'compatible' | 'incompatible' | 'unknown';
   minecraftVersionRange: string | null;

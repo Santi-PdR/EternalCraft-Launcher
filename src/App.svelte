@@ -67,8 +67,8 @@
     },
     'ghouls-outbreak': {
       label: 'Apocalipsis',
-      url: 'https://images.steamusercontent.com/ugc/770525169909690704/E1780BB425DDA84B4F29DBEAD58D4619F78FC21D/?ima=fit&imcolor=%23000000&imh=1000&impolicy=Letterbox&imw=1600&letterbox=false',
-      source: 'https://steamcommunity.com/sharedfiles/filedetails/?id=928913937'
+      url: 'https://cdn.akamai.steamstatic.com/steam/apps/550/header.jpg',
+      source: 'https://store.steampowered.com/app/550/Left_4_Dead_2/'
     }
   };
   let backgroundUrl = $derived.by(() => {

@@ -404,17 +404,22 @@
 
   async function chooseSeries(id: string) {
     if (!bootstrap || id === bootstrap.activeSeriesId) return;
+    let prepareInstance = false;
     busy = true;
     error = '';
     try {
       bootstrap = await invoke<Bootstrap>('set_active_series', { seriesId: id });
       await loadMods(id);
-      notice = 'Serie activa guardada';
+      prepareInstance = !bootstrap.installedProfiles[id] && !bootstrap.gameDirectories[id];
+      notice = prepareInstance
+        ? `Serie activa: ${selected?.name}. Preparando una instancia aislada con Forge y Java 17…`
+        : 'Serie activa guardada';
     } catch (reason) {
       error = String(reason);
     } finally {
       busy = false;
     }
+    if (prepareInstance) void installBase();
   }
 
   async function selectDirectory() {

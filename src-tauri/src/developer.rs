@@ -975,6 +975,36 @@ struct AssetUploadFailure {
     retryable: bool,
 }
 
+enum AssetConfirmation {
+    Verified(GitHubReleaseAsset),
+    Pending { asset_exists: bool },
+    DigestMismatch(GitHubReleaseAsset),
+}
+
+fn classify_asset_confirmation(
+    assets: &[GitHubReleaseAsset],
+    name: &str,
+    expected_digest: &str,
+) -> AssetConfirmation {
+    if let Some(asset) = assets.iter().find(|asset| {
+        asset.name == name && asset.digest.as_deref() == Some(expected_digest)
+    }) {
+        return AssetConfirmation::Verified(asset.clone());
+    }
+    if assets
+        .iter()
+        .any(|asset| asset.name == name && asset.digest.is_none())
+    {
+        return AssetConfirmation::Pending { asset_exists: true };
+    }
+    if let Some(asset) = assets.iter().find(|asset| asset.name == name) {
+        return AssetConfirmation::DigestMismatch(asset.clone());
+    }
+    AssetConfirmation::Pending {
+        asset_exists: false,
+    }
+}
+
 fn retryable_upload_status(status: reqwest::StatusCode) -> bool {
     status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
 }
@@ -1046,52 +1076,63 @@ fn upload_release_asset_resumable(
     const MAX_ATTEMPTS: usize = 3;
     let mut last_error = String::new();
     for attempt in 1..=MAX_ATTEMPTS {
-        match upload_release_asset_once(token, upload_url, name, path, size) {
-            Ok(asset)
-                if asset.name == name && asset.digest.as_deref() == Some(expected_digest) =>
-            {
-                return Ok(asset);
-            }
-            Ok(asset) => {
-                let _ = delete_release_asset(token, release_id, asset.id);
-                return Err(format!("GitHub no confirmó el SHA-256 esperado para {name}"));
-            }
-            Err(failure) => {
-                last_error = failure.message;
-                match list_release_assets(token, release_id) {
-                    Ok(assets) => {
-                        if let Some(asset) = assets.iter().find(|asset| {
-                            asset.name == name && asset.digest.as_deref() == Some(expected_digest)
-                        }) {
-                            return Ok(GitHubReleaseAsset {
-                                id: asset.id,
-                                name: asset.name.clone(),
-                                digest: asset.digest.clone(),
-                            });
-                        }
-                        let mut removed_stale_asset = false;
-                        for asset in assets.iter().filter(|asset| asset.name == name) {
-                            delete_release_asset(token, release_id, asset.id)?;
-                            removed_stale_asset = true;
-                        }
-                        if !failure.retryable && !removed_stale_asset {
-                            return Err(last_error);
-                        }
-                        if attempt == MAX_ATTEMPTS {
-                            break;
-                        }
-                    }
-                    Err(verify_error) if !failure.retryable || attempt == MAX_ATTEMPTS => {
-                        return Err(format!(
-                            "{last_error}. No se pudo confirmar si GitHub aceptó el archivo: {verify_error}"
-                        ));
-                    }
-                    Err(_) => {}
+        let (retryable, upload_response_was_ambiguous) =
+            match upload_release_asset_once(token, upload_url, name, path, size) {
+                Ok(asset)
+                    if asset.name == name
+                        && asset.digest.as_deref() == Some(expected_digest) =>
+                {
+                    return Ok(asset);
                 }
-                if attempt < MAX_ATTEMPTS {
-                    std::thread::sleep(Duration::from_secs(2_u64.pow(attempt as u32)));
+                Ok(asset) => {
+                    last_error = if asset.name == name {
+                        format!("GitHub aceptó {name}, pero aún no confirmó su SHA-256")
+                    } else {
+                        format!("GitHub respondió con un asset inesperado al subir {name}")
+                    };
+                    // The upload may be complete while its digest is still being
+                    // computed. Keep the asset and verify the release before retrying.
+                    (true, true)
                 }
+                Err(failure) => {
+                    last_error = failure.message;
+                    (failure.retryable, false)
+                }
+            };
+
+        let should_retry = match list_release_assets(token, release_id) {
+            Ok(assets) => match classify_asset_confirmation(&assets, name, expected_digest) {
+                AssetConfirmation::Verified(asset) => return Ok(asset),
+                AssetConfirmation::Pending { asset_exists } => {
+                    retryable || upload_response_was_ambiguous || asset_exists
+                }
+                AssetConfirmation::DigestMismatch(asset) => {
+                    let actual_digest = asset.digest.as_deref().unwrap_or("desconocido");
+                    delete_release_asset(token, release_id, asset.id)?;
+                    last_error = format!(
+                        "GitHub registró {name} con SHA-256 {actual_digest}, distinto del esperado"
+                    );
+                    true
+                }
+            },
+            Err(verify_error) if !retryable && !upload_response_was_ambiguous => {
+                return Err(format!(
+                    "{last_error}. No se pudo confirmar si GitHub aceptó el archivo: {verify_error}"
+                ));
             }
+            Err(verify_error) => {
+                last_error = format!(
+                    "{last_error}. No se pudo confirmar si GitHub aceptó el archivo: {verify_error}"
+                );
+                true
+            }
+        };
+
+        if !should_retry {
+            return Err(last_error);
+        }
+        if attempt < MAX_ATTEMPTS {
+            std::thread::sleep(Duration::from_secs(2_u64.pow(attempt as u32)));
         }
     }
     Err(format!(
@@ -1828,6 +1869,41 @@ mod tests {
         assert!(retryable_upload_status(reqwest::StatusCode::INTERNAL_SERVER_ERROR));
         assert!(!retryable_upload_status(reqwest::StatusCode::FORBIDDEN));
         assert!(!retryable_upload_status(reqwest::StatusCode::UNPROCESSABLE_ENTITY));
+    }
+
+    #[test]
+    fn release_upload_confirmation_treats_a_missing_digest_as_pending() {
+        let pending = GitHubReleaseAsset {
+            id: 17,
+            name: "example.jar".into(),
+            digest: None,
+        };
+        assert!(matches!(
+            classify_asset_confirmation(std::slice::from_ref(&pending), "example.jar", "sha256:abc"),
+            AssetConfirmation::Pending { asset_exists: true }
+        ));
+
+        let verified = GitHubReleaseAsset {
+            digest: Some("sha256:abc".into()),
+            ..pending.clone()
+        };
+        assert!(matches!(
+            classify_asset_confirmation(std::slice::from_ref(&verified), "example.jar", "sha256:abc"),
+            AssetConfirmation::Verified(asset) if asset.id == 17
+        ));
+
+        let mismatched = GitHubReleaseAsset {
+            digest: Some("sha256:wrong".into()),
+            ..pending
+        };
+        assert!(matches!(
+            classify_asset_confirmation(std::slice::from_ref(&mismatched), "example.jar", "sha256:abc"),
+            AssetConfirmation::DigestMismatch(asset) if asset.digest.as_deref() == Some("sha256:wrong")
+        ));
+        assert!(matches!(
+            classify_asset_confirmation(&[], "example.jar", "sha256:abc"),
+            AssetConfirmation::Pending { asset_exists: false }
+        ));
     }
 
     #[test]

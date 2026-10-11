@@ -27,7 +27,7 @@ use std::sync::{OnceLock, RwLock};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -41,6 +41,7 @@ mod developer;
 mod mojang_runtime;
 
 const CATALOG_JSON: &str = include_str!("../../resources/series/catalog.json");
+const MAX_FORGE_MOD_METADATA_BYTES: u64 = 256 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -999,10 +1000,51 @@ fn validate_forge_mod_archive(path: &Path) -> Result<(), String> {
         .map_err(|error| format!("No se pudo abrir el JAR {}: {error}", path.display()))?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|error| format!("El archivo seleccionado no es un JAR válido: {error}"))?;
-    if archive
-        .file_names()
-        .any(|name| name.eq_ignore_ascii_case("META-INF/mods.toml"))
-    {
+    let metadata_index = {
+        archive
+            .file_names()
+            .position(|name| name.eq_ignore_ascii_case("META-INF/mods.toml"))
+    };
+    if let Some(metadata_index) = metadata_index {
+        let mut metadata = archive
+            .by_index(metadata_index)
+            .map_err(|error| format!("No se pudo leer mods.toml del JAR: {error}"))?;
+        if metadata.size() > MAX_FORGE_MOD_METADATA_BYTES {
+            return Err("mods.toml del JAR supera el tamaño máximo permitido".into());
+        }
+        let mut contents = String::new();
+        metadata
+            .by_ref()
+            .take(MAX_FORGE_MOD_METADATA_BYTES)
+            .read_to_string(&mut contents)
+            .map_err(|error| format!("mods.toml del JAR no es texto UTF-8 válido: {error}"))?;
+        let document: toml::Value = toml::from_str(&contents)
+            .map_err(|error| format!("mods.toml del JAR no es TOML válido: {error}"))?;
+        for required in ["modLoader", "loaderVersion"] {
+            if document
+                .get(required)
+                .and_then(toml::Value::as_str)
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                return Err(format!("mods.toml no declara {required} válido"));
+            }
+        }
+        let mods = document
+            .get("mods")
+            .and_then(toml::Value::as_array)
+            .filter(|mods| !mods.is_empty())
+            .ok_or_else(|| "mods.toml no declara ningún mod Forge".to_string())?;
+        let mut mod_ids = BTreeSet::new();
+        for entry in mods {
+            let mod_id = entry
+                .get("modId")
+                .and_then(toml::Value::as_str)
+                .filter(|value| valid_forge_mod_id(value))
+                .ok_or_else(|| "mods.toml contiene un modId ausente o no válido".to_string())?;
+            if !mod_ids.insert(mod_id) {
+                return Err(format!("mods.toml repite el modId {mod_id}"));
+            }
+        }
         return Ok(());
     }
 
@@ -1034,6 +1076,13 @@ fn validate_forge_mod_archive(path: &Path) -> Result<(), String> {
         return Err("El JAR no contiene mods.toml ni FMLModType: LIBRARY".into());
     }
     Ok(())
+}
+
+fn valid_forge_mod_id(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    matches!(bytes.next(), Some(b'a'..=b'z'))
+        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        && (2..=64).contains(&value.len())
 }
 
 fn name_exists_case_insensitive(directory: &Path, name: &str) -> Result<bool, String> {
@@ -2794,6 +2843,72 @@ mod tests {
         archive.finish().unwrap();
         validate_forge_mod_archive(&library).unwrap();
 
+        let valid_mod = fixture.join("valid-mod.jar");
+        let mut archive = zip::ZipWriter::new(fs::File::create(&valid_mod).unwrap());
+        archive
+            .start_file("META-INF/mods.toml", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        archive
+            .write_all(b"modLoader=\"javafml\"\nloaderVersion=\"[47,)\"\n[[mods]]\nmodId=\"valid_mod\"\nversion=\"1.0.0\"\n")
+            .unwrap();
+        archive.finish().unwrap();
+        validate_forge_mod_archive(&valid_mod).unwrap();
+
+        let malformed_mod = fixture.join("malformed-mod.jar");
+        let mut archive = zip::ZipWriter::new(fs::File::create(&malformed_mod).unwrap());
+        archive
+            .start_file("META-INF/mods.toml", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        archive
+            .write_all(b"modLoader=\"javafml\"\nloaderVersion=\"[47,)\"\n")
+            .unwrap();
+        archive.finish().unwrap();
+        assert!(validate_forge_mod_archive(&malformed_mod)
+            .unwrap_err()
+            .contains("no declara ningún mod Forge"));
+
+        let invalid_id = fixture.join("invalid-id.jar");
+        let mut archive = zip::ZipWriter::new(fs::File::create(&invalid_id).unwrap());
+        archive
+            .start_file("META-INF/mods.toml", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        archive
+            .write_all(b"modLoader=\"javafml\"\nloaderVersion=\"[47,)\"\n[[mods]]\nmodId=\"Bad-ID\"\n")
+            .unwrap();
+        archive.finish().unwrap();
+        assert!(validate_forge_mod_archive(&invalid_id)
+            .unwrap_err()
+            .contains("modId ausente o no válido"));
+
+        let missing_loader = fixture.join("missing-loader.jar");
+        let mut archive = zip::ZipWriter::new(fs::File::create(&missing_loader).unwrap());
+        archive
+            .start_file("META-INF/mods.toml", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        archive
+            .write_all(b"modLoader=\"javafml\"\n[[mods]]\nmodId=\"valid_mod\"\n")
+            .unwrap();
+        archive.finish().unwrap();
+        assert!(validate_forge_mod_archive(&missing_loader)
+            .unwrap_err()
+            .contains("loaderVersion válido"));
+
+        let oversized_metadata = fixture.join("oversized-metadata.jar");
+        let mut archive = zip::ZipWriter::new(fs::File::create(&oversized_metadata).unwrap());
+        archive
+            .start_file(
+                "META-INF/mods.toml",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        let mut metadata = b"modLoader=\"javafml\"\nloaderVersion=\"[47,)\"\n[[mods]]\nmodId=\"valid_mod\"\n".to_vec();
+        metadata.resize(MAX_FORGE_MOD_METADATA_BYTES as usize + 1, b' ');
+        archive.write_all(&metadata).unwrap();
+        archive.finish().unwrap();
+        assert!(validate_forge_mod_archive(&oversized_metadata)
+            .unwrap_err()
+            .contains("supera el tamaño máximo"));
+
         let arbitrary = fixture.join("arbitrary.jar");
         let mut archive = zip::ZipWriter::new(fs::File::create(&arbitrary).unwrap());
         archive
@@ -3281,7 +3396,7 @@ mod tests {
             )
             .unwrap();
         archive
-            .write_all(b"modLoader=\"javafml\"\nloaderVersion=\"[47,)\"\n")
+            .write_all(b"modLoader=\"javafml\"\nloaderVersion=\"[47,)\"\n[[mods]]\nmodId=\"custom_mod\"\nversion=\"1.0.0\"\n")
             .unwrap();
         archive.finish().unwrap();
 
@@ -3320,7 +3435,9 @@ mod tests {
                 zip::write::SimpleFileOptions::default(),
             )
             .unwrap();
-        archive.write_all(b"modLoader=\"javafml\"").unwrap();
+        archive
+            .write_all(b"modLoader=\"javafml\"\nloaderVersion=\"[47,)\"\n[[mods]]\nmodId=\"taken_mod\"\nversion=\"1.0.0\"\n")
+            .unwrap();
         archive.finish().unwrap();
 
         activate_personal_mod("stored.jar", &mods).unwrap();
@@ -3396,7 +3513,9 @@ mod tests {
                 zip::write::SimpleFileOptions::default(),
             )
             .unwrap();
-        archive.write_all(b"modLoader=\"javafml\"").unwrap();
+        archive
+            .write_all(b"modLoader=\"javafml\"\nloaderVersion=\"[47,)\"\n[[mods]]\nmodId=\"occupied_mod\"\nversion=\"1.0.0\"\n")
+            .unwrap();
         archive.finish().unwrap();
         let occupied = mods.join("taken.jar");
         fs::write(&occupied, b"keep this user's file").unwrap();

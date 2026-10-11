@@ -753,7 +753,7 @@ mod tests {
             .unwrap();
         write!(
             archive,
-            "modLoader=\"javafml\"\n[[mods]]\nmodId=\"{mod_id}\"\n"
+            "modLoader=\"javafml\"\nloaderVersion=\"[47,)\"\n[[mods]]\nmodId=\"{mod_id}\"\n"
         )
         .unwrap();
         archive.finish().unwrap().into_inner()
@@ -837,7 +837,7 @@ mod tests {
         assert_eq!(fs::read(personal.join("custom.jar")).unwrap(), b"personal");
         fs::remove_dir_all(&stage2).unwrap();
 
-        let changed_kept = mod_jar("kept-v2");
+        let changed_kept = mod_jar("kept_v2");
         let third = manifest("siege", &[("kept.jar", &changed_kept)]);
         assert_eq!(
             files_to_download(&game, &third)

@@ -1130,7 +1130,6 @@ fn wait_for_asset_confirmation(
     let mut last_confirmation = AssetConfirmation::Pending {
         asset_exists: false,
     };
-    let mut last_error = None;
     emit_publish_progress(
         app,
         series_id,
@@ -1140,10 +1139,9 @@ fn wait_for_asset_confirmation(
     );
 
     loop {
-        match list_release_assets(token, release_id) {
+        let last_error = match list_release_assets(token, release_id) {
             Ok(assets) => {
                 let confirmation = classify_asset_confirmation(&assets, name, expected_digest);
-                last_error = None;
                 match confirmation {
                     AssetConfirmation::Verified(asset) => {
                         return Ok(AssetConfirmation::Verified(asset));
@@ -1155,9 +1153,10 @@ fn wait_for_asset_confirmation(
                         last_confirmation = pending;
                     }
                 }
+                None
             }
-            Err(error) => last_error = Some(error),
-        }
+            Err(error) => Some(error),
+        };
 
         let now = Instant::now();
         if now >= deadline {
@@ -1845,7 +1844,7 @@ mod tests {
             .start_file("META-INF/mods.toml", zip::write::SimpleFileOptions::default())
             .unwrap();
         archive
-            .write_all(b"modLoader=\"javafml\"\nlicense=\"MIT\"\n")
+            .write_all(b"modLoader=\"javafml\"\nloaderVersion=\"[47,)\"\nlicense=\"MIT\"\n[[mods]]\nmodId=\"example\"\nversion=\"1.0.0\"\n")
             .unwrap();
         archive.finish().unwrap();
     }
@@ -2042,7 +2041,7 @@ mod tests {
             .unwrap();
         archive
             .write_all(
-                b"modLoader=\"javafml\"\nloaderVersion=\"[47,48)\"\nlicense=\"MIT\"\n[[dependencies.example]]\nmodId=\"minecraft\"\nmandatory=true\nversionRange=\"[1.20.2,1.21)\"\n",
+                b"modLoader=\"javafml\"\nloaderVersion=\"[47,48)\"\nlicense=\"MIT\"\n[[mods]]\nmodId=\"example\"\nversion=\"1.0.0\"\n[[dependencies.example]]\nmodId=\"minecraft\"\nmandatory=true\nversionRange=\"[1.20.2,1.21)\"\n",
             )
             .unwrap();
         archive.finish().unwrap();
@@ -2054,7 +2053,7 @@ mod tests {
             .unwrap();
         archive
             .write_all(
-                b"modLoader=\"javafml\"\nloaderVersion=\"${forge_version_range}\"\nlicense=\"MIT\"\n[[dependencies.example]]\nmodId=\"minecraft\"\nmandatory=true\nversionRange=\">=1.20.1 <1.21\"\n",
+                b"modLoader=\"javafml\"\nloaderVersion=\"${forge_version_range}\"\nlicense=\"MIT\"\n[[mods]]\nmodId=\"example\"\nversion=\"1.0.0\"\n[[dependencies.example]]\nmodId=\"minecraft\"\nmandatory=true\nversionRange=\">=1.20.1 <1.21\"\n",
             )
             .unwrap();
         archive.finish().unwrap();
@@ -2066,7 +2065,7 @@ mod tests {
             .unwrap();
         archive
             .write_all(
-                b"modLoader=\"javafml\"\nloaderVersion=\"[48,)\"\nlicense=\"MIT\"\n[[dependencies.example]]\nmodId=\"minecraft\"\nmandatory=true\nversionRange=\"\"\n",
+                b"modLoader=\"javafml\"\nloaderVersion=\"[48,)\"\nlicense=\"MIT\"\n[[mods]]\nmodId=\"example\"\nversion=\"1.0.0\"\n[[dependencies.example]]\nmodId=\"minecraft\"\nmandatory=true\nversionRange=\"\"\n",
             )
             .unwrap();
         archive.finish().unwrap();

@@ -71,14 +71,18 @@ jobs:
       - name: Smoke test Linux launcher startup
         if: runner.os == 'Linux'
         run: |
+          shopt -s nullglob
+          appimages=(src-tauri/target/release/bundle/appimage/*.AppImage)
+          [[ ${#appimages[@]} -eq 1 ]] || { echo "Expected one AppImage for startup smoke test, found ${#appimages[@]}"; exit 1; }
+          chmod +x "${appimages[0]}"
           set +e
-          xvfb-run -a timeout --signal=TERM --kill-after=5s 30s ./src-tauri/target/release/eternalcraft-launcher
+          xvfb-run -a timeout --signal=TERM --kill-after=5s 30s "${appimages[0]}"
           status=$?
           if [[ $status -ne 124 && $status -ne 137 && $status -ne 143 ]]; then
-            echo "Launcher did not remain open during the startup smoke test (exit $status)"
+            echo "Packaged AppImage did not remain open during the startup smoke test (exit $status)"
             exit 1
           fi
-          echo "Launcher remained open for 30 seconds; Minecraft was not started."
+          echo "Packaged AppImage remained open for 30 seconds; Minecraft was not started."
       - name: Smoke test Windows launcher startup
         if: runner.os == 'Windows'
         shell: pwsh

@@ -858,7 +858,36 @@ fn publish_pack_release_sync(
             if !release.draft {
                 return Err(format!("El release publicado {tag} ya contiene {} con otro hash; crea una versión nueva", source_file.name));
             }
-            delete_release_asset(&access_token, release.id, asset.id)?;
+            if asset.digest.is_none() {
+                match wait_for_asset_confirmation(
+                    &app,
+                    &series_id,
+                    index,
+                    total,
+                    &access_token,
+                    release.id,
+                    &source_file.name,
+                    &expected_digest,
+                )? {
+                    AssetConfirmation::Verified(_) => {
+                        verified_names.insert(source_file.name.clone());
+                        emit_publish_progress(&app, &series_id, index + 1, total, &source_file.name);
+                        continue;
+                    }
+                    AssetConfirmation::DigestMismatch(pending_asset) => {
+                        delete_release_asset(&access_token, release.id, pending_asset.id)?;
+                    }
+                    AssetConfirmation::Pending { asset_exists: true } => {
+                        return Err(format!(
+                            "GitHub aún está calculando el SHA-256 de {}. El archivo quedó guardado en el release borrador; vuelve a revisar o reintentar la publicación sin borrarlo.",
+                            source_file.name
+                        ));
+                    }
+                    AssetConfirmation::Pending { asset_exists: false } => {}
+                }
+            } else {
+                delete_release_asset(&access_token, release.id, asset.id)?;
+            }
         }
         if !release.draft {
             return Err(format!("El release publicado {tag} no contiene el mod esperado {}; crea una versión nueva", source_file.name));
@@ -870,6 +899,10 @@ fn publish_pack_release_sync(
             return Err(format!("{} cambió después de la revisión; vuelve a escanear la carpeta", source_file.name));
         }
         let uploaded = upload_release_asset_resumable(
+            &app,
+            &series_id,
+            index,
+            total,
             &access_token,
             &release.upload_url,
             release.id,
@@ -1234,16 +1267,12 @@ fn classify_asset_confirmation(
     }
 }
 
-fn should_retry_asset_confirmation(
+fn should_retry_asset_upload(
     retryable_upload: bool,
     upload_response_ambiguous: bool,
     previous_attempt_unconfirmed: bool,
-    asset_exists_without_digest: bool,
 ) -> bool {
-    retryable_upload
-        || upload_response_ambiguous
-        || previous_attempt_unconfirmed
-        || asset_exists_without_digest
+    retryable_upload || upload_response_ambiguous || previous_attempt_unconfirmed
 }
 
 fn retryable_upload_status(status: reqwest::StatusCode) -> bool {
@@ -1305,7 +1334,72 @@ fn upload_release_asset_once(
     })
 }
 
+fn wait_for_asset_confirmation(
+    app: &AppHandle,
+    series_id: &str,
+    completed_files: usize,
+    total_files: usize,
+    token: &str,
+    release_id: u64,
+    name: &str,
+    expected_digest: &str,
+) -> Result<AssetConfirmation, String> {
+    const CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(120);
+    let deadline = Instant::now() + CONFIRMATION_TIMEOUT;
+    let mut delay = Duration::from_secs(2);
+    let mut last_confirmation = AssetConfirmation::Pending {
+        asset_exists: false,
+    };
+    let mut last_error = None;
+    emit_publish_progress(
+        app,
+        series_id,
+        completed_files,
+        total_files,
+        &format!("Esperando que GitHub confirme el SHA-256 de {name}"),
+    );
+
+    loop {
+        match list_release_assets(token, release_id) {
+            Ok(assets) => {
+                let confirmation = classify_asset_confirmation(&assets, name, expected_digest);
+                last_error = None;
+                match confirmation {
+                    AssetConfirmation::Verified(asset) => {
+                        return Ok(AssetConfirmation::Verified(asset));
+                    }
+                    AssetConfirmation::DigestMismatch(asset) => {
+                        return Ok(AssetConfirmation::DigestMismatch(asset));
+                    }
+                    pending @ AssetConfirmation::Pending { .. } => {
+                        last_confirmation = pending;
+                    }
+                }
+            }
+            Err(error) => last_error = Some(error),
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            if let Some(error) = last_error {
+                if matches!(last_confirmation, AssetConfirmation::Pending { asset_exists: false }) {
+                    return Err(format!(
+                        "GitHub no confirmó el SHA-256 de {name} en 120 segundos: {error}"
+                    ));
+                }
+            }
+            return Ok(last_confirmation);
+        }
+        std::thread::sleep(delay.min(deadline.saturating_duration_since(now)));
+        delay = (delay * 2).min(Duration::from_secs(10));
+    }
+}
+
 fn upload_release_asset_resumable(
+    app: &AppHandle,
+    series_id: &str,
+    completed_files: usize,
+    total_files: usize,
     token: &str,
     upload_url: &str,
     release_id: u64,
@@ -1345,14 +1439,44 @@ fn upload_release_asset_resumable(
         let should_retry = match list_release_assets(token, release_id) {
             Ok(assets) => match classify_asset_confirmation(&assets, name, expected_digest) {
                 AssetConfirmation::Verified(asset) => return Ok(asset),
-                AssetConfirmation::Pending { asset_exists } => {
-                    should_retry_asset_confirmation(
-                        retryable,
-                        upload_response_was_ambiguous,
-                        previous_attempt_unconfirmed,
-                        asset_exists,
-                    )
+                AssetConfirmation::Pending { asset_exists: true } => {
+                    match wait_for_asset_confirmation(
+                        app,
+                        series_id,
+                        completed_files,
+                        total_files,
+                        token,
+                        release_id,
+                        name,
+                        expected_digest,
+                    )? {
+                        AssetConfirmation::Verified(asset) => return Ok(asset),
+                        AssetConfirmation::DigestMismatch(asset) => {
+                            delete_release_asset(token, release_id, asset.id)?;
+                            last_error = format!(
+                                "GitHub registró {name} con un SHA-256 distinto del esperado"
+                            );
+                            true
+                        }
+                        AssetConfirmation::Pending { asset_exists: true } => {
+                            return Err(format!(
+                                "GitHub recibió {name}, pero no confirmó su SHA-256 en 120 segundos. El asset se conservó en el release borrador; reintenta la publicación para verificarlo sin volver a subirlo."
+                            ));
+                        }
+                        AssetConfirmation::Pending { asset_exists: false } => {
+                            should_retry_asset_upload(
+                                retryable,
+                                upload_response_was_ambiguous,
+                                previous_attempt_unconfirmed,
+                            )
+                        }
+                    }
                 }
+                AssetConfirmation::Pending { asset_exists: false } => should_retry_asset_upload(
+                    retryable,
+                    upload_response_was_ambiguous,
+                    previous_attempt_unconfirmed,
+                ),
                 AssetConfirmation::DigestMismatch(asset) => {
                     let actual_digest = asset.digest.as_deref().unwrap_or("desconocido");
                     delete_release_asset(token, release_id, asset.id)?;
@@ -1363,11 +1487,10 @@ fn upload_release_asset_resumable(
                 }
             },
             Err(verify_error)
-                if !should_retry_asset_confirmation(
+                if !should_retry_asset_upload(
                     retryable,
                     upload_response_was_ambiguous,
                     previous_attempt_unconfirmed,
-                    false,
                 ) =>
             {
                 return Err(format!(
@@ -2285,10 +2408,23 @@ mod tests {
             AssetConfirmation::Pending { asset_exists: false }
         ));
 
-        assert!(should_retry_asset_confirmation(true, false, false, false));
-        assert!(should_retry_asset_confirmation(false, false, true, false));
-        assert!(should_retry_asset_confirmation(false, false, false, true));
-        assert!(!should_retry_asset_confirmation(false, false, false, false));
+        assert!(should_retry_asset_upload(true, false, false));
+        assert!(should_retry_asset_upload(false, false, true));
+        assert!(!should_retry_asset_upload(false, false, false));
+    }
+
+    #[test]
+    fn pending_release_asset_is_polled_instead_of_uploaded_again() {
+        let pending = GitHubReleaseAsset {
+            id: 17,
+            name: "example.jar".into(),
+            digest: None,
+        };
+        assert!(matches!(
+            classify_asset_confirmation(&[pending], "example.jar", "sha256:abc"),
+            AssetConfirmation::Pending { asset_exists: true }
+        ));
+        assert!(!should_retry_asset_upload(false, false, false));
     }
 
     #[test]

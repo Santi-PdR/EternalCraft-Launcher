@@ -48,7 +48,6 @@
   let developerPollBusy = false;
   let packSourcePreview = $state<PackSourcePreview | null>(null);
   let packSourceBusy = $state(false);
-  let configureDirectSources = $state(false);
   let licenseReviewFingerprint = $state('');
   let permissionRequiredCount = $derived(packSourcePreview?.files.filter((file) => file.licenseStatus === 'permissionRequired').length ?? 0);
   let unknownLicenseCount = $derived(packSourcePreview?.files.filter((file) => file.licenseStatus === 'unknown').length ?? 0);
@@ -634,16 +633,12 @@
       error = 'Revisa las licencias y confirma que tienes permiso para redistribuir todos los JAR incluidos.';
       return;
     }
-    if (!window.confirm(`Publicar ${selected.name} ${publishVersion} en GitHub? Esta versión quedará disponible para todos los usuarios del launcher.\n\nPara buscar descargas oficiales, se enviarán a Modrinth los hashes SHA-512 de los JAR, no los archivos. Los JAR sin enlace directo se alojarán en un release de EternalCraft, según la confirmación de licencias.`)) return;
+    if (!window.confirm(`Publicar ${selected.name} ${publishVersion} en GitHub? Esta versión quedará disponible para todos los usuarios del launcher.\n\nSolo se usarán los JAR de la carpeta que acabas de revisar. Se subirán al release oficial de EternalCraft; no se consultan Modrinth, CurseForge ni catálogos de mods.`)) return;
     publishingPack = true;
     packPublishMessage = 'Preparando release borrador…';
     error = '';
     try {
-      const externalDownloadUrls: Record<string, string> = {};
-      for (const file of packSourcePreview.files) {
-        if (file.externalDownloadUrl?.trim()) externalDownloadUrls[file.name] = file.externalDownloadUrl.trim();
-      }
-      notice = await invoke<string>('publish_pack_release', { seriesId: selected.id, version: publishVersion.trim(), confirmedSourceFingerprint: licenseReviewFingerprint, externalDownloadUrls });
+      notice = await invoke<string>('publish_pack_release', { seriesId: selected.id, version: publishVersion.trim(), confirmedSourceFingerprint: licenseReviewFingerprint });
       bootstrap = await invoke<Bootstrap>('get_bootstrap');
       packSourcePreview = null;
       licenseReviewFingerprint = '';
@@ -844,11 +839,10 @@
               {@const sourceFingerprint = packSourcePreview.sourceFingerprint}
               <div class="inventory-stats"><article><strong>{packSourcePreview.files.length}</strong><span>Mods JAR verificados</span></article><article><strong>{formatBytes(packSourcePreview.totalBytes)}</strong><span>Tamaño total</span></article><article><strong>SHA-256</strong><span>Comprobado archivo por archivo</span></article></div>
               <div class="inventory-list">
-                <div class="inventory-list-heading"><div><h2>Archivos incluidos en la fuente</h2><p>Se buscan primero por hash en Modrinth. Para otro alojamiento oficial, añade aquí un enlace directo de GitHub Releases o Modrinth; el launcher comprueba tamaño y SHA-256 y no copia ese JAR a EternalCraft.</p></div><button class="button secondary" onclick={() => (configureDirectSources = !configureDirectSources)}>{configureDirectSources ? 'Ocultar fuentes opcionales' : 'Configurar fuentes opcionales'}</button></div>
+                <div class="inventory-list-heading"><div><h2>Mods de la carpeta seleccionada</h2><p>El launcher publica únicamente estos JAR en el release oficial de EternalCraft. No busca ni descarga mods de Modrinth, CurseForge ni otros catálogos.</p></div></div>
                 <ul>{#each packSourcePreview.files as file (file.name)}<li>
                   <span>{file.name}</span>
                   <small>{formatBytes(file.sizeBytes)} · SHA-256 {file.sha256.slice(0, 12)}… · Licencia: {file.license ?? 'no declarada'} ·{#if file.licenseReferenceUrl}<a class="text-link" href={file.licenseReferenceUrl} target="_blank" rel="noreferrer">Ver términos ↗</a> ·{/if} {file.licenseStatus === 'permissionRequired' ? 'requiere revisión/permiso' : file.licenseStatus === 'unknown' ? 'licencia por verificar' : 'revisar condiciones'} · Minecraft: {file.minecraftCompatibility === 'compatible' ? `compatible${file.minecraftVersionRange ? ` (${file.minecraftVersionRange})` : ''}` : file.minecraftCompatibility === 'incompatible' ? `incompatible${file.minecraftVersionRange ? ` (${file.minecraftVersionRange})` : ''}` : file.minecraftVersionRange ? `revisar manualmente (${file.minecraftVersionRange})` : 'rango no declarado'} · Forge: {file.forgeCompatibility === 'compatible' ? `compatible${file.forgeVersionRange ? ` (${file.forgeVersionRange})` : ''}` : file.forgeCompatibility === 'incompatible' ? `incompatible${file.forgeVersionRange ? ` (${file.forgeVersionRange})` : ''}` : file.forgeVersionRange ? `revisar manualmente (${file.forgeVersionRange})` : 'rango no declarado'}</small>
-                  {#if configureDirectSources || file.licenseStatus === 'permissionRequired'}<label class="direct-source-field">{file.licenseStatus === 'permissionRequired' ? 'Enlace directo del autor/plataforma (necesario si no aparece en Modrinth)' : 'Enlace oficial de descarga (opcional)'}<input class="text-input" type="url" value={file.externalDownloadUrl ?? ''} oninput={(event) => { file.externalDownloadUrl = event.currentTarget.value; licenseReviewFingerprint = ''; }} placeholder="https://github.com/.../releases/download/..." /><small>Se acepta un release directo de GitHub o CDN de Modrinth. Los enlaces de página web no sirven.</small></label>{/if}
                 </li>{/each}</ul>
               </div>
               <div class="inventory-warning"><b>Revisión antes de publicar:</b> {permissionRequiredCount} JAR tienen condiciones restrictivas, {unknownLicenseCount} tienen licencia desconocida, {incompatibleMinecraftCount} declaran incompatibilidad con Minecraft {selected.minecraftVersion}, {unknownMinecraftCount} requieren revisar su metadato de Minecraft, {incompatibleForgeCount} declaran incompatibilidad con Forge {selected.loaderVersion} y {unknownForgeCount} requieren revisar su metadato de Forge. Los mods mantienen sus propias condiciones de licencia.

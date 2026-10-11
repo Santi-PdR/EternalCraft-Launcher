@@ -150,28 +150,12 @@ pub(super) fn is_allowed_download_url(raw: &str) -> bool {
         Some("github.com") => {
             let segments: Vec<&str> = url.path_segments().into_iter().flatten().collect();
             segments.len() == 6
-                && is_github_component(segments[0])
-                && is_github_component(segments[1])
+                && segments[0] == "Santi-PdR"
+                && segments[1] == "EternalCraft-Launcher"
                 && segments[2] == "releases"
                 && segments[3] == "download"
                 && is_github_component(segments[4])
                 && is_github_component(segments[5])
-        }
-        Some("raw.githubusercontent.com") => {
-            let segments: Vec<&str> = url.path_segments().into_iter().flatten().collect();
-            segments.len() >= 4
-                && segments.iter().take(3).all(|segment| is_github_component(segment))
-                && segments[3..].iter().all(|segment| is_github_component(segment))
-        }
-        Some("cdn.modrinth.com") => {
-            let segments: Vec<&str> = url.path_segments().into_iter().flatten().collect();
-            segments.len() == 5
-                && segments[0] == "data"
-                && is_modrinth_id(segments[1])
-                && segments[2] == "versions"
-                && is_safe_modrinth_version(segments[3])
-                && !segments[4].is_empty()
-                && !segments[4].contains('/')
         }
         _ => false,
     }
@@ -185,22 +169,6 @@ fn is_github_component(value: &str) -> bool {
             byte.is_ascii_alphanumeric()
                 || matches!(byte, b'.' | b'_' | b'-' | b'+' | b'%' | b'~')
         })
-}
-
-fn is_modrinth_id(value: &str) -> bool {
-    value.len() == 8
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric())
-}
-
-fn is_safe_modrinth_version(value: &str) -> bool {
-    !value.is_empty()
-        && value != "."
-        && value != ".."
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'+'))
 }
 
 #[cfg(test)]
@@ -793,13 +761,13 @@ mod tests {
         value = manifest("siege", &[("good.jar", valid)]);
         value.files[0].url = "https://example.invalid/mod.jar".into();
         assert!(validate_manifest(&value, "siege").is_err());
-        value.files[0].url = "https://cdn.modrinth.com/data/AbCd1234/versions/EfGh5678/mod.jar".into();
+        value.files[0].url = "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/siege-v1.0.0/mod.jar".into();
         validate_manifest(&value, "siege").unwrap();
-        value.files[0].url = "https://cdn.modrinth.com/data/AbCd1234/versions/1.20.1/mod.jar".into();
-        validate_manifest(&value, "siege").unwrap();
-        value.files[0].url = "https://cdn.modrinth.com.evil.invalid/data/AbCd1234/versions/EfGh5678/mod.jar".into();
+        value.files[0].url = "https://github.com/another-owner/another-repo/releases/download/siege-v1.0.0/mod.jar".into();
         assert!(validate_manifest(&value, "siege").is_err());
-        value.files[0].url = "https://cdn.modrinth.com/data/AbCd1234/versions/EfGh5678/mod.jar?token=secret".into();
+        value.files[0].url = "https://cdn.modrinth.com/data/AbCd1234/versions/EfGh5678/mod.jar".into();
+        assert!(validate_manifest(&value, "siege").is_err());
+        value.files[0].url = "https://raw.githubusercontent.com/Santi-PdR/EternalCraft-Launcher/main/mod.jar".into();
         assert!(validate_manifest(&value, "siege").is_err());
         assert!(validate_manifest(&value, "ghouls").is_err());
     }

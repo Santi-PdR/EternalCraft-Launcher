@@ -58,23 +58,12 @@ test('rechaza assets alojados fuera del release inmutable de esa serie', () => {
   assert.ok(validateReleasePacks(catalog, ['siege', 'ghouls-outbreak'], invalid).some((error) => error.includes('URL de release')));
 });
 
-test('acepta una fuente directa de Modrinth con ID de proyecto y versión', () => {
-  const external = structuredClone(manifests);
-  external.siege.files[0].url = 'https://cdn.modrinth.com/data/AbCd1234/versions/1.20.1/mod.jar';
-  assert.deepEqual(validateReleasePacks(catalog, ['siege', 'ghouls-outbreak'], external), []);
-});
-
-test('acepta una fuente directa de GitHub Releases del autor', () => {
-  const external = structuredClone(manifests);
-  external.siege.files[0].url = 'https://github.com/nvb-uy/AGNYA/releases/download/v1.2.0/agnya.jar';
-  assert.deepEqual(validateReleasePacks(catalog, ['siege', 'ghouls-outbreak'], external), []);
-});
-
-test('rechaza fuentes de Modrinth con query o rutas que no son archivos versionados', () => {
+test('rechaza descargas externas de catálogos, autores y archivos raw', () => {
   for (const url of [
-    'https://cdn.modrinth.com/data/AbCd1234/versions/EfGh5678/mod.jar?token=secret',
-    'https://cdn.modrinth.com/data/AbCd1234/mod.jar',
-    'https://cdn.modrinth.com.evil.invalid/data/AbCd1234/versions/EfGh5678/mod.jar',
+    'https://cdn.modrinth.com/data/AbCd1234/versions/1.20.1/mod.jar',
+    'https://www.curseforge.com/minecraft/mc-mods/example/download/123',
+    'https://github.com/nvb-uy/AGNYA/releases/download/v1.2.0/agnya.jar',
+    'https://raw.githubusercontent.com/Santi-PdR/EternalCraft-Launcher/main/mod.jar',
   ]) {
     const invalid = structuredClone(manifests);
     invalid.siege.files[0].url = url;

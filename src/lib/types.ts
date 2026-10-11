@@ -64,7 +64,6 @@ export interface PackSourceFile {
   name: string;
   sizeBytes: number;
   sha256: string;
-  externalDownloadUrl: string | null;
   license: string | null;
   licenseReferenceUrl: string | null;
   licenseStatus: 'recognized' | 'permissionRequired' | 'unknown';

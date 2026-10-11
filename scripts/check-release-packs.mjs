@@ -116,42 +116,12 @@ function isAllowedDownloadUrl(url, expectedReleasePath, name) {
       ? url.pathname.slice(expectedReleasePath.length)
       : '';
     try {
-      if (encodedName && !encodedName.includes('/') && decodeURIComponent(encodedName) === name) return true;
-      return isDirectGitHubReleaseUrl(url.pathname);
+      return encodedName && !encodedName.includes('/') && decodeURIComponent(encodedName) === name;
     } catch {
       return false;
     }
   }
-  if (url.origin === 'https://raw.githubusercontent.com') {
-    return isSafeRawGitHubUrl(url.pathname);
-  }
-  if (url.origin === 'https://cdn.modrinth.com') {
-    return /^\/data\/[A-Za-z0-9]{8}\/versions\/[A-Za-z0-9._+-]+\/[^/]+$/.test(url.pathname);
-  }
   return false;
-}
-
-function isDirectGitHubReleaseUrl(pathname) {
-  const segments = pathname.split('/').slice(1);
-  if (segments.length !== 6 || segments[2] !== 'releases' || segments[3] !== 'download') return false;
-  try {
-    const decoded = segments.map((segment) => decodeURIComponent(segment));
-    return decoded.every((segment) => segment && segment !== '.' && segment !== '..' && !segment.includes('/') && !segment.includes('\\'))
-      && /^[A-Za-z0-9_.-]+$/.test(decoded[0])
-      && /^[A-Za-z0-9_.-]+$/.test(decoded[1]);
-  } catch {
-    return false;
-  }
-}
-
-function isSafeRawGitHubUrl(pathname) {
-  const segments = pathname.split('/').slice(1);
-  if (segments.length < 4) return false;
-  try {
-    return segments.map((segment) => decodeURIComponent(segment)).every((segment) => segment && segment !== '.' && segment !== '..' && !segment.includes('/') && !segment.includes('\\'));
-  } catch {
-    return false;
-  }
 }
 
 function isStableVersion(value) {

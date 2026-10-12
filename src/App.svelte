@@ -101,14 +101,24 @@
 
   onMount(() => {
     let disposed = false;
+    let minecraftStatusRefreshBusy = false;
     const unlisteners: Array<() => void> = [];
     void defaultWindowIcon().then((icon) => icon ? getCurrentWindow().setIcon(icon) : undefined).catch(() => undefined);
     const refreshMinecraftStatus = async () => {
+      if (disposed || minecraftStatusRefreshBusy) return;
+      minecraftStatusRefreshBusy = true;
       try {
         minecraftStatus = await invoke<MinecraftStatus>('get_minecraft_status');
       } catch (reason) {
         if (!disposed) error = `No se pudo consultar el estado de Minecraft: ${String(reason)}`;
+      } finally {
+        minecraftStatusRefreshBusy = false;
       }
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState !== 'visible' || disposed) return;
+      void refreshMinecraftStatus();
+      if (bootstrap && !bootstrap.catalogOnline) void retryCatalogConnection();
     };
     const subscribe = <T,>(event: string, callback: (payload: T) => void) => {
       void listen<T>(event, ({ payload }) => callback(payload)).then((stop) => {
@@ -137,8 +147,10 @@
     const developerTimer = window.setInterval(() => {
       if (developerLoginStatus.status === 'pending' && !developerPollBusy) void pollGitHubDeveloperLogin();
     }, Math.max(5000, (developerLoginStatus.intervalSeconds ?? 5) * 1000));
+    document.addEventListener('visibilitychange', refreshWhenVisible);
     return () => {
       disposed = true;
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
       window.clearTimeout(updateTimer);
       window.clearInterval(statusTimer);
       window.clearInterval(catalogTimer);

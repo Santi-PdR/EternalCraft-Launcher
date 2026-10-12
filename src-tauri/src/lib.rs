@@ -1147,11 +1147,22 @@ fn ensure_series_not_running(app: &AppHandle, series_id: &str) -> Result<(), Str
 }
 
 fn ensure_series_status_not_running(status: &MinecraftStatus, series_id: &str) -> Result<(), String> {
-    if status.running && status.series_id.as_deref() == Some(series_id) {
-        return Err(
-            "Cierra Minecraft de esta serie antes de cambiar sus mods o actualizar el pack."
-                .into(),
-        );
+    if status.running {
+        match status.series_id.as_deref() {
+            Some(running_series) if running_series != series_id => return Ok(()),
+            Some(_) => {
+                return Err(
+                    "Cierra Minecraft de esta serie antes de cambiar sus mods o actualizar el pack."
+                        .into(),
+                );
+            }
+            None => {
+                return Err(
+                    "No se pudo identificar la instancia en ejecución; cierra Minecraft antes de modificar packs o mods."
+                        .into(),
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -2798,6 +2809,12 @@ mod tests {
         };
         assert!(super::ensure_series_status_not_running(&running, "siege").is_err());
         assert!(super::ensure_series_status_not_running(&running, "ghouls-outbreak").is_ok());
+
+        let unidentified = super::MinecraftStatus {
+            series_id: None,
+            ..running.clone()
+        };
+        assert!(super::ensure_series_status_not_running(&unidentified, "siege").is_err());
 
         let stopped = super::MinecraftStatus {
             running: false,

@@ -1234,7 +1234,7 @@ fn activate_personal_mod(name: &str, mods_directory: &Path) -> Result<(), String
     activate_personal_mod_inner(name, mods_directory)
 }
 
-fn activate_personal_mod_for_series(
+fn activate_personal_mod_for_series_inner(
     app: &AppHandle,
     series_id: &str,
     name: &str,
@@ -2335,7 +2335,12 @@ fn activate_personal_mod_for_series(
 ) -> Result<ModInventory, String> {
     let game_directory = resolve_series_game_directory(&app, &series_id)?
         .ok_or_else(|| "No hay una carpeta de juego seleccionada para esta serie".to_string())?;
-    activate_personal_mod_for_series(&app, &series_id, &file_name, &game_directory.join("mods"))?;
+    activate_personal_mod_for_series_inner(
+        &app,
+        &series_id,
+        &file_name,
+        &game_directory.join("mods"),
+    )?;
     get_mod_inventory(app, series_id)
 }
 

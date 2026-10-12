@@ -38,6 +38,10 @@ jobs:
       - run: npm run check:workflow-security
       - name: Require published official packs
         run: npm run check:release-packs
+      - name: Verify published modpack release assets
+        run: npm run check:published-pack-assets
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
       - if: runner.os == 'Linux'
         run: |

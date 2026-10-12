@@ -129,6 +129,11 @@
     void getVersion().then((version) => { if (!disposed) launcherVersion = version; });
     const updateTimer = window.setTimeout(() => { if (!disposed) void checkLauncherUpdate(); }, 1800);
     const statusTimer = window.setInterval(() => { if (document.visibilityState === 'visible') void refreshMinecraftStatus(); }, 10000);
+    const catalogTimer = window.setInterval(() => {
+      if (!disposed && document.visibilityState === 'visible' && bootstrap && !bootstrap.catalogOnline) {
+        void retryCatalogConnection();
+      }
+    }, 30000);
     const developerTimer = window.setInterval(() => {
       if (developerLoginStatus.status === 'pending' && !developerPollBusy) void pollGitHubDeveloperLogin();
     }, Math.max(5000, (developerLoginStatus.intervalSeconds ?? 5) * 1000));
@@ -136,10 +141,31 @@
       disposed = true;
       window.clearTimeout(updateTimer);
       window.clearInterval(statusTimer);
+      window.clearInterval(catalogTimer);
       window.clearInterval(developerTimer);
       unlisteners.forEach((stop) => stop());
     };
   });
+
+  let catalogRetryBusy = false;
+
+  async function retryCatalogConnection() {
+    if (!bootstrap || bootstrap.catalogOnline || catalogRetryBusy) return;
+    catalogRetryBusy = true;
+    const previousSeriesId = bootstrap.activeSeriesId;
+    try {
+      const updated = await invoke<Bootstrap>('get_bootstrap');
+      bootstrap = updated;
+      if (updated.catalogOnline) {
+        notice = 'Conexión recuperada: catálogo de series actualizado.';
+        if (updated.activeSeriesId !== previousSeriesId) await loadMods(updated.activeSeriesId);
+      }
+    } catch {
+      // Keep the embedded catalog available and try again while the window is visible.
+    } finally {
+      catalogRetryBusy = false;
+    }
+  }
 
   async function loadMods(seriesId: string | undefined) {
     if (!seriesId) return;

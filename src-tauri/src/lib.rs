@@ -32,6 +32,7 @@ use std::{
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::Command,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
@@ -458,6 +459,8 @@ struct AppInstallProgress {
     stage: String,
     completed_files: u64,
     current_file: String,
+    last_byte_event: Option<Instant>,
+    last_byte_log: Option<Instant>,
 }
 
 impl AppInstallProgress {
@@ -468,6 +471,8 @@ impl AppInstallProgress {
             stage: "Preparando".into(),
             completed_files: 0,
             current_file: String::new(),
+            last_byte_event: None,
+            last_byte_log: None,
         }
     }
 
@@ -478,6 +483,10 @@ impl AppInstallProgress {
 
     fn emit(&self, message: &str) {
         let _ = append_install_log(&self.app, &self.series_id, &self.stage, message);
+        self.emit_progress(message);
+    }
+
+    fn emit_progress(&self, message: &str) {
         let _ = self.app.emit(
             "forge-install-progress",
             InstallProgress {
@@ -488,6 +497,15 @@ impl AppInstallProgress {
             },
         );
     }
+}
+
+fn progress_update_due(
+    last_update: Option<Instant>,
+    now: Instant,
+    interval: Duration,
+    force: bool,
+) -> bool {
+    force || last_update.is_none_or(|last| now.duration_since(last) >= interval)
 }
 
 fn append_install_log(
@@ -624,6 +642,32 @@ mod log_tests {
 
         fs::remove_file(path).unwrap();
     }
+
+    #[test]
+    fn download_progress_is_throttled_but_emits_completion_immediately() {
+        let start = Instant::now();
+        let interval = Duration::from_millis(200);
+
+        assert!(progress_update_due(None, start, interval, false));
+        assert!(!progress_update_due(
+            Some(start),
+            start + Duration::from_millis(100),
+            interval,
+            false,
+        ));
+        assert!(progress_update_due(
+            Some(start),
+            start + interval,
+            interval,
+            false,
+        ));
+        assert!(progress_update_due(
+            Some(start),
+            start + Duration::from_millis(1),
+            interval,
+            true,
+        ));
+    }
 }
 
 impl ProgressReporter for AppInstallProgress {
@@ -663,7 +707,26 @@ impl ProgressReporter for AppInstallProgress {
                     ),
                     None => format!("Descargando {} · {} bytes", self.current_file, received),
                 };
-                self.emit(&message);
+                let now = Instant::now();
+                let finished = total.is_some_and(|total| received >= total);
+                if progress_update_due(
+                    self.last_byte_event,
+                    now,
+                    Duration::from_millis(200),
+                    finished,
+                ) {
+                    self.emit_progress(&message);
+                    self.last_byte_event = Some(now);
+                }
+                if progress_update_due(
+                    self.last_byte_log,
+                    now,
+                    Duration::from_secs(10),
+                    false,
+                ) {
+                    let _ = append_install_log(&self.app, &self.series_id, &self.stage, &message);
+                    self.last_byte_log = Some(now);
+                }
             }
             ProgressEvent::StageStarted { stage } => {
                 self.set_stage("Instalando", &format!("Etapa: {stage:?}"))

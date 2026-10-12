@@ -1,3 +1,4 @@
+use mc_launcher_core::progress::{ProgressEvent, ProgressReporter};
 use atomic_write_file::AtomicWriteFile;
 use serde::Deserialize;
 use sha1::{Digest, Sha1};
@@ -50,7 +51,11 @@ struct RuntimeDownload {
     url: String,
 }
 
-pub fn install_java_runtime(component: &str, minecraft_dir: &Path) -> Result<(), String> {
+pub fn install_java_runtime(
+    component: &str,
+    minecraft_dir: &Path,
+    progress: &mut impl ProgressReporter,
+) -> Result<(), String> {
     let platform = runtime_platform()?;
     let component_path = safe_relative_path(component)?;
     if component_path.components().count() != 1
@@ -124,6 +129,7 @@ pub fn install_java_runtime(component: &str, minecraft_dir: &Path) -> Result<(),
                     raw,
                     compressed,
                     &canonical_install_root,
+                    progress,
                 )?;
                 if file.executable == Some(true) {
                     set_executable(&destination)?;
@@ -367,6 +373,7 @@ fn install_runtime_file(
     raw: &RuntimeDownload,
     compressed: Option<&RuntimeDownload>,
     runtime_root: &Path,
+    progress: &mut impl ProgressReporter,
 ) -> Result<(), String> {
     match fs::symlink_metadata(destination) {
         Ok(metadata) if metadata.file_type().is_file() => {
@@ -415,6 +422,24 @@ fn install_runtime_file(
             .send()
             .and_then(reqwest::blocking::Response::error_for_status)
             .map_err(|error| format!("No se pudo descargar {}: {error}", destination.display()))?;
+        let label = destination
+            .strip_prefix(runtime_root)
+            .unwrap_or(destination)
+            .to_string_lossy()
+            .into_owned();
+        let total_bytes = response.content_length();
+        progress.report(ProgressEvent::BytesReceived {
+            label: format!("Java · {label}"),
+            received: 0,
+            total: total_bytes,
+        });
+        let mut response = RuntimeProgressReader {
+            inner: response,
+            label: format!("Java · {label}"),
+            received: 0,
+            total_bytes,
+            progress,
+        };
         let mut output = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -467,6 +492,29 @@ fn install_runtime_file(
     result
 }
 
+struct RuntimeProgressReader<'a, R, P> {
+    inner: R,
+    label: String,
+    received: u64,
+    total_bytes: Option<u64>,
+    progress: &'a mut P,
+}
+
+impl<R: Read, P: ProgressReporter> Read for RuntimeProgressReader<'_, R, P> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let count = self.inner.read(buffer)?;
+        if count > 0 {
+            self.received += count as u64;
+            self.progress.report(ProgressEvent::BytesReceived {
+                label: self.label.clone(),
+                received: self.received,
+                total: self.total_bytes,
+            });
+        }
+        Ok(count)
+    }
+}
+
 fn decode_lzma(input: impl Read, output: impl Write) -> Result<(), String> {
     let stream = Stream::new_lzma_decoder(LZMA_MEMORY_LIMIT)
         .map_err(|error| format!("No se pudo inicializar el decodificador LZMA: {error}"))?;
@@ -511,12 +559,19 @@ fn set_executable(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{decode_lzma, safe_relative_path, validate_link_target};
+    use mc_launcher_core::progress::{ProgressEvent, ProgressReporter};
     #[cfg(unix)]
     use super::{
         ensure_normal_directory, ensure_runtime_link_target, install_runtime_file, sha1_file,
         write_runtime_metadata, RuntimeDownload,
     };
     use std::{io::Cursor, path::Path};
+
+    struct QuietProgress;
+
+    impl ProgressReporter for QuietProgress {
+        fn report(&mut self, _: ProgressEvent) {}
+    }
     #[cfg(unix)]
     use std::{fs, time::SystemTime};
 
@@ -580,13 +635,15 @@ mod tests {
             sha1: expected_hash,
             url: "https://example.invalid/runtime".into(),
         };
+        let mut progress = QuietProgress;
 
         assert!(install_runtime_file(
             &client,
             &destination,
             &download,
             None,
-            &fs::canonicalize(&runtime).unwrap()
+            &fs::canonicalize(&runtime).unwrap(),
+            &mut progress
         )
         .is_err());
         assert_eq!(fs::read(&external).unwrap(), b"outside runtime");

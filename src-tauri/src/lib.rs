@@ -768,7 +768,7 @@ fn install_forge_profile(
             "Java",
             "Descargando y verificando el runtime Java 17 de Mojang",
         );
-        mojang_runtime::install_java_runtime(&runtime.component, &game_dir)?;
+        mojang_runtime::install_java_runtime(&runtime.component, &game_dir, &mut progress)?;
         let java = get_executable_path(&runtime.component, &game_dir)
             .ok_or_else(|| "Mojang descargó Java, pero no se encontró su ejecutable".to_string())?;
         ensure_java_executable(&java)?;
@@ -3336,7 +3336,7 @@ mod tests {
         write_version_json(&game_dir, &vanilla).unwrap();
         let runtime = vanilla.java_version.as_ref().unwrap();
         assert_eq!(runtime.major_version, 17);
-        mojang_runtime::install_java_runtime(&runtime.component, &game_dir).unwrap();
+        mojang_runtime::install_java_runtime(&runtime.component, &game_dir, &mut progress).unwrap();
         let java = get_executable_path(&runtime.component, &game_dir).unwrap();
         assert!(inspect_java(&java).compatible);
         install_version_files(&vanilla, &game_dir, &mut progress).unwrap();

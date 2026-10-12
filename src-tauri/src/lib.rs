@@ -1141,8 +1141,34 @@ fn create_loaded_mod_alias(personal_file: &Path, loaded_file: &Path) -> Result<(
     }
 }
 
+fn ensure_series_not_running(app: &AppHandle, series_id: &str) -> Result<(), String> {
+    let status = get_minecraft_status(app.clone())?;
+    if status.running && status.series_id.as_deref() == Some(series_id) {
+        return Err(
+            "Cierra Minecraft de esta serie antes de cambiar sus mods o actualizar el pack."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 fn add_personal_mod(source: &Path, mods_directory: &Path) -> Result<String, String> {
     let _guard = pack::lock_pack_sync()?;
+    add_personal_mod_inner(source, mods_directory)
+}
+
+fn add_personal_mod_for_series(
+    app: &AppHandle,
+    series_id: &str,
+    source: &Path,
+    mods_directory: &Path,
+) -> Result<String, String> {
+    let _guard = pack::lock_pack_sync()?;
+    ensure_series_not_running(app, series_id)?;
+    add_personal_mod_inner(source, mods_directory)
+}
+
+fn add_personal_mod_inner(source: &Path, mods_directory: &Path) -> Result<String, String> {
     let source = source
         .canonicalize()
         .map_err(|error| format!("No se pudo resolver el archivo seleccionado: {error}"))?;
@@ -1214,6 +1240,21 @@ fn add_personal_mod(source: &Path, mods_directory: &Path) -> Result<String, Stri
 
 fn remove_personal_mod(name: &str, mods_directory: &Path) -> Result<(), String> {
     let _guard = pack::lock_pack_sync()?;
+    remove_personal_mod_inner(name, mods_directory)
+}
+
+fn remove_personal_mod_for_series(
+    app: &AppHandle,
+    series_id: &str,
+    name: &str,
+    mods_directory: &Path,
+) -> Result<(), String> {
+    let _guard = pack::lock_pack_sync()?;
+    ensure_series_not_running(app, series_id)?;
+    remove_personal_mod_inner(name, mods_directory)
+}
+
+fn remove_personal_mod_inner(name: &str, mods_directory: &Path) -> Result<(), String> {
     validate_personal_mod_name(name)?;
     let personal_directory = mods_directory.join("personales");
     let official_directory = mods_directory.join("Oficiales");
@@ -1263,6 +1304,21 @@ fn remove_personal_mod(name: &str, mods_directory: &Path) -> Result<(), String> 
 
 fn activate_personal_mod(name: &str, mods_directory: &Path) -> Result<(), String> {
     let _guard = pack::lock_pack_sync()?;
+    activate_personal_mod_inner(name, mods_directory)
+}
+
+fn activate_personal_mod_for_series(
+    app: &AppHandle,
+    series_id: &str,
+    name: &str,
+    mods_directory: &Path,
+) -> Result<(), String> {
+    let _guard = pack::lock_pack_sync()?;
+    ensure_series_not_running(app, series_id)?;
+    activate_personal_mod_inner(name, mods_directory)
+}
+
+fn activate_personal_mod_inner(name: &str, mods_directory: &Path) -> Result<(), String> {
     validate_personal_mod_name(name)?;
     let official_directory = mods_directory.join("Oficiales");
     let personal_directory = mods_directory.join("personales");
@@ -1896,8 +1952,11 @@ async fn sync_official_pack(
     })?;
     verify_forge_profile(&game_dir, &series)?;
     let progress_app = app.clone();
+    let guard_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        pack::sync_pack(
+        let _guard = pack::lock_pack_sync()?;
+        ensure_series_not_running(&guard_app, &series_id)?;
+        pack::sync_pack_locked(
             &game_dir,
             &series_id,
             &series.minecraft_version,
@@ -2485,7 +2544,7 @@ fn add_personal_mod_to_series(app: AppHandle, series_id: String) -> Result<ModIn
     let source = selected
         .into_path()
         .map_err(|error| format!("Ruta del mod no válida: {error}"))?;
-    add_personal_mod(&source, &game_directory.join("mods"))?;
+    add_personal_mod_for_series(&app, &series_id, &source, &game_directory.join("mods"))?;
     get_mod_inventory(app, series_id)
 }
 
@@ -2497,7 +2556,7 @@ fn activate_personal_mod_for_series(
 ) -> Result<ModInventory, String> {
     let game_directory = resolve_series_game_directory(&app, &series_id)?
         .ok_or_else(|| "No hay una carpeta de juego seleccionada para esta serie".to_string())?;
-    activate_personal_mod(&file_name, &game_directory.join("mods"))?;
+    activate_personal_mod_for_series(&app, &series_id, &file_name, &game_directory.join("mods"))?;
     get_mod_inventory(app, series_id)
 }
 
@@ -2509,7 +2568,7 @@ fn remove_personal_mod_from_series(
 ) -> Result<ModInventory, String> {
     let game_directory = resolve_series_game_directory(&app, &series_id)?
         .ok_or_else(|| "No hay una carpeta de juego seleccionada para esta serie".to_string())?;
-    remove_personal_mod(&file_name, &game_directory.join("mods"))?;
+    remove_personal_mod_for_series(&app, &series_id, &file_name, &game_directory.join("mods"))?;
     get_mod_inventory(app, series_id)
 }
 

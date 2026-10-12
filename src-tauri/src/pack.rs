@@ -766,7 +766,7 @@ fn reconcile_staged_with_recovery(
     result
 }
 
-pub(super) fn sync_pack(
+pub(super) fn sync_pack_locked(
     game_dir: &Path,
     series_id: &str,
     minecraft_version: &str,
@@ -774,7 +774,6 @@ pub(super) fn sync_pack(
     loader_version: &str,
     mut report_progress: impl FnMut(PackProgress),
 ) -> Result<PackSyncResult, String> {
-    let _guard = lock_pack_sync()?;
     let url = format!(
         "https://raw.githubusercontent.com/Santi-PdR/EternalCraft-Launcher/main/packs/{series_id}/manifest.json"
     );

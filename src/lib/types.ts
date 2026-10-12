@@ -86,6 +86,8 @@ export interface PackPublishProgress {
   completedFiles: number;
   totalFiles: number;
   message: string;
+  uploadedBytes?: number | null;
+  totalBytes?: number | null;
 }
 
 export interface JavaStatus {

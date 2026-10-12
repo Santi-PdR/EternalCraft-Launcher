@@ -1,6 +1,7 @@
 use super::*;
 use sha2::Digest;
 use std::collections::BTreeSet;
+use std::io::Read;
 use std::time::{Duration, Instant};
 
 const GITHUB_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
@@ -135,6 +136,8 @@ pub(super) struct PackPublishProgress {
     completed_files: usize,
     total_files: usize,
     message: String,
+    uploaded_bytes: Option<u64>,
+    total_bytes: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -771,12 +774,22 @@ fn publish_pack_release_sync(
     }
     let mut verified_names = std::collections::BTreeSet::new();
     let total = source.files.len();
+    let mut verified_bytes = 0_u64;
     for (index, source_file) in source.files.iter().enumerate() {
         let expected_digest = format!("sha256:{}", source_file.sha256);
         if let Some(asset) = assets.iter().find(|asset| asset.name == source_file.published_name) {
             if asset.digest.as_deref() == Some(expected_digest.as_str()) {
                 verified_names.insert(source_file.published_name.clone());
-                emit_publish_progress(&app, &series_id, index + 1, total, &source_file.name);
+                verified_bytes = verified_bytes.saturating_add(source_file.size_bytes);
+                emit_publish_byte_progress(
+                    &app,
+                    &series_id,
+                    index + 1,
+                    total,
+                    verified_bytes,
+                    source.total_bytes,
+                    &source_file.name,
+                );
                 continue;
             }
             if !release.draft {
@@ -795,7 +808,16 @@ fn publish_pack_release_sync(
                 )? {
                     AssetConfirmation::Verified(_) => {
                         verified_names.insert(source_file.published_name.clone());
-                        emit_publish_progress(&app, &series_id, index + 1, total, &source_file.name);
+                        verified_bytes = verified_bytes.saturating_add(source_file.size_bytes);
+                        emit_publish_byte_progress(
+                            &app,
+                            &series_id,
+                            index + 1,
+                            total,
+                            verified_bytes,
+                            source.total_bytes,
+                            &source_file.name,
+                        );
                         continue;
                     }
                     AssetConfirmation::DigestMismatch(pending_asset) => {
@@ -827,6 +849,8 @@ fn publish_pack_release_sync(
             &series_id,
             index,
             total,
+            verified_bytes,
+            source.total_bytes,
             &access_token,
             &release.upload_url,
             release.id,
@@ -840,7 +864,16 @@ fn publish_pack_release_sync(
             return Err(format!("GitHub no confirmó el SHA-256 esperado para {}", source_file.name));
         }
         verified_names.insert(source_file.published_name.clone());
-        emit_publish_progress(&app, &series_id, index + 1, total, &source_file.name);
+        verified_bytes = verified_bytes.saturating_add(source_file.size_bytes);
+        emit_publish_byte_progress(
+            &app,
+            &series_id,
+            index + 1,
+            total,
+            verified_bytes,
+            source.total_bytes,
+            &source_file.name,
+        );
     }
     if release.draft {
         for asset in &assets {
@@ -908,6 +941,27 @@ fn emit_publish_progress(app: &AppHandle, series_id: &str, completed: usize, tot
         completed_files: completed,
         total_files: total,
         message: message.to_string(),
+        uploaded_bytes: None,
+        total_bytes: None,
+    });
+}
+
+fn emit_publish_byte_progress(
+    app: &AppHandle,
+    series_id: &str,
+    completed: usize,
+    total: usize,
+    uploaded_bytes: u64,
+    total_bytes: u64,
+    message: &str,
+) {
+    let _ = app.emit("pack-publish-progress", PackPublishProgress {
+        series_id: series_id.to_string(),
+        completed_files: completed,
+        total_files: total,
+        message: format!("Subiendo {message}"),
+        uploaded_bytes: Some(uploaded_bytes.min(total_bytes)),
+        total_bytes: Some(total_bytes),
     });
 }
 
@@ -1072,12 +1126,42 @@ fn retryable_upload_status(status: reqwest::StatusCode) -> bool {
     status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
 }
 
+struct UploadProgressReader {
+    file: fs::File,
+    total_bytes: u64,
+    bytes_read: u64,
+    last_report: Option<Instant>,
+    report: Box<dyn FnMut(u64) + Send>,
+}
+
+impl Read for UploadProgressReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.file.read(buffer)?;
+        if count == 0 {
+            return Ok(0);
+        }
+        self.bytes_read = self.bytes_read.saturating_add(count as u64);
+        let now = Instant::now();
+        let finished = self.bytes_read >= self.total_bytes;
+        let report_due = self
+            .last_report
+            .map(|last| now.duration_since(last) >= Duration::from_millis(200))
+            .unwrap_or(true);
+        if finished || report_due {
+            (self.report)(self.bytes_read.min(self.total_bytes));
+            self.last_report = Some(now);
+        }
+        Ok(count)
+    }
+}
+
 fn upload_release_asset_once(
     token: &str,
     upload_url: &str,
     name: &str,
     path: &Path,
     size: u64,
+    report_progress: impl FnMut(u64) + Send + 'static,
 ) -> Result<GitHubReleaseAsset, AssetUploadFailure> {
     let url = format!(
         "{}?name={}",
@@ -1088,6 +1172,16 @@ fn upload_release_asset_once(
         message: format!("No se pudo abrir {name} para subirlo: {error}"),
         retryable: false,
     })?;
+    let body = reqwest::blocking::Body::sized(
+        UploadProgressReader {
+            file,
+            total_bytes: size,
+            bytes_read: 0,
+            last_report: None,
+            report: Box::new(report_progress),
+        },
+        size,
+    );
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(20 * 60))
         .user_agent("EternalCraft-Launcher")
@@ -1103,8 +1197,7 @@ fn upload_release_asset_once(
         .header("X-GitHub-Api-Version", "2022-11-28")
         .header("User-Agent", "EternalCraft-Launcher")
         .header("Content-Type", "application/java-archive")
-        .header("Content-Length", size.to_string())
-        .body(reqwest::blocking::Body::new(file))
+        .body(body)
         .send()
         .map_err(|error| AssetUploadFailure {
             message: format!("No se pudo subir {name}: {error}"),
@@ -1192,6 +1285,8 @@ fn upload_release_asset_resumable(
     series_id: &str,
     completed_files: usize,
     total_files: usize,
+    completed_bytes: u64,
+    total_bytes: u64,
     token: &str,
     upload_url: &str,
     release_id: u64,
@@ -1204,8 +1299,22 @@ fn upload_release_asset_resumable(
     let mut last_error = String::new();
     let mut previous_attempt_unconfirmed = false;
     for attempt in 1..=MAX_ATTEMPTS {
+        let progress_app = app.clone();
+        let progress_series_id = series_id.to_string();
+        let progress_name = name.to_string();
+        let report_progress = move |file_bytes| {
+            emit_publish_byte_progress(
+                &progress_app,
+                &progress_series_id,
+                completed_files,
+                total_files,
+                completed_bytes.saturating_add(file_bytes),
+                total_bytes,
+                &progress_name,
+            );
+        };
         let (retryable, upload_response_was_ambiguous) =
-            match upload_release_asset_once(token, upload_url, name, path, size) {
+            match upload_release_asset_once(token, upload_url, name, path, size, report_progress) {
                 Ok(asset)
                     if asset.name == name
                         && asset.digest.as_deref() == Some(expected_digest) =>
@@ -1894,6 +2003,29 @@ mod tests {
         ));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn upload_progress_reader_reports_incremental_and_final_bytes() {
+        let root = temporary_directory("upload-progress");
+        let path = root.join("mod.jar");
+        fs::write(&path, b"12345678").unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut reader = UploadProgressReader {
+            file: fs::File::open(&path).unwrap(),
+            total_bytes: 8,
+            bytes_read: 0,
+            last_report: None,
+            report: Box::new(move |bytes| sender.send(bytes).unwrap()),
+        };
+        let mut buffer = [0_u8; 4];
+
+        assert_eq!(reader.read(&mut buffer).unwrap(), 4);
+        reader.last_report = Some(Instant::now() - Duration::from_secs(1));
+        assert_eq!(reader.read(&mut buffer).unwrap(), 4);
+
+        assert_eq!(receiver.try_iter().collect::<Vec<_>>(), vec![4, 8]);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

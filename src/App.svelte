@@ -58,6 +58,7 @@
   let unknownForgeCount = $derived(packSourcePreview?.files.filter((file) => file.forgeCompatibility === 'unknown').length ?? 0);
   let publishingPack = $state(false);
   let packPublishMessage = $state('');
+  let packPublishProgress = $state<PackPublishProgress | null>(null);
   let publishVersion = $state('1.0.0');
   const backgroundPresets: Record<string, { label: string; url: string; source: string }> = {
     siege: {
@@ -141,7 +142,10 @@
       }
     });
     subscribe<PackPublishProgress>('pack-publish-progress', (payload) => {
-      if (payload.seriesId === selected?.id) packPublishMessage = `${payload.completedFiles}/${payload.totalFiles} · ${payload.message}`;
+      if (payload.seriesId === selected?.id) {
+        packPublishProgress = payload;
+        packPublishMessage = `${payload.completedFiles}/${payload.totalFiles} · ${payload.message}`;
+      }
     });
     void refreshMinecraftStatus();
     void getVersion().then((version) => { if (!disposed) launcherVersion = version; });
@@ -692,6 +696,7 @@
     if (!window.confirm(`Publicar ${selected.name} ${publishVersion} en GitHub? Esta versión quedará disponible para todos los usuarios del launcher.\n\nSolo se usarán los JAR de la carpeta que acabas de revisar. Se subirán al release oficial de EternalCraft; no se consultan Modrinth, CurseForge ni catálogos de mods.`)) return;
     publishingPack = true;
     packPublishMessage = 'Preparando release borrador…';
+    packPublishProgress = null;
     error = '';
     try {
       notice = await invoke<string>('publish_pack_release', { seriesId: selected.id, version: publishVersion.trim(), confirmedSourceFingerprint: licenseReviewFingerprint });
@@ -703,6 +708,7 @@
     } finally {
       publishingPack = false;
       packPublishMessage = '';
+      packPublishProgress = null;
     }
   }
 
@@ -912,7 +918,7 @@
                 <label class="license-confirm"><input type="checkbox" checked={licenseReviewFingerprint === sourceFingerprint} onchange={(event) => (licenseReviewFingerprint = event.currentTarget.checked ? sourceFingerprint : '')} /> Confirmo que revisé las licencias y los derechos de distribución; los enlaces directos permanecen en sus plataformas y los JAR alojados por EternalCraft están autorizados.</label>
               </div>
               <div class="publish-controls"><label>Versión de esta serie<input class="text-input" value={publishVersion} oninput={(event) => (publishVersion = event.currentTarget.value)} placeholder="1.0.0" /></label><button class="button primary" onclick={publishPack} disabled={publishingPack || packSourceBusy || incompatibleMinecraftCount > 0 || incompatibleForgeCount > 0 || licenseReviewFingerprint !== sourceFingerprint || !/^\d+\.\d+\.\d+$/.test(publishVersion.trim())}>{publishingPack ? 'Publicando…' : `Publicar ${selected.name}`}</button></div>
-              {#if publishingPack}<div class="install-progress" role="status" aria-live="polite"><span class="spinner"></span><div><strong>{packPublishMessage}</strong><p>La publicación se puede reintentar si falla; el release conserva los assets verificados.</p></div></div>{/if}
+              {#if publishingPack}<div class="install-progress" role="status" aria-live="polite"><span class="spinner"></span><div class="pack-progress-copy"><strong>{packPublishMessage}</strong>{#if packPublishProgress?.totalBytes && packPublishProgress.totalBytes > 0}<div class="pack-progress-track" role="progressbar" aria-label="Progreso de subida del modpack" aria-valuemin="0" aria-valuemax={packPublishProgress.totalBytes} aria-valuenow={Math.min(packPublishProgress.uploadedBytes ?? 0, packPublishProgress.totalBytes)}><span style:width={`${Math.min(100, (packPublishProgress.uploadedBytes ?? 0) / packPublishProgress.totalBytes * 100)}%`}></span></div><small>{formatBytes(packPublishProgress.uploadedBytes ?? 0)} / {formatBytes(packPublishProgress.totalBytes)}</small>{/if}<p>La publicación se puede reintentar si falla; el release conserva los assets verificados.</p></div></div>{/if}
             {/if}
             <p class="privacy-note">Se suben solo los mods JAR de la carpeta revisada. Los archivos de configuración, otras carpetas y datos personales no se incluyen.</p></div>{/if}</section>
       {:else}

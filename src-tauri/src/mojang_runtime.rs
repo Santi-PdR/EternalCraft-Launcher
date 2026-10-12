@@ -1,5 +1,5 @@
-use mc_launcher_core::progress::{ProgressEvent, ProgressReporter};
 use atomic_write_file::AtomicWriteFile;
+use mc_launcher_core::progress::{ProgressEvent, ProgressReporter};
 use serde::Deserialize;
 use sha1::{Digest, Sha1};
 use std::{

@@ -1143,6 +1143,10 @@ fn create_loaded_mod_alias(personal_file: &Path, loaded_file: &Path) -> Result<(
 
 fn ensure_series_not_running(app: &AppHandle, series_id: &str) -> Result<(), String> {
     let status = get_minecraft_status(app.clone())?;
+    ensure_series_status_not_running(&status, series_id)
+}
+
+fn ensure_series_status_not_running(status: &MinecraftStatus, series_id: &str) -> Result<(), String> {
     if status.running && status.series_id.as_deref() == Some(series_id) {
         return Err(
             "Cierra Minecraft de esta serie antes de cambiar sus mods o actualizar el pack."
@@ -2783,6 +2787,25 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pack_and_personal_mod_mutations_are_blocked_only_for_the_running_series() {
+        let running = super::MinecraftStatus {
+            running: true,
+            series_id: Some("siege".into()),
+            pid: Some(1234),
+            exit_code: None,
+            exit_success: None,
+        };
+        assert!(super::ensure_series_status_not_running(&running, "siege").is_err());
+        assert!(super::ensure_series_status_not_running(&running, "ghouls-outbreak").is_ok());
+
+        let stopped = super::MinecraftStatus {
+            running: false,
+            ..running
+        };
+        assert!(super::ensure_series_status_not_running(&stopped, "siege").is_ok());
+    }
+
     #[test]
     fn offline_username_accepts_minecraft_style_names() {
         assert!(super::valid_offline_username("Santi_17"));

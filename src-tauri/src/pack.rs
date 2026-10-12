@@ -15,6 +15,7 @@ const MANIFEST_LIMIT: u64 = 2 * 1024 * 1024;
 const MOD_LIMIT: u64 = 512 * 1024 * 1024;
 const PACK_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 const STALE_STAGING_AGE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
+const ROLLBACK_FAILED_MARKER: &str = "ROLLBACK_FAILED";
 static PACK_SYNC_LOCK: Mutex<()> = Mutex::new(());
 
 pub(super) fn lock_pack_sync() -> Result<MutexGuard<'static, ()>, String> {
@@ -464,6 +465,15 @@ fn clean_stale_staging_directories(
         if !metadata.file_type().is_dir() {
             continue;
         }
+        match fs::symlink_metadata(path.join(ROLLBACK_FAILED_MARKER)) {
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "No se pudo validar si una descarga requiere recuperación: {error}"
+                ))
+            }
+        }
         let Ok(modified) = metadata.modified() else {
             continue;
         };
@@ -502,35 +512,80 @@ fn restore_snapshot(
     names: &BTreeSet<String>,
     old_state: Option<&PackState>,
     old_state_bytes: Option<&[u8]>,
-) {
+) -> Result<(), String> {
     for name in names {
-        let _ = fs::remove_file(mods_dir.join(name));
-        let _ = fs::remove_file(officials.join(name));
+        remove_normal_file_if_present(&mods_dir.join(name))?;
+        remove_normal_file_if_present(&officials.join(name))?;
     }
     if let Some(state) = old_state {
         for name in state.files.keys() {
             let backup = staging.join("backup").join(name);
+            check_normal_file_if_present(&backup)?;
             if backup.is_file() {
-                let _ = fs::copy(&backup, officials.join(name));
-                let _ = fs::hard_link(officials.join(name), mods_dir.join(name))
-                    .or_else(|_| fs::copy(officials.join(name), mods_dir.join(name)).map(|_| ()));
+                fs::copy(&backup, officials.join(name)).map_err(|error| {
+                    format!("No se pudo restaurar el respaldo oficial de {name}: {error}")
+                })?;
+                fs::hard_link(officials.join(name), mods_dir.join(name))
+                    .or_else(|_| fs::copy(officials.join(name), mods_dir.join(name)).map(|_| ()))
+                    .map_err(|error| {
+                        format!("No se pudo restaurar el mod activo {name}: {error}")
+                    })?;
             }
         }
     }
     match old_state_bytes {
         Some(bytes) => {
-            let _ = fs::write(state_path, bytes);
+            let mut file = AtomicWriteFile::options()
+                .open(state_path)
+                .map_err(|error| format!("No se pudo restaurar el registro del pack: {error}"))?;
+            file.write_all(bytes)
+                .map_err(|error| format!("No se pudo restaurar el registro del pack: {error}"))?;
+            file.commit()
+                .map_err(|error| format!("No se pudo confirmar el registro restaurado: {error}"))?;
         }
         None => {
-            let _ = fs::remove_file(state_path);
+            remove_normal_file_if_present(state_path)?;
         }
     }
+    Ok(())
 }
 
+fn mark_rollback_failed(staging: &Path, error: &str) -> Result<(), String> {
+    let marker = staging.join(ROLLBACK_FAILED_MARKER);
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)
+        .map_err(|write_error| {
+            format!(
+                "No se pudo crear la marca de recuperación {}: {write_error}",
+                marker.display()
+            )
+        })?;
+    file.write_all(error.as_bytes())
+        .map_err(|write_error| {
+            format!("No se pudo guardar el detalle de recuperación: {write_error}")
+        })?;
+    file.sync_all().map_err(|write_error| {
+        format!("No se pudo confirmar el detalle de recuperación: {write_error}")
+    })
+}
+
+#[cfg(test)]
 fn reconcile_staged(
     game_dir: &Path,
     manifest: &PackManifest,
     staging: &Path,
+) -> Result<PackSyncResult, String> {
+    let mut preserve_staging = false;
+    reconcile_staged_with_recovery(game_dir, manifest, staging, &mut preserve_staging)
+}
+
+fn reconcile_staged_with_recovery(
+    game_dir: &Path,
+    manifest: &PackManifest,
+    staging: &Path,
+    preserve_staging: &mut bool,
 ) -> Result<PackSyncResult, String> {
     validate_manifest(manifest, &manifest.series_id)?;
     let mods_dir = game_dir.join("mods");
@@ -671,7 +726,7 @@ fn reconcile_staged(
             atomic_save_state(&state_path, &new_state)
         })();
         if let Err(error) = apply {
-            restore_snapshot(
+            if let Err(rollback_error) = restore_snapshot(
                 &mods_dir,
                 &officials,
                 &state_path,
@@ -679,7 +734,17 @@ fn reconcile_staged(
                 &transaction_names,
                 old_state.as_ref(),
                 old_state_bytes.as_deref(),
-            );
+            ) {
+                *preserve_staging = true;
+                let detail = format!(
+                    "La actualización falló: {error}. La restauración también falló: {rollback_error}. Se conservaron los respaldos en {}",
+                    staging.display()
+                );
+                if let Err(marker_error) = mark_rollback_failed(staging, &detail) {
+                    return Err(format!("{detail}. {marker_error}"));
+                }
+                return Err(detail);
+            }
             return Err(error);
         }
         Ok(PackSyncResult {
@@ -772,6 +837,7 @@ pub(super) fn sync_pack(
     let staging = game_dir.join(format!(".eternalcraft-pack-{}-{nonce}", std::process::id()));
     fs::create_dir_all(&staging)
         .map_err(|error| format!("No se pudo preparar la actualización: {error}"))?;
+    let mut preserve_staging = false;
     let result = (|| {
         for (index, file) in downloads.iter().enumerate() {
             let name = file.path.strip_prefix("mods/").unwrap();
@@ -819,9 +885,11 @@ pub(super) fn sync_pack(
             total_files: downloads.len(),
             message: "Instalando mods y retirando los oficiales obsoletos".into(),
         });
-        reconcile_staged(game_dir, &manifest, &staging)
+        reconcile_staged_with_recovery(game_dir, &manifest, &staging, &mut preserve_staging)
     })();
-    let _ = fs::remove_dir_all(&staging);
+    if !preserve_staging {
+        let _ = fs::remove_dir_all(&staging);
+    }
     result
 }
 
@@ -904,15 +972,67 @@ mod tests {
         fs::create_dir(game.join(stale_name)).unwrap();
         fs::create_dir(game.join(fresh_name)).unwrap();
         fs::create_dir(game.join(unrelated_name)).unwrap();
+        let recovery_name = ".eternalcraft-pack-1234-987654323";
+        fs::create_dir(game.join(recovery_name)).unwrap();
+        fs::write(
+            game.join(recovery_name).join(ROLLBACK_FAILED_MARKER),
+            "keep backup",
+        )
+        .unwrap();
         let cleanup_time = now + Duration::from_secs(5);
         let removed = clean_stale_staging_directories(&game, cleanup_time, Duration::ZERO).unwrap();
         assert_eq!(
             removed, 2,
-            "only precisely named launcher staging directories are removed"
+            "stale downloads are removed, but rollback recovery data is retained"
         );
         assert!(!game.join(stale_name).exists());
         assert!(!game.join(fresh_name).exists());
         assert!(game.join(unrelated_name).exists());
+        assert!(game.join(recovery_name).join(ROLLBACK_FAILED_MARKER).is_file());
+        fs::remove_dir_all(game).unwrap();
+    }
+
+    #[test]
+    fn failed_snapshot_restore_reports_error_and_retains_backup_marker() {
+        let game = temp_dir();
+        let mods = game.join("mods");
+        let officials = mods.join("Oficiales");
+        let metadata = game.join(".eternalcraft");
+        let staging = game.join(".eternalcraft-pack-1234-987654324");
+        let backup = staging.join("backup");
+        fs::create_dir_all(&mods).unwrap();
+        fs::create_dir_all(&officials).unwrap();
+        fs::create_dir_all(&metadata).unwrap();
+        fs::create_dir_all(&backup).unwrap();
+        fs::create_dir(mods.join("tracked.jar")).unwrap();
+        fs::write(backup.join("tracked.jar"), b"recovery copy").unwrap();
+        let previous_state = PackState {
+            schema_version: 1,
+            series_id: "siege".into(),
+            version: "1.0.0".into(),
+            files: BTreeMap::from([("tracked.jar".into(), "a".repeat(64))]),
+        };
+        let state_bytes = serde_json::to_vec(&previous_state).unwrap();
+
+        let error = restore_snapshot(
+            &mods,
+            &officials,
+            &state_path(&game, "siege"),
+            &staging,
+            &BTreeSet::from(["tracked.jar".into()]),
+            Some(&previous_state),
+            Some(&state_bytes),
+        )
+        .unwrap_err();
+        assert!(error.contains("no es un archivo normal"));
+        assert!(backup.join("tracked.jar").is_file());
+        mark_rollback_failed(&staging, &error).unwrap();
+        assert!(staging.join(ROLLBACK_FAILED_MARKER).is_file());
+        assert_eq!(
+            clean_stale_staging_directories(&game, SystemTime::now(), Duration::ZERO).unwrap(),
+            0
+        );
+        assert!(backup.join("tracked.jar").is_file());
         fs::remove_dir_all(game).unwrap();
     }
 

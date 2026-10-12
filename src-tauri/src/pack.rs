@@ -15,6 +15,7 @@ const MANIFEST_LIMIT: u64 = 2 * 1024 * 1024;
 const MOD_LIMIT: u64 = 512 * 1024 * 1024;
 const PACK_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 const STALE_STAGING_AGE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
+const MAX_PACK_DOWNLOAD_ATTEMPTS: usize = 3;
 const ROLLBACK_FAILED_MARKER: &str = "ROLLBACK_FAILED";
 static PACK_SYNC_LOCK: Mutex<()> = Mutex::new(());
 
@@ -794,6 +795,116 @@ fn reconcile_staged_with_recovery(
     result
 }
 
+fn retryable_pack_http_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+}
+
+fn retryable_pack_io_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::UnexpectedEof
+    )
+}
+
+fn retry_pack_download_after(attempt: usize) {
+    let seconds = 1_u64 << attempt.saturating_sub(1).min(3);
+    std::thread::sleep(Duration::from_secs(seconds));
+}
+
+fn download_pack_file(
+    client: &reqwest::blocking::Client,
+    file: &PackFile,
+    staged: &Path,
+    mut report_progress: impl FnMut(u64),
+) -> Result<(), String> {
+    let name = file.path.strip_prefix("mods/").unwrap();
+    let mut last_error = String::new();
+    for attempt in 1..=MAX_PACK_DOWNLOAD_ATTEMPTS {
+        if staged.exists() {
+            fs::remove_file(staged)
+                .map_err(|error| {
+                    format!("No se pudo retirar la descarga parcial de {name}: {error}")
+                })?;
+        }
+        let response = match client.get(&file.url).send() {
+            Ok(response) if response.status().is_success() => response,
+            Ok(response) => {
+                let status = response.status();
+                let error = response.error_for_status().unwrap_err();
+                last_error = format!("No se pudo descargar {name} ({status}): {error}");
+                if !retryable_pack_http_status(status) || attempt == MAX_PACK_DOWNLOAD_ATTEMPTS {
+                    return Err(last_error);
+                }
+                retry_pack_download_after(attempt);
+                continue;
+            }
+            Err(error) => {
+                let retryable = error.is_timeout() || error.is_connect();
+                last_error = format!("No se pudo descargar {name}: {error}");
+                if !retryable || attempt == MAX_PACK_DOWNLOAD_ATTEMPTS {
+                    return Err(last_error);
+                }
+                retry_pack_download_after(attempt);
+                continue;
+            }
+        };
+        if response
+            .content_length()
+            .is_some_and(|length| length != file.size_bytes)
+        {
+            return Err(format!(
+                "El servidor informó un tamaño inesperado para {name}"
+            ));
+        }
+        let mut output = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(staged)
+            .map_err(|error| format!("No se pudo preparar la descarga de {name}: {error}"))?;
+        let mut response = response.take(file.size_bytes + 1);
+        let copied = match copy_download_with_progress(
+            &mut response,
+            &mut output,
+            &mut report_progress,
+        ) {
+            Ok(copied) => copied,
+            Err(error) => {
+                drop(output);
+                let _ = fs::remove_file(staged);
+                last_error = format!("La descarga de {name} falló: {error}");
+                if !retryable_pack_io_error(&error) || attempt == MAX_PACK_DOWNLOAD_ATTEMPTS {
+                    return Err(last_error);
+                }
+                retry_pack_download_after(attempt);
+                continue;
+            }
+        };
+        if let Err(error) = output.sync_all() {
+            drop(output);
+            let _ = fs::remove_file(staged);
+            return Err(format!("No se pudo confirmar la descarga de {name}: {error}"));
+        }
+        drop(output);
+        if copied == file.size_bytes && digest_file(staged)? == file.sha256.to_ascii_lowercase() {
+            return Ok(());
+        }
+        let _ = fs::remove_file(staged);
+        last_error = format!("La descarga de {name} no pasó la verificación de tamaño y SHA-256");
+        if attempt < MAX_PACK_DOWNLOAD_ATTEMPTS {
+            retry_pack_download_after(attempt);
+        }
+    }
+    Err(format!(
+        "No se pudo completar {name} después de {MAX_PACK_DOWNLOAD_ATTEMPTS} intentos: {last_error}"
+    ))
+}
+
 pub(super) fn sync_pack_locked(
     game_dir: &Path,
     series_id: &str,
@@ -872,28 +983,9 @@ pub(super) fn sync_pack_locked(
         let mut completed_bytes = 0_u64;
         for (index, file) in downloads.iter().enumerate() {
             let name = file.path.strip_prefix("mods/").unwrap();
-            let response = client
-                .get(&file.url)
-                .send()
-                .and_then(|response| response.error_for_status())
-                .map_err(|error| format!("No se pudo descargar {name}: {error}"))?;
-            if response
-                .content_length()
-                .is_some_and(|length| length != file.size_bytes)
-            {
-                return Err(format!(
-                    "El servidor informó un tamaño inesperado para {name}"
-                ));
-            }
             let staged = staging.join(name);
-            let mut output = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&staged)
-                .map_err(|error| format!("No se pudo preparar la descarga de {name}: {error}"))?;
-            let mut response = response.take(file.size_bytes + 1);
             let mut last_progress = None;
-            let copied = copy_download_with_progress(&mut response, &mut output, |received| {
+            download_pack_file(&client, file, &staged, |received| {
                 let now = Instant::now();
                 let finished = received >= file.size_bytes;
                 if super::progress_update_due(
@@ -912,18 +1004,7 @@ pub(super) fn sync_pack_locked(
                     });
                     last_progress = Some(now);
                 }
-            })
-            .map_err(|error| format!("La descarga de {name} falló: {error}"))?;
-            output
-                .sync_all()
-                .map_err(|error| format!("No se pudo confirmar la descarga de {name}: {error}"))?;
-            if copied != file.size_bytes
-                || digest_file(&staged)? != file.sha256.to_ascii_lowercase()
-            {
-                return Err(format!(
-                    "La descarga de {name} no pasó la verificación SHA-256"
-                ));
-            }
+            })?;
             completed_bytes = completed_bytes.saturating_add(file.size_bytes);
             report_progress(PackProgress {
                 series_id: series_id.into(),
@@ -1186,6 +1267,85 @@ mod tests {
         assert_eq!(copied, source.len() as u64);
         assert_eq!(output, source);
         assert_eq!(progress, vec![64 * 1024, 128 * 1024, 128 * 1024 + 17]);
+    }
+
+    #[test]
+    fn pack_download_retries_only_transient_network_failures() {
+        assert!(retryable_pack_http_status(reqwest::StatusCode::REQUEST_TIMEOUT));
+        assert!(retryable_pack_http_status(reqwest::StatusCode::TOO_MANY_REQUESTS));
+        assert!(retryable_pack_http_status(reqwest::StatusCode::BAD_GATEWAY));
+        assert!(retryable_pack_http_status(reqwest::StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(!retryable_pack_http_status(reqwest::StatusCode::FORBIDDEN));
+        assert!(!retryable_pack_http_status(reqwest::StatusCode::NOT_FOUND));
+
+        assert!(retryable_pack_io_error(&std::io::Error::from(
+            std::io::ErrorKind::ConnectionReset
+        )));
+        assert!(retryable_pack_io_error(&std::io::Error::from(
+            std::io::ErrorKind::UnexpectedEof
+        )));
+        assert!(!retryable_pack_io_error(&std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied
+        )));
+    }
+
+    #[test]
+    fn pack_download_retries_a_temporary_server_error_and_verifies_the_file() {
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+
+        let content = b"verified mod bytes";
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                }
+                if attempt == 0 {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .unwrap();
+                } else {
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        content.len()
+                    )
+                    .unwrap();
+                    stream.write_all(content).unwrap();
+                }
+            }
+        });
+        let root = temp_dir();
+        let staged = root.join("mod.jar");
+        let file = PackFile {
+            path: "mods/mod.jar".into(),
+            url: format!("http://{address}/mod.jar"),
+            size_bytes: content.len() as u64,
+            sha256: digest(content),
+        };
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap();
+        let mut progress = Vec::new();
+
+        download_pack_file(&client, &file, &staged, |bytes| progress.push(bytes)).unwrap();
+
+        server.join().unwrap();
+        assert_eq!(fs::read(&staged).unwrap(), content);
+        assert_eq!(progress.last(), Some(&(content.len() as u64)));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

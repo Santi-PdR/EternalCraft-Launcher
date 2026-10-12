@@ -1,3 +1,4 @@
+use atomic_write_file::AtomicWriteFile;
 use serde::Deserialize;
 use sha1::{Digest, Sha1};
 use std::{
@@ -171,17 +172,27 @@ pub fn install_java_runtime(component: &str, minecraft_dir: &Path) -> Result<(),
                         ));
                     }
                 }
+                #[cfg(not(unix))]
+                return Err(format!(
+                    "El runtime Java requiere un enlace simbólico no disponible en esta plataforma: {relative_name}"
+                ));
             }
             Some(other) => return Err(format!("Tipo de archivo Java no reconocido: {other}")),
             None => {}
         }
     }
 
+    for (relative_name, file) in &platform_manifest.files {
+        if file.file_type.as_deref() == Some("link") {
+            let link = install_root.join(safe_relative_path(relative_name)?);
+            ensure_runtime_link_target(&canonical_install_root, &link)?;
+        }
+    }
+
     let version_name = entry.version.get("name").ok_or_else(|| {
         format!("El manifiesto Java no incluye el nombre de versión de {component}")
     })?;
-    fs::write(runtime_root.join(".version"), version_name)
-        .map_err(|error| format!("No se pudo guardar la versión del runtime Java: {error}"))?;
+    write_runtime_metadata(&runtime_root.join(".version"), version_name.as_bytes())?;
     let mut sha1_index = String::new();
     for relative in installed_files {
         let path = install_root.join(&relative);
@@ -193,8 +204,10 @@ pub fn install_java_runtime(component: &str, minecraft_dir: &Path) -> Result<(),
             .map_or(0, |duration| duration.as_nanos());
         sha1_index.push_str(&format!("{} /#// {} {}\n", relative.display(), hash, elapsed));
     }
-    fs::write(runtime_root.join(format!("{component}.sha1")), sha1_index)
-        .map_err(|error| format!("No se pudo guardar el índice del runtime Java: {error}"))?;
+    write_runtime_metadata(
+        &runtime_root.join(format!("{component}.sha1")),
+        sha1_index.as_bytes(),
+    )?;
     Ok(())
 }
 
@@ -300,6 +313,52 @@ fn ensure_runtime_directory_tree(root: &Path, path: &Path) -> Result<(), String>
         ensure_normal_directory(&current)?;
     }
     Ok(())
+}
+
+fn ensure_runtime_link_target(root: &Path, link: &Path) -> Result<(), String> {
+    let canonical = fs::canonicalize(link)
+        .map_err(|error| {
+            format!(
+                "No se pudo validar el destino del enlace Java {}: {error}",
+                link.display()
+            )
+        })?;
+    if canonical.starts_with(root) {
+        Ok(())
+    } else {
+        Err(format!(
+            "El enlace Java sale del runtime: {}",
+            link.display()
+        ))
+    }
+}
+
+fn write_runtime_metadata(path: &Path, contents: &[u8]) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(format!(
+                "Los metadatos existentes del runtime no son un archivo normal: {}",
+                path.display()
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "No se pudieron revisar los metadatos del runtime {}: {error}",
+                path.display()
+            ));
+        }
+    }
+    let mut output = AtomicWriteFile::options()
+        .open(path)
+        .map_err(|error| format!("No se pudieron preparar los metadatos Java: {error}"))?;
+    output
+        .write_all(contents)
+        .map_err(|error| format!("No se pudieron escribir los metadatos Java: {error}"))?;
+    output
+        .commit()
+        .map_err(|error| format!("No se pudieron confirmar los metadatos Java: {error}"))
 }
 
 fn install_runtime_file(
@@ -453,7 +512,10 @@ fn set_executable(path: &Path) -> Result<(), String> {
 mod tests {
     use super::{decode_lzma, safe_relative_path, validate_link_target};
     #[cfg(unix)]
-    use super::{ensure_normal_directory, install_runtime_file, sha1_file, RuntimeDownload};
+    use super::{
+        ensure_normal_directory, ensure_runtime_link_target, install_runtime_file, sha1_file,
+        write_runtime_metadata, RuntimeDownload,
+    };
     use std::{io::Cursor, path::Path};
     #[cfg(unix)]
     use std::{fs, time::SystemTime};
@@ -562,6 +624,40 @@ mod tests {
 
         assert!(ensure_normal_directory(&runtime).is_err());
         assert!(fs::read_dir(&outside).unwrap().next().is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_link_cannot_escape_through_an_existing_target_symlink() {
+        let root = temporary_directory("runtime-link-target-symlink");
+        let runtime = root.join("runtime");
+        let outside = root.join("outside");
+        let bin = runtime.join("bin");
+        let lib = runtime.join("lib");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&lib).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("java"), b"outside runtime target").unwrap();
+        std::os::unix::fs::symlink(outside.join("java"), lib.join("java")).unwrap();
+        let link = bin.join("java");
+        std::os::unix::fs::symlink("../lib/java", &link).unwrap();
+
+        assert!(ensure_runtime_link_target(&fs::canonicalize(&runtime).unwrap(), &link).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_metadata_rejects_existing_symlinks() {
+        let root = temporary_directory("runtime-metadata-symlink");
+        let external = root.join("outside.txt");
+        let metadata = root.join(".version");
+        fs::write(&external, b"keep this file").unwrap();
+        std::os::unix::fs::symlink(&external, &metadata).unwrap();
+
+        assert!(write_runtime_metadata(&metadata, b"17.0.1").is_err());
+        assert_eq!(fs::read(&external).unwrap(), b"keep this file");
         fs::remove_dir_all(root).unwrap();
     }
 }

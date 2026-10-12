@@ -8,7 +8,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const MANIFEST_LIMIT: u64 = 2 * 1024 * 1024;
@@ -69,7 +69,28 @@ pub(super) struct PackProgress {
     pub series_id: String,
     pub completed_files: usize,
     pub total_files: usize,
+    pub downloaded_bytes: u64,
+    pub total_bytes: u64,
     pub message: String,
+}
+
+fn copy_download_with_progress<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    mut report_bytes: impl FnMut(u64),
+) -> std::io::Result<u64> {
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut copied = 0_u64;
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        writer.write_all(&buffer[..read])?;
+        copied += read as u64;
+        report_bytes(copied);
+    }
+    Ok(copied)
 }
 
 fn valid_file_name(name: &str) -> bool {
@@ -809,6 +830,7 @@ pub(super) fn sync_pack_locked(
         );
     }
     let downloads = files_to_download(game_dir, &manifest)?;
+    let total_bytes = downloads.iter().map(|file| file.size_bytes).sum::<u64>();
     let stale_directories = clean_stale_staging_directories(
         game_dir,
         SystemTime::now(),
@@ -818,6 +840,8 @@ pub(super) fn sync_pack_locked(
         series_id: series_id.into(),
         completed_files: 0,
         total_files: downloads.len(),
+        downloaded_bytes: 0,
+        total_bytes,
         message: format!(
             "Manifiesto {} verificado; preparando descargas{}",
             manifest.version,
@@ -838,6 +862,7 @@ pub(super) fn sync_pack_locked(
         .map_err(|error| format!("No se pudo preparar la actualización: {error}"))?;
     let mut preserve_staging = false;
     let result = (|| {
+        let mut completed_bytes = 0_u64;
         for (index, file) in downloads.iter().enumerate() {
             let name = file.path.strip_prefix("mods/").unwrap();
             let response = client
@@ -859,8 +884,29 @@ pub(super) fn sync_pack_locked(
                 .create_new(true)
                 .open(&staged)
                 .map_err(|error| format!("No se pudo preparar la descarga de {name}: {error}"))?;
-            let copied = std::io::copy(&mut response.take(file.size_bytes + 1), &mut output)
-                .map_err(|error| format!("La descarga de {name} falló: {error}"))?;
+            let mut response = response.take(file.size_bytes + 1);
+            let mut last_progress = None;
+            let copied = copy_download_with_progress(&mut response, &mut output, |received| {
+                let now = Instant::now();
+                let finished = received >= file.size_bytes;
+                if super::progress_update_due(
+                    last_progress,
+                    now,
+                    Duration::from_millis(200),
+                    finished,
+                ) {
+                    report_progress(PackProgress {
+                        series_id: series_id.into(),
+                        completed_files: index,
+                        total_files: downloads.len(),
+                        downloaded_bytes: completed_bytes.saturating_add(received),
+                        total_bytes,
+                        message: format!("Descargando {}/{} · {name}", index + 1, downloads.len()),
+                    });
+                    last_progress = Some(now);
+                }
+            })
+            .map_err(|error| format!("La descarga de {name} falló: {error}"))?;
             output
                 .sync_all()
                 .map_err(|error| format!("No se pudo confirmar la descarga de {name}: {error}"))?;
@@ -871,10 +917,13 @@ pub(super) fn sync_pack_locked(
                     "La descarga de {name} no pasó la verificación SHA-256"
                 ));
             }
+            completed_bytes = completed_bytes.saturating_add(file.size_bytes);
             report_progress(PackProgress {
                 series_id: series_id.into(),
                 completed_files: index + 1,
                 total_files: downloads.len(),
+                downloaded_bytes: completed_bytes,
+                total_bytes,
                 message: format!("Verificado {}/{} · {name}", index + 1, downloads.len()),
             });
         }
@@ -882,6 +931,8 @@ pub(super) fn sync_pack_locked(
             series_id: series_id.into(),
             completed_files: downloads.len(),
             total_files: downloads.len(),
+            downloaded_bytes: total_bytes,
+            total_bytes,
             message: "Instalando mods y retirando los oficiales obsoletos".into(),
         });
         reconcile_staged_with_recovery(game_dir, &manifest, &staging, &mut preserve_staging)
@@ -1083,6 +1134,23 @@ mod tests {
         value = manifest("siege", &[("good.jar", valid)]);
         value.version = "1.0.0/other".into();
         assert!(validate_manifest(&value, "siege").is_err());
+    }
+
+    #[test]
+    fn streams_download_bytes_and_reports_incremental_progress() {
+        let source = vec![42_u8; 128 * 1024 + 17];
+        let mut reader = std::io::Cursor::new(source.as_slice());
+        let mut output = Vec::new();
+        let mut progress = Vec::new();
+
+        let copied = copy_download_with_progress(&mut reader, &mut output, |received| {
+            progress.push(received);
+        })
+        .unwrap();
+
+        assert_eq!(copied, source.len() as u64);
+        assert_eq!(output, source);
+        assert_eq!(progress, vec![64 * 1024, 128 * 1024, 128 * 1024 + 17]);
     }
 
     #[test]

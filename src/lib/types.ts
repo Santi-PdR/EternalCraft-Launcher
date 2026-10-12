@@ -127,5 +127,7 @@ export interface PackSyncProgress {
   seriesId: string;
   completedFiles: number;
   totalFiles: number;
+  downloadedBytes: number;
+  totalBytes: number;
   message: string;
 }

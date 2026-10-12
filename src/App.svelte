@@ -33,6 +33,7 @@
   let installErrorSeries = $state<string | null>(null);
   let syncingPack = $state(false);
   let packSyncMessage = $state('');
+  let packSyncProgress = $state<PackSyncProgress | null>(null);
   let installMessage = $state('');
   let launcherLogs = $state('Todavía no hay registros de instalación.');
   let logsLoading = $state(false);
@@ -130,7 +131,10 @@
       if (payload.seriesId === installingSeries) installMessage = payload.message;
     });
     subscribe<PackSyncProgress>('pack-sync-progress', (payload) => {
-      if (payload.seriesId === selected?.id) packSyncMessage = payload.message;
+      if (payload.seriesId === selected?.id) {
+        packSyncProgress = payload;
+        packSyncMessage = payload.message;
+      }
     });
     subscribe<PackPublishProgress>('pack-publish-progress', (payload) => {
       if (payload.seriesId === selected?.id) packPublishMessage = `${payload.completedFiles}/${payload.totalFiles} · ${payload.message}`;
@@ -610,6 +614,7 @@
       if (!installed) return false;
     }
     syncingPack = true;
+    packSyncProgress = null;
     packSyncMessage = 'Consultando la versión oficial…';
     error = '';
     try {
@@ -623,6 +628,7 @@
     } finally {
       syncingPack = false;
       packSyncMessage = '';
+      packSyncProgress = null;
     }
   }
 
@@ -857,7 +863,7 @@
           <div class="play-panel"><div class="play-copy"><span class="eyebrow">INSTANCIA AISLADA · {selected.name}</span><h3>{bootstrap.installedProfiles[selected.id] ? 'Instancia de EternalCraft lista' : installingSeries === selected.id ? 'Preparando instancia nueva…' : 'Tu instancia nueva'}</h3><p>{bootstrap.managedGameDirectories[selected.id]}{!bootstrap.installedProfiles[selected.id] ? ` · Minecraft ${selected.minecraftVersion} · ${selected.loader} ${selected.loaderVersion}` : ''}</p>{#if minecraftStatus.running}<span class="saved-chip process-chip">MINECRAFT EN EJECUCIÓN · {minecraftStatus.seriesId === selected.id ? 'ESTA SERIE' : minecraftStatus.seriesId?.toUpperCase()} · PID {minecraftStatus.pid}</span>{:else if minecraftStatus.exitSuccess === false}<span class="warning-chip process-chip">ÚLTIMA SESIÓN CERRÓ CON ERROR · CÓDIGO {minecraftStatus.exitCode ?? 'DESCONOCIDO'}</span>{/if}</div><div class="play-actions">{#if selected.packStatus === 'available'}{#if bootstrap.microsoftProfile || bootstrap.accountMode === 'offline'}<button class="button primary" onclick={launchMinecraft} disabled={busy || minecraftStatus.running || syncingPack}>{minecraftStatus.running ? 'Minecraft ejecutándose' : busy || installingSeries ? 'Preparando…' : bootstrap.installedProfiles[selected.id] || isLinked(selected) ? 'Jugar' : 'Instalar y jugar'}</button>{/if}{:else}<button class="button secondary" disabled title="El modpack de esta serie todavía no tiene archivos oficiales publicados">Pack no publicado</button>{/if}{#if bootstrap.installedProfiles[selected.id]}<button class="button secondary" onclick={selectDirectory} disabled={busy || syncingPack || minecraftStatus.running}>{isLinked(selected) ? 'Cambiar carpeta' : 'Vincular otra carpeta'}</button>{/if}</div></div>
           {#if bootstrap.installedProfiles[selected.id]}<div class="managed-location"><span class="eyebrow">INSTANCIA ADMINISTRADA POR ETERNALCRAFT</span><code>{bootstrap.managedGameDirectories[selected.id]}</code></div>{/if}
           {#if installingSeries === selected.id}<div class="install-progress" role="status" aria-live="polite"><span class="spinner"></span><div><strong>{installMessage || 'Instalando Minecraft y Forge…'}</strong><p>Preparando el perfil del juego; Minecraft no se iniciará.</p></div></div>{/if}
-          {#if syncingPack}<div class="install-progress" role="status" aria-live="polite"><span class="spinner"></span><div><strong>{packSyncMessage || 'Actualizando mods oficiales…'}</strong><p>El proceso verifica cada descarga antes de sustituir archivos administrados.</p></div></div>{/if}
+          {#if syncingPack}<div class="install-progress" role="status" aria-live="polite"><span class="spinner"></span><div class="pack-progress-copy"><strong>{packSyncMessage || 'Actualizando mods oficiales…'}</strong>{#if packSyncProgress && packSyncProgress.totalBytes > 0}<div class="pack-progress-track" role="progressbar" aria-label="Progreso de descarga del modpack" aria-valuemin="0" aria-valuemax={packSyncProgress.totalBytes} aria-valuenow={Math.min(packSyncProgress.downloadedBytes, packSyncProgress.totalBytes)}><span style:width={`${Math.min(100, packSyncProgress.downloadedBytes / packSyncProgress.totalBytes * 100)}%`}></span></div><small>{formatBytes(packSyncProgress.downloadedBytes)} / {formatBytes(packSyncProgress.totalBytes)} · {packSyncProgress.completedFiles}/{packSyncProgress.totalFiles} mods</small>{/if}<p>El launcher verifica cada descarga antes de sustituir los mods oficiales.</p></div></div>{/if}
           <p class="release-note">{selected.packStatus === 'available' ? 'El launcher verifica cada mod oficial y conserva tus archivos personales al sincronizar.' : 'Las versiones estarán disponibles cuando se publiquen manifiestos y archivos oficiales en este repositorio.'}</p>
         </section>
       {:else if activePage === 'mods'}

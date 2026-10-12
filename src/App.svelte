@@ -463,7 +463,7 @@
   }
 
   async function chooseSeries(id: string) {
-    if (!bootstrap || id === bootstrap.activeSeriesId) return;
+    if (!bootstrap || id === bootstrap.activeSeriesId || publishingPack || packSourceBusy) return;
     busy = true;
     error = '';
     try {
@@ -653,7 +653,7 @@
   }
 
   async function choosePackSource() {
-    if (!selected || !developerLoginStatus.username) return;
+    if (!selected || !developerLoginStatus.username || publishingPack || packSourceBusy) return;
     licenseReviewFingerprint = '';
     packSourceBusy = true;
     error = '';
@@ -668,7 +668,7 @@
   }
 
   async function refreshPackSource() {
-    if (!selected || !developerLoginStatus.username) return;
+    if (!selected || !developerLoginStatus.username || publishingPack || packSourceBusy) return;
     licenseReviewFingerprint = '';
     packSourceBusy = true;
     error = '';
@@ -683,7 +683,7 @@
   }
 
   async function publishPack() {
-    if (!selected || !developerLoginStatus.username || packSourcePreview?.seriesId !== selected.id) return;
+    if (!selected || !developerLoginStatus.username || publishingPack || packSourceBusy || packSourcePreview?.seriesId !== selected.id) return;
     if (licenseReviewFingerprint !== packSourcePreview.sourceFingerprint) {
       error = 'Revisa las licencias y confirma que tienes permiso para redistribuir todos los JAR incluidos.';
       return;
@@ -774,7 +774,7 @@
         <span class="eyebrow">SERIE ACTIVA</span>
         <div class="series-list">
           {#each bootstrap.series as series (series.id)}
-            <button class:active={series.id === bootstrap?.activeSeriesId} class="series-choice" onclick={() => chooseSeries(series.id)} disabled={busy || installingSeries !== null || modsBusy || syncingPack}>
+            <button class:active={series.id === bootstrap?.activeSeriesId} class="series-choice" onclick={() => chooseSeries(series.id)} disabled={busy || installingSeries !== null || modsBusy || syncingPack || publishingPack || packSourceBusy}>
               <span class="series-dot" style:--series-accent={series.accent}></span>
               <span>{series.name}</span>
               {#if series.id === bootstrap?.activeSeriesId}<span class="check">✓</span>{/if}
@@ -800,7 +800,7 @@
   <main>
     <header class="topbar">
       <div class="breadcrumbs">ETERNALCRAFT <span>/</span> {activePage === 'home' ? 'INICIO' : activePage === 'mods' ? 'BIBLIOTECA' : activePage === 'developer' ? 'DEVELOPER' : activePage === 'support' ? 'SOPORTE' : 'AJUSTES'}</div>
-      <div class="topbar-right"><span class="online-indicator"></span> INSTALACIÓN LOCAL</div>
+      <div class="topbar-right">{#if publishingPack}<span class="publish-status" role="status" aria-live="polite"><span class="spinner"></span>Publicando {selected?.name}: {packPublishMessage || 'preparando release…'}</span>{/if}<span class="online-indicator"></span> INSTALACIÓN LOCAL</div>
     </header>
 
     {#if loading}
@@ -866,7 +866,7 @@
           <div class="section-heading"><div><span class="eyebrow">UNIVERSOS</span><h2>Explora las series</h2></div><span class="quiet-count">{bootstrap.series.length} SERIES</span></div>
           <div class="series-grid">
             {#each bootstrap.series as series (series.id)}
-              <button class:selected-card={series.id === bootstrap.activeSeriesId} class="series-card" style:--card-accent={series.accent} onclick={() => chooseSeries(series.id)} disabled={busy || installingSeries !== null || modsBusy || syncingPack}>
+              <button class:selected-card={series.id === bootstrap.activeSeriesId} class="series-card" style:--card-accent={series.accent} onclick={() => chooseSeries(series.id)} disabled={busy || installingSeries !== null || modsBusy || syncingPack || publishingPack || packSourceBusy}>
                 <span class="card-orbit"></span><span class="card-kicker">ETERNALCRAFT</span><strong>{series.name}</strong><span class="card-subtitle">{series.subtitle}</span><span class="card-bottom">{series.minecraftVersion} <b>·</b> {series.loader} <span>↗</span></span>
               </button>
             {/each}
@@ -898,7 +898,7 @@
             <a class="text-link" href="https://github.com/Santi-PdR/EternalCraft-Launcher/blob/main/docs/developer-credentials.md" target="_blank" rel="noreferrer">Instrucciones completas ↗</a>
           </details>
           {#if !developerLoginStatus.username}<div class="empty-card developer-empty"><div class="empty-icon">⬆</div><h2>Acceso de publicación pendiente</h2><p>Configura la aplicación de GitHub y autoriza una cuenta con acceso al repositorio para publicar el pack de {selected.name}.</p></div>
-          {:else}<div class="settings-card developer-pack-card"><div class="setting-row"><div><span class="eyebrow">FUENTE LOCAL · {selected.name}</span><h2>{packSourcePreview?.seriesId === selected.id ? `${packSourcePreview.files.length} JAR oficiales` : `Selecciona la carpeta mods de ${selected.name}`}</h2><p>{packSourcePreview?.seriesId === selected.id ? packSourcePreview.directory : 'Se leen únicamente los .jar del nivel raíz de la carpeta mods. Configs, recursos y subcarpetas no se publican. Para tu instalación local se propone la ruta de SKLauncher de esta serie.'}</p></div><div class="play-actions"><button class="button secondary" onclick={choosePackSource} disabled={packSourceBusy}>{packSourceBusy ? 'Verificando…' : 'Seleccionar carpeta mods'}</button>{#if packSourcePreview?.seriesId === selected.id}<button class="button secondary" onclick={refreshPackSource} disabled={packSourceBusy}>Volver a verificar</button>{/if}</div></div>
+          {:else}<div class="settings-card developer-pack-card"><div class="setting-row"><div><span class="eyebrow">FUENTE LOCAL · {selected.name}</span><h2>{packSourcePreview?.seriesId === selected.id ? `${packSourcePreview.files.length} JAR oficiales` : `Selecciona la carpeta mods de ${selected.name}`}</h2><p>{packSourcePreview?.seriesId === selected.id ? packSourcePreview.directory : 'Se leen únicamente los .jar del nivel raíz de la carpeta mods. Configs, recursos y subcarpetas no se publican. Para tu instalación local se propone la ruta de SKLauncher de esta serie.'}</p></div><div class="play-actions"><button class="button secondary" onclick={choosePackSource} disabled={packSourceBusy || publishingPack}>{packSourceBusy ? 'Verificando…' : 'Seleccionar carpeta mods'}</button>{#if packSourcePreview?.seriesId === selected.id}<button class="button secondary" onclick={refreshPackSource} disabled={packSourceBusy || publishingPack}>Volver a verificar</button>{/if}</div></div>
             {#if packSourcePreview?.seriesId === selected.id}
               {@const sourceFingerprint = packSourcePreview.sourceFingerprint}
               <div class="inventory-stats"><article><strong>{packSourcePreview.files.length}</strong><span>Mods JAR verificados</span></article><article><strong>{formatBytes(packSourcePreview.totalBytes)}</strong><span>Tamaño total</span></article><article><strong>SHA-256</strong><span>Comprobado archivo por archivo</span></article></div>

@@ -611,22 +611,34 @@ pub(super) fn choose_pack_source_directory(
     if !catalog.series.iter().any(|series| series.id == series_id) {
         return Err("La serie solicitada no existe en el catálogo".into());
     }
-    let selected = app
+    let series = catalog
+        .series
+        .iter()
+        .find(|series| series.id == series_id)
+        .ok_or_else(|| "La serie solicitada no existe en el catálogo".to_string())?;
+    let sklauncher_folder = app
+        .path()
+        .home_dir()
+        .ok()
+        .map(|home| {
+            let folder: &str = if series.id == "ghouls-outbreak" { "ghouls" } else { series.id.as_str() };
+            home.join(".sklauncher").join("instances").join(folder).join("mods")
+        })
+        .filter(|path| path.is_dir());
+    let mut picker = app
         .dialog()
         .file()
-        .set_title("Seleccionar carpeta con mods JAR oficiales")
-        .blocking_pick_folder();
+        .set_title("Seleccionar carpeta mods (solo JAR de la raíz)");
+    if let Some(path) = sklauncher_folder {
+        picker = picker.set_directory(path);
+    }
+    let selected = picker.blocking_pick_folder();
     let Some(selected) = selected else {
         return Ok(None);
     };
     let path = selected
         .into_path()
         .map_err(|error| format!("Ruta de carpeta no válida: {error}"))?;
-    let series = catalog
-        .series
-        .iter()
-        .find(|series| series.id == series_id)
-        .ok_or_else(|| "La serie solicitada no existe en el catálogo".to_string())?;
     let preview = scan_pack_source(
         &path,
         &series_id,

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { convertFileSrc, invoke } from '@tauri-apps/api/core';
+  import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { defaultWindowIcon, getVersion } from '@tauri-apps/api/app';
   import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -60,26 +60,44 @@
   let publishVersion = $state('1.0.0');
   const backgroundPresets: Record<string, { label: string; url: string; source: string }> = {
     siege: {
-      label: 'Asedio',
+      label: 'SIEGE · Frente de asedio',
       url: 'https://static.planetminecraft.com/files/resource_media/screenshot/1341/Screen-Shot-2013-10-11-at-93803-AM_6519535_thumb.jpg',
       source: 'https://www.planetminecraft.com/project/siege-the-castle/'
     },
     'ghouls-outbreak': {
-      label: 'Apocalipsis',
-      url: 'https://cdn.akamai.steamstatic.com/steam/apps/550/header.jpg',
+      label: 'Ghouls · Apocalipsis',
+      url: 'https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/550/header.jpg',
       source: 'https://store.steampowered.com/app/550/Left_4_Dead_2/'
     }
   };
+  const themes = [
+    { id: 'arena-light', name: 'Arena', kind: 'Claro', bg: '#f5f1e7', sidebar: '#fffdf7', surface: '#fffdf7', raised: '#ece7da', line: '#d8d0bd', muted: '#6d6a60', text: '#26251f', accent: '#a56b20' },
+    { id: 'siege-night', name: 'SIEGE', kind: 'Oscuro', bg: '#121615', sidebar: '#181e1c', surface: '#1d2421', raised: '#28312c', line: '#39443d', muted: '#a1aaa2', text: '#edf0e9', accent: '#d1a35b' },
+    { id: 'ghouls-day', name: 'Ghouls', kind: 'Claro', bg: '#f3ece8', sidebar: '#fffaf7', surface: '#fffaf7', raised: '#eee2dc', line: '#dbc9c0', muted: '#75655f', text: '#29231f', accent: '#b65643' },
+    { id: 'outbreak-night', name: 'Outbreak', kind: 'Oscuro', bg: '#171311', sidebar: '#201a17', surface: '#28201c', raised: '#352923', line: '#514036', muted: '#b7a69b', text: '#f2e8df', accent: '#d16d4e' },
+    { id: 'glacier-light', name: 'Glaciar', kind: 'Claro', bg: '#edf3f4', sidebar: '#faffff', surface: '#faffff', raised: '#e3edef', line: '#cbdadd', muted: '#607278', text: '#202d31', accent: '#277c91' },
+    { id: 'midnight-blue', name: 'Medianoche', kind: 'Oscuro', bg: '#10171d', sidebar: '#151f27', surface: '#1b2831', raised: '#263640', line: '#364b58', muted: '#9aabb4', text: '#e7eff3', accent: '#69b7d1' },
+    { id: 'forest-mist', name: 'Bosque', kind: 'Claro', bg: '#edf1e8', sidebar: '#fafff5', surface: '#fafff5', raised: '#e3eadc', line: '#cbd7c3', muted: '#64725f', text: '#273027', accent: '#5a824d' },
+    { id: 'deep-forest', name: 'Bosque profundo', kind: 'Oscuro', bg: '#111712', sidebar: '#18211a', surface: '#1d2920', raised: '#29372c', line: '#3b4b3d', muted: '#a0b09f', text: '#e8efe4', accent: '#8bb873' },
+    { id: 'dune-light', name: 'Duna', kind: 'Claro', bg: '#f3eadb', sidebar: '#fffaf0', surface: '#fffaf0', raised: '#eee0c8', line: '#dac7a6', muted: '#796c56', text: '#30291f', accent: '#ae782c' },
+    { id: 'forge-dark', name: 'Forja', kind: 'Oscuro', bg: '#171513', sidebar: '#201c18', surface: '#29231d', raised: '#382e24', line: '#514334', muted: '#b4a590', text: '#f1e9de', accent: '#dc8c45' },
+    { id: 'rose-light', name: 'Rosa ceniza', kind: 'Claro', bg: '#f3ecef', sidebar: '#fffafd', surface: '#fffafd', raised: '#eee2e8', line: '#dbcbd3', muted: '#75636d', text: '#2c252b', accent: '#a95272' },
+    { id: 'eclipse', name: 'Eclipse', kind: 'Oscuro', bg: '#17131a', sidebar: '#211a25', surface: '#2a2230', raised: '#392d40', line: '#51405b', muted: '#b1a1bb', text: '#f0eaf4', accent: '#bd8dd1' },
+    { id: 'ocean-light', name: 'Océano', kind: 'Claro', bg: '#eaf2f1', sidebar: '#f8fffd', surface: '#f8fffd', raised: '#dcebe7', line: '#c3d8d2', muted: '#58716b', text: '#20312d', accent: '#268779' },
+    { id: 'abyss', name: 'Abismo', kind: 'Oscuro', bg: '#101819', sidebar: '#152122', surface: '#1a292a', raised: '#253738', line: '#365052', muted: '#9cb6b7', text: '#e4f1ef', accent: '#55c2b4' },
+    { id: 'lavender-light', name: 'Lavanda', kind: 'Claro', bg: '#f0eef6', sidebar: '#fcfbff', surface: '#fcfbff', raised: '#e6e2ef', line: '#d1cadd', muted: '#6b6578', text: '#292632', accent: '#7663ab' },
+    { id: 'carbon', name: 'Carbono', kind: 'Oscuro', bg: '#151719', sidebar: '#1c2023', surface: '#24292c', raised: '#30373b', line: '#444d52', muted: '#a5afb3', text: '#eef0f1', accent: '#e28a63' }
+  ];
+  const selectedTheme = $derived(themes.find((theme) => theme.id === bootstrap?.themeId) ?? themes[0]);
+  const themeMode = $derived(selectedTheme.kind === 'Claro' ? 'light' : 'dark');
   let backgroundUrl = $derived.by(() => {
-    if (bootstrap?.backgroundPath) return convertFileSrc(bootstrap.backgroundPath);
-    // Default to the selected universe artwork on fresh installs. The saved
-    // "auto" option continues to follow the active series; custom presets stay fixed.
+    // Backgrounds stay online; the launcher does not copy local images into its config.
     const presetId = !bootstrap?.backgroundPreset || bootstrap.backgroundPreset === 'auto'
       ? selected?.id
       : bootstrap.backgroundPreset;
     return presetId ? backgroundPresets[presetId]?.url ?? '' : '';
   });
-  let themeAccent = $derived(bootstrap?.themeId === 'ghouls' ? '#bf624d' : bootstrap?.themeId === 'siege' ? '#d1a35b' : selected?.accent ?? '#d1a35b');
+  let themeAccent = $derived(selectedTheme.accent);
 
   onMount(() => {
     let disposed = false;
@@ -254,19 +272,11 @@
   async function refresh() {
     loading = true;
     error = '';
-    let prepareInitialInstance = false;
     try {
       bootstrap = await invoke<Bootstrap>('get_bootstrap');
       const hasAccount = Boolean(bootstrap.microsoftProfile || bootstrap.accountMode === 'offline');
       if (hasAccount) localStorage.setItem('eternalcraft-welcome-v2', 'done');
       else if (!localStorage.getItem('eternalcraft-welcome-v2')) welcomeOpen = true;
-      // Prepare the launcher's own isolated game directory on first start. This
-      // does not launch Minecraft and does not ask the player to install Java:
-      // Forge's official metadata selects and provisions Java 17 automatically.
-      prepareInitialInstance = Boolean(
-        !bootstrap.installedProfiles[bootstrap.activeSeriesId] &&
-        !bootstrap.gameDirectories[bootstrap.activeSeriesId]
-      );
       offlineUsernameDraft = bootstrap.offlineUsername ?? '';
       memoryDraft = bootstrap.memory.selectedMb;
       developerLoginStatus = await invoke<DeveloperLoginStatus>('github_developer_status');
@@ -276,7 +286,6 @@
     } finally {
       loading = false;
     }
-    if (prepareInitialInstance) void installBase();
   }
 
   async function beginGitHubDeveloperLogin() {
@@ -389,10 +398,16 @@
   }
 
   async function launchMinecraft() {
-    if (!selected) return;
+    if (!selected || selected.packStatus !== 'available') return;
     busy = true;
     error = '';
     try {
+      if (!bootstrap?.installedProfiles[selected.id] && !isLinked(selected)) {
+        const installed = await installBase();
+        if (!installed) return;
+      }
+      const synced = await syncOfficialPack();
+      if (!synced) return;
       minecraftStatus = await invoke<MinecraftStatus>('launch_minecraft', { seriesId: selected.id });
       notice = `Minecraft se inició${minecraftStatus.pid ? ` (PID ${minecraftStatus.pid})` : ''}. El launcher seguirá disponible para ver su estado y registros.`;
     } catch (reason) {
@@ -404,22 +419,17 @@
 
   async function chooseSeries(id: string) {
     if (!bootstrap || id === bootstrap.activeSeriesId) return;
-    let prepareInstance = false;
     busy = true;
     error = '';
     try {
       bootstrap = await invoke<Bootstrap>('set_active_series', { seriesId: id });
       await loadMods(id);
-      prepareInstance = !bootstrap.installedProfiles[id] && !bootstrap.gameDirectories[id];
-      notice = prepareInstance
-        ? `Serie activa: ${selected?.name}. Preparando una instancia aislada con Forge y Java 17…`
-        : 'Serie activa guardada';
+      notice = 'Serie activa guardada. La instancia se descargará cuando elijas Jugar o Actualizar pack.';
     } catch (reason) {
       error = String(reason);
     } finally {
       busy = false;
     }
-    if (prepareInstance) void installBase();
   }
 
   async function selectDirectory() {
@@ -532,18 +542,8 @@
     } catch (reason) { error = String(reason); }
   }
 
-  async function chooseBackground() {
-    try { bootstrap = await invoke<Bootstrap>('select_background'); notice = bootstrap.backgroundPath ? 'Fondo guardado en este equipo' : ''; }
-    catch (reason) { error = String(reason); }
-  }
-
-  async function clearBackground() {
-    try { bootstrap = await invoke<Bootstrap>('clear_background'); notice = 'Se restauró el fondo predeterminado'; }
-    catch (reason) { error = String(reason); }
-  }
-
-  async function installBase() {
-    if (!selected || installingSeries !== null) return;
+  async function installBase(): Promise<boolean> {
+    if (!selected || installingSeries !== null) return false;
     const seriesId = selected.id;
     installingSeries = seriesId;
     installError = '';
@@ -553,18 +553,24 @@
     try {
       bootstrap = await invoke<Bootstrap>('install_forge_base', { seriesId });
       await loadMods(seriesId);
-      notice = 'La base de Minecraft y Forge quedó instalada y verificada. El pack todavía no está publicado.';
+      notice = 'La base de Minecraft y Forge quedó instalada y verificada.';
+      return true;
     } catch (reason) {
       installError = String(reason);
       installErrorSeries = seriesId;
       error = installError;
+      return false;
     } finally {
       installingSeries = null;
     }
   }
 
-  async function syncOfficialPack() {
-    if (!selected || selected.packStatus !== 'available') return;
+  async function syncOfficialPack(): Promise<boolean> {
+    if (!selected || selected.packStatus !== 'available') return false;
+    if (!bootstrap?.installedProfiles[selected.id] && !isLinked(selected)) {
+      const installed = await installBase();
+      if (!installed) return false;
+    }
     syncingPack = true;
     packSyncMessage = 'Consultando la versión oficial…';
     error = '';
@@ -572,8 +578,10 @@
       const result = await invoke<PackSyncResult>('sync_official_pack', { seriesId: selected.id });
       await loadMods(selected.id);
       notice = `Pack ${result.version} sincronizado: ${result.downloadedFiles} mods oficiales; ${result.removedFiles} retirados.`;
+      return true;
     } catch (reason) {
       error = String(reason);
+      return false;
     } finally {
       syncingPack = false;
       packSyncMessage = '';
@@ -671,7 +679,7 @@
   function finishWelcomeAndPrepareInstance() {
     localStorage.setItem('eternalcraft-welcome-v2', 'done');
     welcomeOpen = false;
-    if (selected && !bootstrap?.installedProfiles[selected.id]) void installBase();
+    notice = 'Perfil guardado. La instancia se preparará al pulsar Jugar o Actualizar pack.';
   }
 
   async function copySupportDiagnostics() {
@@ -698,10 +706,10 @@
   <meta name="description" content="Launcher oficial de las series EternalCraft" />
 </svelte:head>
 
-<div class="shell" data-theme={bootstrap?.themeId ?? 'series'} style:--accent={themeAccent}>
+<div class="shell" data-theme={bootstrap?.themeId ?? 'arena-light'} data-theme-mode={themeMode} style:--accent={themeAccent} style:--app-bg={selectedTheme.bg} style:--sidebar-bg={selectedTheme.sidebar} style:--surface={selectedTheme.surface} style:--surface-raised={selectedTheme.raised} style:--line={selectedTheme.line} style:--muted={selectedTheme.muted} style:--primary-text={selectedTheme.text}>
   <aside class="sidebar">
     <a class="brand" href="#inicio" onclick={() => (activePage = 'home')} aria-label="EternalCraft inicio">
-      <span class="brand-mark">EC</span>
+      <img class="brand-mark" src="/launcher-icon.png" alt="" />
       <span><strong>ETERNALCRAFT</strong><small>GAME HUB</small></span>
     </a>
 
@@ -753,7 +761,7 @@
           <div class="welcome-dialog" role="dialog" aria-modal="true" aria-labelledby="welcome-title" tabindex="-1">
             <span class="eyebrow">BIENVENIDO A ETERNALCRAFT</span>
             <h1 id="welcome-title">Elige cómo entrar</h1>
-            <p>Conecta Microsoft para servidores autenticados o entra con un nick offline. EternalCraft prepara una instancia nueva y aislada para {selected.name}; Java 17 se instala automáticamente si hace falta.</p>
+            <p>Conecta Microsoft para servidores autenticados o entra con un nick offline. Elegir una cuenta no descarga el juego: la instancia de {selected.name} se prepara cuando pulses Jugar o Actualizar pack.</p>
             {#if installingSeries === selected.id}
               <div class="install-progress welcome-install-progress" role="status" aria-live="polite">
                 <span class="spinner"></span>
@@ -782,7 +790,7 @@
 
           {#if !bootstrap.microsoftProfile && bootstrap.accountMode !== 'offline'}
             <section class="account-setup-card" aria-labelledby="offline-profile-title">
-              <div><span class="eyebrow">ANTES DE JUGAR</span><h2 id="offline-profile-title">Elige tu perfil</h2><p>Inicia sesión con Microsoft o escribe un nick offline. La instancia y Java 17 se preparan automáticamente en segundo plano.</p></div>
+              <div><span class="eyebrow">ANTES DE JUGAR</span><h2 id="offline-profile-title">Elige tu perfil</h2><p>Inicia sesión con Microsoft o escribe un nick offline. La instancia se prepara al pulsar Jugar o Actualizar pack.</p></div>
               <label class="account-name-field">Nick offline<input class="text-input" bind:value={offlineUsernameDraft} minlength="3" maxlength="16" autocomplete="nickname" placeholder="De 3 a 16 letras, números o _" /></label>
               <div class="play-actions"><button class="button secondary" onclick={loginOffline} disabled={busy || !/^[A-Za-z0-9_]{3,16}$/.test(offlineUsernameDraft.trim())}>{busy ? 'Guardando…' : 'Usar este nick'}</button><button class="button secondary" onclick={loginMicrosoft} disabled={busy || !bootstrap.microsoftLoginAvailable}>{busy ? 'Abriendo…' : 'Iniciar sesión con Microsoft'}</button></div>
               <small>El perfil offline no valida la propiedad del juego y solo funciona en servidores que permiten cuentas offline.</small>
@@ -808,16 +816,16 @@
             {/each}
           </div>
 
-          <div class="play-panel"><div class="play-copy"><span class="eyebrow">INSTANCIA AISLADA · {selected.name}</span><h3>{bootstrap.installedProfiles[selected.id] ? 'Instancia de EternalCraft lista' : installingSeries === selected.id ? 'Preparando instancia nueva…' : 'Tu instancia nueva'}</h3><p>{bootstrap.managedGameDirectories[selected.id]}{!bootstrap.installedProfiles[selected.id] ? ` · Minecraft ${selected.minecraftVersion} · ${selected.loader} ${selected.loaderVersion}` : ''}</p>{#if minecraftStatus.running}<span class="saved-chip process-chip">MINECRAFT EN EJECUCIÓN · {minecraftStatus.seriesId === selected.id ? 'ESTA SERIE' : minecraftStatus.seriesId?.toUpperCase()} · PID {minecraftStatus.pid}</span>{:else if minecraftStatus.exitSuccess === false}<span class="warning-chip process-chip">ÚLTIMA SESIÓN CERRÓ CON ERROR · CÓDIGO {minecraftStatus.exitCode ?? 'DESCONOCIDO'}</span>{/if}</div><div class="play-actions">{#if bootstrap.installedProfiles[selected.id]}<button class="button secondary" onclick={selectDirectory} disabled={busy || syncingPack || minecraftStatus.running}>{isLinked(selected) ? 'Cambiar carpeta' : 'Vincular otra carpeta'}</button><span class="saved-chip">FORGE INSTALADO</span>{:else}<button class="button primary" onclick={installBase} disabled={installingSeries !== null || syncingPack || minecraftStatus.running} title="Crea una instancia aislada; Java 17 se instala automáticamente si falta">{installingSeries === selected.id ? 'Preparando…' : 'Crear instancia y preparar Java 17'}</button>{/if}{#if selected.packStatus === 'available'}<button class="button secondary" onclick={syncOfficialPack} disabled={syncingPack || minecraftStatus.running || !bootstrap.installedProfiles[selected.id] && !isLinked(selected)}>{syncingPack ? 'Actualizando mods…' : 'Instalar / actualizar pack'}</button>{#if bootstrap.microsoftProfile || bootstrap.accountMode === 'offline'}<button class="button primary" onclick={launchMinecraft} disabled={busy || minecraftStatus.running || syncingPack || !bootstrap.installedProfiles[selected.id] && !isLinked(selected)}>{minecraftStatus.running ? 'Minecraft ejecutándose' : busy ? 'Preparando…' : 'Jugar'}</button>{/if}{:else}<button class="button secondary" disabled title="El modpack de esta serie todavía no tiene archivos oficiales publicados">Pack no publicado</button>{/if}</div></div>
+          <div class="play-panel"><div class="play-copy"><span class="eyebrow">INSTANCIA AISLADA · {selected.name}</span><h3>{bootstrap.installedProfiles[selected.id] ? 'Instancia de EternalCraft lista' : installingSeries === selected.id ? 'Preparando instancia nueva…' : 'Tu instancia nueva'}</h3><p>{bootstrap.managedGameDirectories[selected.id]}{!bootstrap.installedProfiles[selected.id] ? ` · Minecraft ${selected.minecraftVersion} · ${selected.loader} ${selected.loaderVersion}` : ''}</p>{#if minecraftStatus.running}<span class="saved-chip process-chip">MINECRAFT EN EJECUCIÓN · {minecraftStatus.seriesId === selected.id ? 'ESTA SERIE' : minecraftStatus.seriesId?.toUpperCase()} · PID {minecraftStatus.pid}</span>{:else if minecraftStatus.exitSuccess === false}<span class="warning-chip process-chip">ÚLTIMA SESIÓN CERRÓ CON ERROR · CÓDIGO {minecraftStatus.exitCode ?? 'DESCONOCIDO'}</span>{/if}</div><div class="play-actions">{#if selected.packStatus === 'available'}{#if bootstrap.microsoftProfile || bootstrap.accountMode === 'offline'}<button class="button primary" onclick={launchMinecraft} disabled={busy || minecraftStatus.running || syncingPack}>{minecraftStatus.running ? 'Minecraft ejecutándose' : busy || installingSeries ? 'Preparando…' : bootstrap.installedProfiles[selected.id] || isLinked(selected) ? 'Jugar' : 'Instalar y jugar'}</button>{/if}{:else}<button class="button secondary" disabled title="El modpack de esta serie todavía no tiene archivos oficiales publicados">Pack no publicado</button>{/if}{#if bootstrap.installedProfiles[selected.id]}<button class="button secondary" onclick={selectDirectory} disabled={busy || syncingPack || minecraftStatus.running}>{isLinked(selected) ? 'Cambiar carpeta' : 'Vincular otra carpeta'}</button>{/if}</div></div>
           {#if bootstrap.installedProfiles[selected.id]}<div class="managed-location"><span class="eyebrow">INSTANCIA ADMINISTRADA POR ETERNALCRAFT</span><code>{bootstrap.managedGameDirectories[selected.id]}</code></div>{/if}
           {#if installingSeries === selected.id}<div class="install-progress" role="status" aria-live="polite"><span class="spinner"></span><div><strong>{installMessage || 'Instalando Minecraft y Forge…'}</strong><p>Preparando el perfil del juego; Minecraft no se iniciará.</p></div></div>{/if}
           {#if syncingPack}<div class="install-progress" role="status" aria-live="polite"><span class="spinner"></span><div><strong>{packSyncMessage || 'Actualizando mods oficiales…'}</strong><p>El proceso verifica cada descarga antes de sustituir archivos administrados.</p></div></div>{/if}
           <p class="release-note">{selected.packStatus === 'available' ? 'El launcher verifica cada mod oficial y conserva tus archivos personales al sincronizar.' : 'Las versiones estarán disponibles cuando se publiquen manifiestos y archivos oficiales en este repositorio.'}</p>
         </section>
       {:else if activePage === 'mods'}
-        <section class="page narrow-page"><div class="page-heading"><div><span class="eyebrow">CONTENIDO DEL JUEGO · {selected.name}</span><h1>Biblioteca de mods</h1><p>Los mods personales se guardan aparte y se enlazan a la raíz que Forge carga.{minecraftStatus.running && minecraftStatus.seriesId === selected.id ? ' Cierra Minecraft para cambiar mods de esta instancia.' : ''}</p></div><div class="play-actions"><button class="button secondary" onclick={addPersonalMod} disabled={modsBusy || modsLoading || !modInventory?.gameDirectory || (minecraftStatus.running && minecraftStatus.seriesId === selected.id)}>{modsBusy ? 'Guardando…' : 'Agregar mod personal'}</button><button class="button secondary" onclick={() => loadMods(selected.id)} disabled={modsLoading || modsBusy}>{modsLoading ? 'Leyendo…' : 'Actualizar inventario'}</button></div></div>
+        <section class="page narrow-page"><div class="page-heading"><div><span class="eyebrow">CONTENIDO DEL JUEGO · {selected.name}</span><h1>Biblioteca de mods</h1><p>Los mods personales se guardan aparte y se enlazan a la raíz que Forge carga.{minecraftStatus.running && minecraftStatus.seriesId === selected.id ? ' Cierra Minecraft para cambiar mods de esta instancia.' : ''}</p></div><div class="play-actions">{#if selected.packStatus === 'available'}<button class="button primary" onclick={syncOfficialPack} disabled={syncingPack || busy || minecraftStatus.running || (minecraftStatus.running && minecraftStatus.seriesId === selected.id)}>{syncingPack ? 'Instalando pack…' : 'Instalar / actualizar modpack'}</button>{/if}<button class="button secondary" onclick={addPersonalMod} disabled={modsBusy || modsLoading || !modInventory?.gameDirectory || (minecraftStatus.running && minecraftStatus.seriesId === selected.id)}>{modsBusy ? 'Guardando…' : 'Agregar mod personal'}</button><button class="button secondary" onclick={() => loadMods(selected.id)} disabled={modsLoading || modsBusy}>{modsLoading ? 'Leyendo…' : 'Actualizar inventario'}</button></div></div>
           {#if modsError}<div class="toast error-toast" role="alert">{modsError}</div>{/if}
-          {#if !modInventory?.gameDirectory}<div class="empty-card"><div class="empty-icon">▦</div><h2>Vincula una carpeta de juego</h2><p>Elige una instancia en Inicio para revisar sus mods. La lectura del inventario es solo de consulta.</p><button class="button secondary" onclick={() => (activePage = 'home')}>Ir a Inicio</button></div>
+          {#if !modInventory?.gameDirectory}<div class="empty-card"><div class="empty-icon">▦</div><h2>Instancia aún no preparada</h2><p>La descarga se hace cuando pulses Jugar o Actualizar modpack. No se descarga nada al abrir el launcher.</p><button class="button secondary" onclick={() => (activePage = 'home')}>Ir a Inicio</button></div>
           {:else if modsLoading}<div class="center-state"><span class="spinner"></span><p>Leyendo inventario de mods…</p></div>
           {:else if modInventory}<div class="settings-card inventory-card"><div class="inventory-path"><span class="eyebrow">CARPETA REVISADA</span><code>{modInventory.modsDirectory}</code></div><div class="inventory-stats"><article><strong>{modInventory.loadedFromModsRoot.length}</strong><span>JAR cargables en <code>mods/</code></span></article><article><strong>{modInventory.officialStore.length}</strong><span>Guardados en <code>mods/Oficiales/</code></span></article><article><strong>{modInventory.personalStore.length}</strong><span>Guardados en <code>mods/personales/</code></span></article></div><div class="inventory-warning"><b>Compatibilidad Forge:</b> Forge carga los JAR directamente desde <code>mods/</code>. Los archivos personales que agregues aquí se guardan en <code>mods/personales/</code> y el launcher los refleja en la raíz mediante enlace o copia.</div><div class="inventory-list"><h2>JAR que Forge encuentra en la raíz</h2>{#if modInventory.loadedFromModsRoot.length}<ul>{#each modInventory.loadedFromModsRoot as file (file.name)}<li><span>{file.name}</span><small>{formatBytes(file.sizeBytes)}</small></li>{/each}</ul>{:else}<p>No hay JAR directamente dentro de <code>mods/</code>.</p>{/if}</div><div class="inventory-list storage-list"><h2>Almacenamiento organizado</h2><div class="storage-columns"><div><h3>Oficiales</h3>{#if modInventory.officialStore.length}<ul>{#each modInventory.officialStore as file (file.name)}<li><span>{file.name}</span><small>{formatBytes(file.sizeBytes)}</small></li>{/each}</ul>{:else}<p>Sin JAR guardados aquí.</p>{/if}</div><div><h3>Personales</h3>{#if modInventory.personalStore.length}<ul>{#each modInventory.personalStore as file (file.name)}<li><span>{file.name}</span><small>{formatBytes(file.sizeBytes)}</small><button class="remove-mod" onclick={() => personalModLoaded(file.name) ? removePersonalMod(file.name) : activatePersonalMod(file.name)} disabled={modsBusy || (minecraftStatus.running && minecraftStatus.seriesId === selected.id)}>{personalModLoaded(file.name) ? 'Quitar' : 'Activar'}</button></li>{/each}</ul>{:else}<p>Sin JAR personales agregados desde este launcher.</p>{/if}</div></div></div></div>
           {/if}</section>
@@ -834,7 +842,7 @@
             <a class="text-link" href="https://github.com/Santi-PdR/EternalCraft-Launcher/blob/main/docs/developer-credentials.md" target="_blank" rel="noreferrer">Instrucciones completas ↗</a>
           </details>
           {#if !developerLoginStatus.username}<div class="empty-card developer-empty"><div class="empty-icon">⬆</div><h2>Acceso de publicación pendiente</h2><p>Configura la aplicación de GitHub y autoriza una cuenta con acceso al repositorio para publicar el pack de {selected.name}.</p></div>
-          {:else}<div class="settings-card developer-pack-card"><div class="setting-row"><div><span class="eyebrow">FUENTE LOCAL · {selected.name}</span><h2>{packSourcePreview?.seriesId === selected.id ? `${packSourcePreview.files.length} JAR oficiales` : 'Selecciona la carpeta de mods'}</h2><p>{packSourcePreview?.seriesId === selected.id ? packSourcePreview.directory : 'Se leerán únicamente archivos .jar del directorio elegido. No se cargan configuraciones ni subcarpetas.'}</p></div><div class="play-actions"><button class="button secondary" onclick={choosePackSource} disabled={packSourceBusy}>{packSourceBusy ? 'Verificando…' : 'Elegir carpeta'}</button>{#if packSourcePreview?.seriesId === selected.id}<button class="button secondary" onclick={refreshPackSource} disabled={packSourceBusy}>Volver a verificar</button>{/if}</div></div>
+          {:else}<div class="settings-card developer-pack-card"><div class="setting-row"><div><span class="eyebrow">FUENTE LOCAL · {selected.name}</span><h2>{packSourcePreview?.seriesId === selected.id ? `${packSourcePreview.files.length} JAR oficiales` : `Selecciona la carpeta mods de ${selected.name}`}</h2><p>{packSourcePreview?.seriesId === selected.id ? packSourcePreview.directory : 'Se leen únicamente los .jar del nivel raíz de la carpeta mods. Configs, recursos y subcarpetas no se publican. Para tu instalación local se propone la ruta de SKLauncher de esta serie.'}</p></div><div class="play-actions"><button class="button secondary" onclick={choosePackSource} disabled={packSourceBusy}>{packSourceBusy ? 'Verificando…' : 'Seleccionar carpeta mods'}</button>{#if packSourcePreview?.seriesId === selected.id}<button class="button secondary" onclick={refreshPackSource} disabled={packSourceBusy}>Volver a verificar</button>{/if}</div></div>
             {#if packSourcePreview?.seriesId === selected.id}
               {@const sourceFingerprint = packSourcePreview.sourceFingerprint}
               <div class="inventory-stats"><article><strong>{packSourcePreview.files.length}</strong><span>Mods JAR verificados</span></article><article><strong>{formatBytes(packSourcePreview.totalBytes)}</strong><span>Tamaño total</span></article><article><strong>SHA-256</strong><span>Comprobado archivo por archivo</span></article></div>
@@ -865,8 +873,8 @@
             <div class="setting-row"><div><span class="eyebrow">JAVA · MINECRAFT 1.20.1</span><h2>{bootstrap.java.compatible ? `Java ${bootstrap.java.version}` : 'Java 17 no está listo'}</h2><p>{bootstrap.java.detail}{#if bootstrap.java.executable}<br/><code>{bootstrap.java.executable}</code>{/if}</p></div><div class="play-actions"><span class:saved-chip={bootstrap.java.compatible} class:warning-chip={!bootstrap.java.compatible}>{bootstrap.java.compatible ? 'LISTO' : 'REVISAR'}</span><button class="button secondary" onclick={selectJava} disabled={busy}>Elegir Java</button>{#if bootstrap.javaManuallySelected}<button class="button secondary" onclick={resetJava} disabled={busy}>Automático</button>{/if}<button class="button secondary" onclick={refreshJava} disabled={javaRefreshing}>{javaRefreshing ? 'Comprobando…' : 'Comprobar'}</button></div></div>
           </div>
           {:else if settingsTab === 'account'}<div class="settings-card"><div class="setting-row"><div><span class="eyebrow">PERFIL ACTIVO</span><h2>{bootstrap.microsoftProfile?.username ?? (bootstrap.accountMode === 'offline' ? bootstrap.offlineUsername : bootstrap.offlineUsername ? `Perfil local guardado: ${bootstrap.offlineUsername}` : 'Sin perfil')}</h2><p>{bootstrap.microsoftProfile ? 'Cuenta Microsoft autenticada.' : bootstrap.accountMode === 'offline' ? 'Perfil local activo sin autenticación Microsoft.' : bootstrap.offlineUsername ? 'El perfil local está guardado pero no activado.' : 'Elige cómo identificarte en Minecraft.'}</p></div><div class="play-actions">{#if bootstrap.microsoftProfile}<button class="button secondary" onclick={logoutMicrosoft} disabled={busy}>Cerrar sesión Microsoft</button>{:else if bootstrap.accountMode === 'offline'}<button class="button secondary" onclick={logoutOffline} disabled={busy}>Quitar perfil local</button>{/if}</div></div><div class="setting-row"><div><span class="eyebrow">CUENTA MICROSOFT</span><h2>Servidores autenticados</h2><p>Usa una cuenta con Minecraft para jugar en servidores que validan la sesión.</p></div><button class="button primary" onclick={loginMicrosoft} disabled={busy || !bootstrap.microsoftLoginAvailable || Boolean(bootstrap.microsoftProfile)}>{busy ? 'Abriendo…' : bootstrap.microsoftProfile ? 'Conectada' : 'Iniciar sesión con Microsoft'}</button></div>{#if !bootstrap.microsoftLoginAvailable}<p class="account-setup-note">El inicio con Microsoft no está disponible en esta versión. Puedes continuar con un nick offline.</p>{/if}<div class="setting-row offline-account-row"><div><span class="eyebrow">PERFIL LOCAL</span><h2>{bootstrap.offlineUsername ? `Guardado: ${bootstrap.offlineUsername}` : 'Jugar con un nombre'}</h2><p>Sin Microsoft: el nick local usa un UUID estable en este equipo. No verifica la propiedad del juego y no entra a servidores que exigen autenticación Microsoft.</p><label class="account-name-field">Nick offline<input class="text-input" bind:value={offlineUsernameDraft} minlength="3" maxlength="16" autocomplete="nickname" placeholder="De 3 a 16 letras, números o _" /></label></div><div class="play-actions"><button class="button secondary" onclick={loginOffline} disabled={busy || !/^[A-Za-z0-9_]{3,16}$/.test(offlineUsernameDraft.trim())}>{busy ? 'Guardando…' : bootstrap.accountMode === 'offline' ? 'Guardar y usar nick' : 'Entrar con nick offline'}</button>{#if bootstrap.offlineUsername}<button class="button secondary" onclick={logoutOffline} disabled={busy}>Borrar</button>{/if}</div></div></div>
-          {:else if settingsTab === 'appearance'}<div class="settings-card appearance-settings"><div class="setting-row"><div><span class="eyebrow">TEMAS</span><h2>El aspecto de tu launcher</h2><p>Escoge una paleta; la serie activa adapta el color si eliges “Serie activa”.</p><div class="theme-options theme-cards"><button class:theme-selected={bootstrap.themeId === 'light'} class="theme-option theme-light" aria-pressed={bootstrap.themeId === 'light'} onclick={() => saveTheme('light')}><span class="theme-preview"></span><strong>Claro</strong><small>Marfil y arena</small></button><button class:theme-selected={bootstrap.themeId === 'series'} class="theme-option theme-series" aria-pressed={bootstrap.themeId === 'series'} onclick={() => saveTheme('series')}><span class="theme-preview"></span><strong>Serie activa</strong><small>Se adapta al universo</small></button><button class:theme-selected={bootstrap.themeId === 'siege'} class="theme-option theme-siege" aria-pressed={bootstrap.themeId === 'siege'} onclick={() => saveTheme('siege')}><span class="theme-preview"></span><strong>SIEGE</strong><small>Oro táctico</small></button><button class:theme-selected={bootstrap.themeId === 'ghouls'} class="theme-option theme-ghouls" aria-pressed={bootstrap.themeId === 'ghouls'} onclick={() => saveTheme('ghouls')}><span class="theme-preview"></span><strong>Ghouls</strong><small>Óxido y supervivencia</small></button></div></div></div><div class="setting-row background-setting"><div><span class="eyebrow">FONDOS ONLINE</span><h2>Elige un universo</h2><p>Las miniaturas se cargan desde sus páginas de origen al abrir esta sección. Puedes usar el fondo de la serie activa o elegir una imagen local.</p><div class="background-options">{#each Object.entries(backgroundPresets) as [presetId, preset]}<button class:background-selected={(bootstrap.backgroundPreset ?? selected?.id) === presetId} class="background-option" style={`--background-preview: url("${preset.url}")`} aria-pressed={(bootstrap.backgroundPreset ?? selected?.id) === presetId} onclick={() => saveBackgroundPreset(presetId)}><span></span><strong>{preset.label}</strong></button>{/each}<button class:background-selected={!bootstrap.backgroundPreset || bootstrap.backgroundPreset === 'auto'} class="background-option background-auto" aria-pressed={!bootstrap.backgroundPreset || bootstrap.backgroundPreset === 'auto'} onclick={() => saveBackgroundPreset('auto')}><span></span><strong>Fondo de la serie</strong></button></div><div class="background-credits">Imágenes: <a href={backgroundPresets.siege.source} target="_blank" rel="noreferrer">SIEGE · Planet Minecraft ↗</a> · <a href={backgroundPresets['ghouls-outbreak'].source} target="_blank" rel="noreferrer">Ghouls · Steam Community ↗</a></div></div><div class="play-actions background-actions"><button class="button secondary" onclick={chooseBackground}>Usar imagen local</button>{#if bootstrap.backgroundPath}<button class="button secondary" onclick={clearBackground}>Quitar imagen local</button>{/if}</div></div></div>
-          {:else}<div class="settings-card"><div class="setting-row"><div><span class="eyebrow">INSTANCIA · {selected.name}</span><h2>Carpeta de juego</h2><p>{pathFor(selected) || bootstrap.managedGameDirectories[selected.id] || 'Elige una ubicación para esta serie.'}</p></div><div class="play-actions"><button class="button secondary" onclick={selectDirectory} disabled={busy}>{isLinked(selected) ? 'Cambiar carpeta' : 'Seleccionar carpeta'}</button><button class="button secondary" onclick={installBase} disabled={installingSeries !== null}>{bootstrap.installedProfiles[selected.id] ? 'Reparar base' : 'Instalar Forge + Java 17'}</button></div></div><div class="setting-row"><div><span class="eyebrow">PREFERENCIAS</span><h2>Guardadas en este equipo</h2><p>{bootstrap.configDirectory}</p></div><span class="saved-chip">GUARDADO</span></div><div class="setting-row"><div><span class="eyebrow">REGISTRO DEL LAUNCHER</span><h2>Diagnóstico y soporte</h2><p>Revisa estado del juego y registros locales sin compartirlos automáticamente.</p></div><button class="button secondary" onclick={openSupport}>Abrir soporte</button></div></div>{/if}
+          {:else if settingsTab === 'appearance'}<div class="settings-card appearance-settings"><div class="setting-row"><div><span class="eyebrow">16 PALETAS · CLARO Y OSCURO</span><h2>El aspecto de tu launcher</h2><p>Temas alternados entre claro y oscuro, con acentos de SIEGE, Ghouls y otros universos.</p><div class="theme-options theme-cards">{#each themes as theme (theme.id)}<button class:theme-selected={bootstrap.themeId === theme.id} class="theme-option" style={`--theme-accent:${theme.accent};--theme-bg:${theme.bg};--theme-surface:${theme.surface};--theme-text:${theme.text}`} aria-pressed={bootstrap.themeId === theme.id} onclick={() => saveTheme(theme.id)}><span class="theme-preview"></span><strong>{theme.name}</strong><small>{theme.kind}</small></button>{/each}</div></div></div><div class="setting-row background-setting"><div><span class="eyebrow">FONDOS DE LAS SERIES</span><h2>Elige un universo</h2><p>Arte oficial y fondos de referencia cargados desde la web. Se muestran en Inicio; no se descargan ni ocupan espacio local.</p><div class="background-options">{#each Object.entries(backgroundPresets) as [presetId, preset]}<button class:background-selected={(bootstrap.backgroundPreset ?? selected?.id) === presetId} class="background-option" style={`--background-preview: url("${preset.url}")`} aria-pressed={(bootstrap.backgroundPreset ?? selected?.id) === presetId} onclick={() => saveBackgroundPreset(presetId)}><span></span><strong>{preset.label}</strong></button>{/each}<button class:background-selected={!bootstrap.backgroundPreset || bootstrap.backgroundPreset === 'auto'} class="background-option background-auto" aria-pressed={!bootstrap.backgroundPreset || bootstrap.backgroundPreset === 'auto'} onclick={() => saveBackgroundPreset('auto')}><span></span><strong>Fondo de la serie activa</strong></button></div><div class="background-credits">Fuentes: <a href={backgroundPresets.siege.source} target="_blank" rel="noreferrer">SIEGE · Planet Minecraft ↗</a> · <a href={backgroundPresets['ghouls-outbreak'].source} target="_blank" rel="noreferrer">Ghouls · Left 4 Dead ↗</a></div></div></div></div>
+          {:else}<div class="settings-card"><div class="setting-row"><div><span class="eyebrow">INSTANCIA · {selected.name}</span><h2>Carpeta de juego</h2><p>{pathFor(selected) || bootstrap.managedGameDirectories[selected.id] || 'Elige una ubicación para esta serie.'}</p></div><div class="play-actions"><button class="button secondary" onclick={selectDirectory} disabled={busy}>{isLinked(selected) ? 'Cambiar carpeta' : 'Seleccionar carpeta'}</button>{#if bootstrap.installedProfiles[selected.id]}<button class="button secondary" onclick={installBase} disabled={installingSeries !== null}>Reparar base</button>{/if}</div></div><div class="setting-row"><div><span class="eyebrow">PREFERENCIAS</span><h2>Guardadas en este equipo</h2><p>{bootstrap.configDirectory}</p></div><span class="saved-chip">GUARDADO</span></div><div class="setting-row"><div><span class="eyebrow">REGISTRO DEL LAUNCHER</span><h2>Diagnóstico y soporte</h2><p>Revisa estado del juego y registros locales sin compartirlos automáticamente.</p></div><button class="button secondary" onclick={openSupport}>Abrir soporte</button></div></div>{/if}
         </section>
       {/if}
     {/if}

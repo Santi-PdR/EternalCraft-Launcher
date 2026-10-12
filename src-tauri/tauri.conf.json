@@ -29,7 +29,7 @@
           "$APPCONFIG/appearance/**"
         ]
       },
-      "csp": "default-src 'self'; img-src 'self' asset: data: https://static.planetminecraft.com https://images.steamusercontent.com; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; img-src 'self' asset: data: https://static.planetminecraft.com https://images.steamusercontent.com https://www.l4d.com https://shared.fastly.steamstatic.com; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src ipc: http://ipc.localhost"
     }
   },
   "bundle": {

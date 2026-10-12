@@ -263,13 +263,25 @@ fn detect_background_format(header: &[u8]) -> Option<BackgroundFormat> {
 }
 
 fn is_valid_theme(theme_id: &str) -> bool {
-    matches!(theme_id, "series" | "siege" | "ghouls" | "light")
+    matches!(
+        theme_id,
+        "arena-light" | "siege-night" | "ghouls-day" | "outbreak-night"
+            | "glacier-light" | "midnight-blue" | "forest-mist" | "deep-forest"
+            | "dune-light" | "forge-dark" | "rose-light" | "eclipse"
+            | "ocean-light" | "abyss" | "lavender-light" | "carbon"
+            // Previous releases may still have these persisted values.
+            | "series" | "siege" | "ghouls" | "light"
+    )
 }
 
 fn resolve_theme(theme_id: Option<String>) -> String {
-    theme_id
-        .filter(|theme| is_valid_theme(theme))
-        .unwrap_or_else(|| "light".into())
+    match theme_id.as_deref() {
+        Some("siege") => "siege-night".into(),
+        Some("ghouls") => "outbreak-night".into(),
+        Some("series" | "light") | None => "arena-light".into(),
+        Some(theme) if is_valid_theme(theme) => theme.to_string(),
+        _ => "arena-light".into(),
+    }
 }
 
 fn migrate_theme_preference(settings: &mut Settings) -> bool {
@@ -277,7 +289,7 @@ fn migrate_theme_preference(settings: &mut Settings) -> bool {
         return false;
     }
     if matches!(settings.theme_id.as_deref(), None | Some("series")) {
-        settings.theme_id = Some("light".into());
+        settings.theme_id = Some("arena-light".into());
     }
     settings.theme_migrated = true;
     true
@@ -3357,14 +3369,22 @@ mod tests {
     }
 
     #[test]
-    fn appearance_validation_accepts_only_supported_themes_and_local_image_signatures() {
-        assert_eq!(resolve_theme(None), "light");
-        assert_eq!(resolve_theme(Some("ghouls".into())), "ghouls");
-        assert_eq!(resolve_theme(Some("unknown".into())), "light");
+    fn appearance_validation_accepts_supported_themes_and_image_signatures() {
+        assert_eq!(resolve_theme(None), "arena-light");
+        assert_eq!(resolve_theme(Some("ghouls".into())), "outbreak-night");
+        assert_eq!(resolve_theme(Some("unknown".into())), "arena-light");
         assert!(is_valid_theme("series"));
         assert!(is_valid_theme("siege"));
         assert!(is_valid_theme("ghouls"));
         assert!(is_valid_theme("light"));
+        for theme in [
+            "arena-light", "siege-night", "ghouls-day", "outbreak-night",
+            "glacier-light", "midnight-blue", "forest-mist", "deep-forest",
+            "dune-light", "forge-dark", "rose-light", "eclipse",
+            "ocean-light", "abyss", "lavender-light", "carbon",
+        ] {
+            assert!(is_valid_theme(theme), "theme should be accepted: {theme}");
+        }
         assert!(!is_valid_theme("developer"));
         assert!(is_safe_background_filename("background-123.png"));
         assert!(!is_safe_background_filename("../background-123.png"));
@@ -3390,7 +3410,7 @@ mod tests {
             ..Settings::default()
         };
         assert!(migrate_theme_preference(&mut legacy_default));
-        assert_eq!(legacy_default.theme_id.as_deref(), Some("light"));
+        assert_eq!(legacy_default.theme_id.as_deref(), Some("arena-light"));
         assert!(legacy_default.theme_migrated);
         assert!(!migrate_theme_preference(&mut legacy_default));
 

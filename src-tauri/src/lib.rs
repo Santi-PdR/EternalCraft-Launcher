@@ -89,8 +89,6 @@ struct Settings {
     #[serde(default)]
     theme_migrated: bool,
     #[serde(default)]
-    background_file: Option<String>,
-    #[serde(default)]
     background_preset: Option<String>,
     #[serde(default, skip_serializing)]
     microsoft_client_id: Option<String>,
@@ -164,7 +162,6 @@ struct Bootstrap {
     config_directory: String,
     log_file: String,
     theme_id: String,
-    background_path: Option<String>,
     background_preset: Option<String>,
     java: JavaStatus,
     java_manually_selected: bool,
@@ -226,41 +223,7 @@ struct ModInventory {
 }
 
 const INSTALL_LOG_MAX_BYTES: u64 = 1_048_576;
-const MAX_BACKGROUND_BYTES: u64 = 8 * 1024 * 1024;
 static INSTALL_LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BackgroundFormat {
-    Png,
-    Jpeg,
-    Webp,
-    Gif,
-}
-
-impl BackgroundFormat {
-    fn extension(self) -> &'static str {
-        match self {
-            Self::Png => "png",
-            Self::Jpeg => "jpg",
-            Self::Webp => "webp",
-            Self::Gif => "gif",
-        }
-    }
-}
-
-fn detect_background_format(header: &[u8]) -> Option<BackgroundFormat> {
-    if header.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some(BackgroundFormat::Png)
-    } else if header.starts_with(b"\xff\xd8\xff") {
-        Some(BackgroundFormat::Jpeg)
-    } else if header.starts_with(b"GIF87a") || header.starts_with(b"GIF89a") {
-        Some(BackgroundFormat::Gif)
-    } else if header.len() >= 12 && &header[..4] == b"RIFF" && &header[8..12] == b"WEBP" {
-        Some(BackgroundFormat::Webp)
-    } else {
-        None
-    }
-}
 
 fn is_valid_theme(theme_id: &str) -> bool {
     matches!(
@@ -297,69 +260,6 @@ fn migrate_theme_preference(settings: &mut Settings) -> bool {
 
 fn migrate_microsoft_client_id_preference(settings: &mut Settings) -> bool {
     settings.microsoft_client_id.take().is_some()
-}
-
-fn is_safe_background_filename(file_name: &str) -> bool {
-    let Some(rest) = file_name.strip_prefix("background-") else {
-        return false;
-    };
-    let Some((timestamp, extension)) = rest.split_once('.') else {
-        return false;
-    };
-    !timestamp.is_empty()
-        && timestamp.bytes().all(|byte| byte.is_ascii_digit())
-        && matches!(extension, "png" | "jpg" | "webp" | "gif")
-}
-
-fn is_safe_staged_background_filename(file_name: &str) -> bool {
-    let Some(rest) = file_name
-        .strip_prefix(".background-")
-        .and_then(|name| name.strip_suffix(".tmp"))
-    else {
-        return false;
-    };
-    !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit())
-}
-
-fn clean_staged_backgrounds(directory: &Path) -> Result<(), String> {
-    match fs::symlink_metadata(directory) {
-        Ok(metadata) if metadata.file_type().is_dir() => {}
-        Ok(_) => return Err("El almacenamiento de fondos no es un directorio normal".into()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(format!(
-                "No se pudo validar el almacenamiento de fondos: {error}"
-            ))
-        }
-    }
-    let entries = match fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(format!(
-                "No se pudo revisar el almacenamiento de fondos: {error}"
-            ))
-        }
-    };
-    for entry in entries {
-        let entry =
-            entry.map_err(|error| format!("No se pudo revisar un fondo temporal: {error}"))?;
-        let metadata = fs::symlink_metadata(entry.path())
-            .map_err(|error| format!("No se pudo validar un fondo temporal: {error}"))?;
-        let stale = metadata
-            .modified()
-            .ok()
-            .and_then(|modified| std::time::SystemTime::now().duration_since(modified).ok())
-            .is_some_and(|age| age >= std::time::Duration::from_secs(60 * 60));
-        if is_safe_staged_background_filename(&entry.file_name().to_string_lossy())
-            && metadata.file_type().is_file()
-            && stale
-        {
-            fs::remove_file(entry.path())
-                .map_err(|error| format!("No se pudo limpiar un fondo interrumpido: {error}"))?;
-        }
-    }
-    Ok(())
 }
 
 fn parse_catalog() -> Result<Catalog, String> {
@@ -1743,7 +1643,6 @@ fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
         config_directory,
         log_file,
         theme_id: resolve_theme(settings.theme_id),
-        background_path: background_path(app, settings.background_file.as_deref())?,
         background_preset: settings.background_preset,
         java,
         java_manually_selected,
@@ -1757,29 +1656,6 @@ fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
         account_mode: settings.account_mode,
         memory,
     })
-}
-
-fn background_path(app: &AppHandle, file_name: Option<&str>) -> Result<Option<String>, String> {
-    let Some(file_name) = file_name.filter(|name| is_safe_background_filename(name)) else {
-        return Ok(None);
-    };
-    let dir = app
-        .path()
-        .app_config_dir()
-        .map_err(|error| error.to_string())?
-        .join("appearance");
-    clean_staged_backgrounds(&dir)?;
-    let path = dir.join(file_name);
-    match fs::symlink_metadata(&path) {
-        Ok(metadata)
-            if metadata.file_type().is_file() && metadata.len() <= MAX_BACKGROUND_BYTES =>
-        {
-            Ok(Some(path.to_string_lossy().into_owned()))
-        }
-        Ok(_) => Ok(None),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("No se pudo validar el fondo: {error}")),
-    }
 }
 
 #[tauri::command]
@@ -1804,132 +1680,8 @@ fn set_background_preset(app: AppHandle, preset_id: String) -> Result<Bootstrap,
         return Err("El fondo seleccionado no está disponible".into());
     }
     let mut settings = read_settings(&app)?;
-    let previous = settings.background_file.take();
     settings.background_preset = Some(preset_id);
     write_settings(&app, &settings)?;
-    if let Some(name) = previous.filter(|name| is_safe_background_filename(name)) {
-        if let Some(path) = app
-            .path()
-            .app_config_dir()
-            .ok()
-            .map(|dir| dir.join("appearance").join(name))
-        {
-            let _ = fs::remove_file(path);
-        }
-    }
-    make_bootstrap(&app)
-}
-
-#[tauri::command]
-fn select_background(app: AppHandle) -> Result<Bootstrap, String> {
-    let selected = app
-        .dialog()
-        .file()
-        .add_filter("Imágenes", &["png", "jpg", "jpeg", "webp", "gif"])
-        .set_title("Elegir fondo del launcher (máximo 8 MB)")
-        .blocking_pick_file();
-    let Some(selected) = selected else {
-        return make_bootstrap(&app);
-    };
-    let source = selected
-        .into_path()
-        .map_err(|error| format!("Ruta de imagen no válida: {error}"))?;
-    let metadata = fs::symlink_metadata(&source)
-        .map_err(|error| format!("No se pudo leer la imagen: {error}"))?;
-    if !metadata.file_type().is_file()
-        || metadata.len() == 0
-        || metadata.len() > MAX_BACKGROUND_BYTES
-    {
-        return Err("El fondo debe ser un archivo normal de hasta 8 MB".into());
-    }
-    let mut input =
-        fs::File::open(&source).map_err(|error| format!("No se pudo abrir la imagen: {error}"))?;
-    let mut header = [0u8; 12];
-    let read = input
-        .read(&mut header)
-        .map_err(|error| format!("No se pudo validar la imagen: {error}"))?;
-    let format = detect_background_format(&header[..read])
-        .ok_or("Formato no compatible. Usa PNG, JPEG, WebP o GIF.")?;
-    let dir = app
-        .path()
-        .app_config_dir()
-        .map_err(|error| error.to_string())?
-        .join("appearance");
-    ensure_directory(&dir)?;
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
-        .as_nanos();
-    clean_staged_backgrounds(&dir)?;
-    let file_name = format!("background-{timestamp}.{}", format.extension());
-    let staged = dir.join(format!(".background-{timestamp}.tmp"));
-    let destination = dir.join(&file_name);
-    let mut output = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&staged)
-        .map_err(|error| format!("No se pudo guardar el fondo: {error}"))?;
-    let copied = match io::copy(&mut input.take(MAX_BACKGROUND_BYTES + 1), &mut output) {
-        Ok(copied) if copied <= MAX_BACKGROUND_BYTES => copied,
-        Ok(_) => {
-            let _ = fs::remove_file(&staged);
-            return Err("El fondo excede el límite de 8 MB".into());
-        }
-        Err(error) => {
-            let _ = fs::remove_file(&staged);
-            return Err(format!("No se pudo copiar el fondo: {error}"));
-        }
-    };
-    if copied == 0 {
-        let _ = fs::remove_file(&staged);
-        return Err("La imagen está vacía".into());
-    }
-    if let Err(error) = output.sync_all() {
-        let _ = fs::remove_file(&staged);
-        return Err(format!("No se pudo confirmar el fondo en disco: {error}"));
-    }
-    drop(output);
-    if let Err(error) = fs::rename(&staged, &destination) {
-        let _ = fs::remove_file(&staged);
-        return Err(format!("No se pudo confirmar el fondo: {error}"));
-    }
-    let mut settings = match read_settings(&app) {
-        Ok(settings) => settings,
-        Err(error) => {
-            let _ = fs::remove_file(&destination);
-            return Err(error);
-        }
-    };
-    let previous = settings.background_file.replace(file_name);
-    settings.background_preset = None;
-    if let Err(error) = write_settings(&app, &settings) {
-        let _ = fs::remove_file(&destination);
-        return Err(error);
-    }
-    if let Some(old) = previous.filter(|name| is_safe_background_filename(name)) {
-        if old != destination.file_name().unwrap().to_string_lossy() {
-            let _ = fs::remove_file(dir.join(old));
-        }
-    }
-    make_bootstrap(&app)
-}
-
-#[tauri::command]
-fn clear_background(app: AppHandle) -> Result<Bootstrap, String> {
-    let mut settings = read_settings(&app)?;
-    let previous = settings.background_file.take();
-    settings.background_preset = None;
-    write_settings(&app, &settings)?;
-    if let Some(name) = previous.filter(|name| is_safe_background_filename(name)) {
-        if let Some(path) = app
-            .path()
-            .app_config_dir()
-            .ok()
-            .map(|dir| dir.join("appearance").join(name))
-        {
-            let _ = fs::remove_file(path);
-        }
-    }
     make_bootstrap(&app)
 }
 
@@ -2772,8 +2524,6 @@ pub fn run() {
             get_bootstrap,
             set_theme,
             set_background_preset,
-            select_background,
-            clear_background,
             get_launcher_logs,
             sync_official_pack,
             install_forge_base,
@@ -3324,7 +3074,6 @@ mod tests {
             managed_installs: BTreeMap::from([("siege".into(), "1.20.1-forge-47.4.10".into())]),
             theme_id: Some("ghouls".into()),
             theme_migrated: true,
-            background_file: Some("background-123.webp".into()),
             background_preset: Some("ghouls-outbreak".into()),
             microsoft_client_id: None,
             memory_limit_mb: Some(4096),
@@ -3339,10 +3088,6 @@ mod tests {
         assert_eq!(decoded.java_executable, settings.java_executable);
         assert_eq!(decoded.managed_installs, settings.managed_installs);
         assert_eq!(decoded.theme_id.as_deref(), Some("ghouls"));
-        assert_eq!(
-            decoded.background_file.as_deref(),
-            Some("background-123.webp")
-        );
         assert_eq!(decoded.background_preset.as_deref(), Some("ghouls-outbreak"));
         assert_eq!(decoded.memory_limit_mb, Some(4096));
         assert_eq!(decoded.offline_username.as_deref(), Some("Player_17"));
@@ -3369,7 +3114,7 @@ mod tests {
     }
 
     #[test]
-    fn appearance_validation_accepts_supported_themes_and_image_signatures() {
+    fn appearance_validation_accepts_supported_themes() {
         assert_eq!(resolve_theme(None), "arena-light");
         assert_eq!(resolve_theme(Some("ghouls".into())), "outbreak-night");
         assert_eq!(resolve_theme(Some("unknown".into())), "arena-light");
@@ -3386,21 +3131,10 @@ mod tests {
             assert!(is_valid_theme(theme), "theme should be accepted: {theme}");
         }
         assert!(!is_valid_theme("developer"));
-        assert!(is_safe_background_filename("background-123.png"));
-        assert!(!is_safe_background_filename("../background-123.png"));
-        assert!(!is_safe_background_filename("background-x.png"));
-        assert!(is_safe_staged_background_filename(".background-123.tmp"));
-        assert!(!is_safe_staged_background_filename("../background-123.tmp"));
-        assert!(!is_safe_staged_background_filename(".background-x.tmp"));
-        assert_eq!(
-            detect_background_format(b"\x89PNG\r\n\x1a\nrest"),
-            Some(BackgroundFormat::Png)
-        );
-        assert_eq!(
-            detect_background_format(b"RIFF1234WEBPrest"),
-            Some(BackgroundFormat::Webp)
-        );
-        assert_eq!(detect_background_format(b"not an image"), None);
+        let old_preferences = r#"{"backgroundFile":"background-123.webp","themeId":"siege"}"#;
+        let migrated: Settings = serde_json::from_str(old_preferences).unwrap();
+        let rewritten = serde_json::to_value(migrated).unwrap();
+        assert!(rewritten.get("backgroundFile").is_none());
     }
 
     #[test]
@@ -3428,44 +3162,6 @@ mod tests {
         assert!(is_valid_background_preset("ghouls-outbreak"));
         assert!(!is_valid_background_preset("https://attacker.invalid/image.png"));
         assert!(!is_valid_background_preset("unknown"));
-    }
-
-    #[test]
-    fn interrupted_background_cleanup_removes_only_owned_regular_temp_files() {
-        let fixture = std::env::temp_dir().join(format!(
-            "eternalcraft-background-cleanup-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&fixture).unwrap();
-        let stale = fixture.join(".background-123.tmp");
-        let unrelated = fixture.join("keep.tmp");
-        fs::write(&stale, b"partial image").unwrap();
-        fs::write(&unrelated, b"unrelated").unwrap();
-        fs::OpenOptions::new()
-            .write(true)
-            .open(&stale)
-            .unwrap()
-            .set_times(fs::FileTimes::new().set_modified(
-                std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60),
-            ))
-            .unwrap();
-        let active = fixture.join(".background-456.tmp");
-        fs::write(&active, b"ongoing image").unwrap();
-
-        clean_staged_backgrounds(&fixture).unwrap();
-        assert!(!stale.exists());
-        assert!(active.exists());
-        assert_eq!(fs::read(&unrelated).unwrap(), b"unrelated");
-
-        let not_a_directory = fixture.join("symlink-target");
-        fs::write(&not_a_directory, b"keep").unwrap();
-        assert!(clean_staged_backgrounds(&not_a_directory).is_err());
-        assert_eq!(fs::read(&not_a_directory).unwrap(), b"keep");
-        fs::remove_dir_all(fixture).unwrap();
     }
 
     #[test]

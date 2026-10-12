@@ -19,7 +19,6 @@ export interface Bootstrap {
   configDirectory: string;
   logFile: string;
   themeId: string;
-  backgroundPath: string | null;
   backgroundPreset: string | null;
   java: JavaStatus;
   javaManuallySelected: boolean;

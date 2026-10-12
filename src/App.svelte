@@ -120,6 +120,7 @@
       if (document.visibilityState !== 'visible' || disposed) return;
       void refreshMinecraftStatus();
       if (bootstrap && !bootstrap.catalogOnline) void retryCatalogConnection();
+      if (developerLoginStatus.status === 'pending' && !developerPollBusy) void pollGitHubDeveloperLogin();
     };
     const subscribe = <T,>(event: string, callback: (payload: T) => void) => {
       void listen<T>(event, ({ payload }) => callback(payload)).then((stop) => {
@@ -152,7 +153,7 @@
       }
     }, 30000);
     const developerTimer = window.setInterval(() => {
-      if (developerLoginStatus.status === 'pending' && !developerPollBusy) void pollGitHubDeveloperLogin();
+      if (document.visibilityState === 'visible' && developerLoginStatus.status === 'pending' && !developerPollBusy) void pollGitHubDeveloperLogin();
     }, Math.max(5000, (developerLoginStatus.intervalSeconds ?? 5) * 1000));
     document.addEventListener('visibilitychange', refreshWhenVisible);
     return () => {

@@ -1570,12 +1570,39 @@ fn memory_bounds(total_mb: u32) -> (u32, u32) {
     (min_mb, max_mb)
 }
 
+fn effective_memory_mb(host_total_mb: u32, cgroup_limit_bytes: Option<u64>) -> u32 {
+    let Some(limit_bytes) = cgroup_limit_bytes else {
+        return host_total_mb;
+    };
+    let limit_mb = (limit_bytes / (1024 * 1024)).min(u32::MAX as u64) as u32;
+    if limit_mb == 0 {
+        host_total_mb
+    } else {
+        host_total_mb.min(limit_mb)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_cgroup_memory_limit_bytes() -> Option<u64> {
+    [
+        Path::new("/sys/fs/cgroup/memory.max"),
+        Path::new("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+    ]
+    .into_iter()
+    .find_map(|path| fs::read_to_string(path).ok()?.trim().parse::<u64>().ok())
+}
+
 fn memory_status(settings: &Settings) -> MemoryStatus {
     static TOTAL_MEMORY_MB: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     let total_mb = *TOTAL_MEMORY_MB.get_or_init(|| {
         let mut system = System::new();
         system.refresh_memory();
-        (system.total_memory() / (1024 * 1024)).min(u32::MAX as u64) as u32
+        let host_total_mb = (system.total_memory() / (1024 * 1024)).min(u32::MAX as u64) as u32;
+        #[cfg(target_os = "linux")]
+        let total_mb = effective_memory_mb(host_total_mb, linux_cgroup_memory_limit_bytes());
+        #[cfg(not(target_os = "linux"))]
+        let total_mb = host_total_mb;
+        total_mb
     });
     let (min_mb, max_mb) = memory_bounds(total_mb);
     let default_mb = (6 * 1024).min(max_mb) / 512 * 512;
@@ -2699,6 +2726,21 @@ mod tests {
         assert_eq!(memory_bounds(768), (512, 512));
         assert_eq!(memory_bounds(4096), (1024, 3072));
         assert_eq!(memory_bounds(16 * 1024), (1024, 12 * 1024));
+    }
+
+    #[test]
+    fn memory_budget_respects_linux_container_limits_when_present() {
+        let host_total_mb = 32 * 1024;
+        assert_eq!(effective_memory_mb(host_total_mb, None), host_total_mb);
+        assert_eq!(
+            effective_memory_mb(host_total_mb, Some(4 * 1024 * 1024 * 1024)),
+            4 * 1024,
+        );
+        assert_eq!(
+            effective_memory_mb(host_total_mb, Some(64 * 1024 * 1024 * 1024)),
+            host_total_mb,
+        );
+        assert_eq!(effective_memory_mb(host_total_mb, Some(0)), host_total_mb);
     }
 
     #[cfg(unix)]

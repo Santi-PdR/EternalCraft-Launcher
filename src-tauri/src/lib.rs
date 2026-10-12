@@ -1142,6 +1142,7 @@ fn create_loaded_mod_alias(personal_file: &Path, loaded_file: &Path) -> Result<(
 }
 
 fn add_personal_mod(source: &Path, mods_directory: &Path) -> Result<String, String> {
+    let _guard = pack::lock_pack_sync()?;
     let source = source
         .canonicalize()
         .map_err(|error| format!("No se pudo resolver el archivo seleccionado: {error}"))?;
@@ -1212,6 +1213,7 @@ fn add_personal_mod(source: &Path, mods_directory: &Path) -> Result<String, Stri
 }
 
 fn remove_personal_mod(name: &str, mods_directory: &Path) -> Result<(), String> {
+    let _guard = pack::lock_pack_sync()?;
     validate_personal_mod_name(name)?;
     let personal_directory = mods_directory.join("personales");
     let official_directory = mods_directory.join("Oficiales");
@@ -1260,6 +1262,7 @@ fn remove_personal_mod(name: &str, mods_directory: &Path) -> Result<(), String> 
 }
 
 fn activate_personal_mod(name: &str, mods_directory: &Path) -> Result<(), String> {
+    let _guard = pack::lock_pack_sync()?;
     validate_personal_mod_name(name)?;
     let official_directory = mods_directory.join("Oficiales");
     let personal_directory = mods_directory.join("personales");
@@ -2335,7 +2338,11 @@ fn launch_minecraft(app: AppHandle, series_id: String) -> Result<MinecraftStatus
     let game_dir = resolve_series_game_directory(&app, &series_id)?
         .ok_or_else(|| "Selecciona o instala la carpeta de juego de esta serie primero.".to_string())?;
     verify_forge_profile(&game_dir, &series)?;
-    pack::verify_installed_pack(&game_dir, &series_id)?;
+    // Keep the official and personal mod set stable from verification until
+    // Minecraft has been spawned. Pack sync and personal-mod operations share
+    // this lock, so they cannot race the launch validation.
+    let _pack_guard = pack::lock_pack_sync()?;
+    pack::verify_installed_pack_locked(&game_dir, &series_id)?;
     let profile_id = expected_profile_id(&series).ok_or_else(|| "No se pudo determinar el perfil del juego".to_string())?;
     let mut java = if let Some(path) = settings.java_executable.as_deref() {
         inspect_java(Path::new(path))
@@ -2457,6 +2464,7 @@ fn mod_inventory_for_path(path: Option<PathBuf>) -> Result<ModInventory, String>
 
 #[tauri::command]
 fn get_mod_inventory(app: AppHandle, series_id: String) -> Result<ModInventory, String> {
+    let _guard = pack::lock_pack_sync()?;
     let game_directory = resolve_series_game_directory(&app, &series_id)?;
     mod_inventory_for_path(game_directory)
 }

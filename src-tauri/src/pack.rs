@@ -7,7 +7,7 @@ use std::{
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Mutex, MutexGuard},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -16,6 +16,12 @@ const MOD_LIMIT: u64 = 512 * 1024 * 1024;
 const PACK_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 const STALE_STAGING_AGE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
 static PACK_SYNC_LOCK: Mutex<()> = Mutex::new(());
+
+pub(super) fn lock_pack_sync() -> Result<MutexGuard<'static, ()>, String> {
+    PACK_SYNC_LOCK
+        .lock()
+        .map_err(|_| "El bloqueo de actualización del pack falló".to_string())
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -315,9 +321,14 @@ fn verify_installed_mod_pair(
 }
 
 pub(super) fn verify_installed_pack(game_dir: &Path, series_id: &str) -> Result<(), String> {
-    let _guard = PACK_SYNC_LOCK
-        .lock()
-        .map_err(|_| "El bloqueo de actualización del pack falló".to_string())?;
+    let _guard = lock_pack_sync()?;
+    verify_installed_pack_locked(game_dir, series_id)
+}
+
+pub(super) fn verify_installed_pack_locked(
+    game_dir: &Path,
+    series_id: &str,
+) -> Result<(), String> {
     let mods = game_dir.join("mods");
     let officials = mods.join("Oficiales");
     let metadata_dir = game_dir.join(".eternalcraft");
@@ -698,9 +709,7 @@ pub(super) fn sync_pack(
     loader_version: &str,
     mut report_progress: impl FnMut(PackProgress),
 ) -> Result<PackSyncResult, String> {
-    let _guard = PACK_SYNC_LOCK
-        .lock()
-        .map_err(|_| "El bloqueo de actualización del pack falló".to_string())?;
+    let _guard = lock_pack_sync()?;
     let url = format!(
         "https://raw.githubusercontent.com/Santi-PdR/EternalCraft-Launcher/main/packs/{series_id}/manifest.json"
     );

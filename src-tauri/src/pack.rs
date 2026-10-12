@@ -294,6 +294,13 @@ fn has_name_case_insensitive(directory: &Path, name: &str) -> Result<bool, Strin
 }
 
 fn load_previous_state(path: &Path, series_id: &str) -> Result<Option<PackState>, String> {
+    load_previous_state_snapshot(path, series_id).map(|(state, _)| state)
+}
+
+fn load_previous_state_snapshot(
+    path: &Path,
+    series_id: &str,
+) -> Result<(Option<PackState>, Option<Vec<u8>>), String> {
     match fs::read(path) {
         Ok(bytes) => {
             let state: PackState = serde_json::from_slice(&bytes)
@@ -309,9 +316,9 @@ fn load_previous_state(path: &Path, series_id: &str) -> Result<Option<PackState>
                     return Err("El registro guardado contiene una ruta o hash inválido".into());
                 }
             }
-            Ok(Some(state))
+            Ok((Some(state), Some(bytes)))
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((None, None)),
         Err(error) => Err(format!("No se pudo leer el registro del pack: {error}")),
     }
 }
@@ -622,8 +629,8 @@ fn reconcile_staged_with_recovery(
     let state_path = state_path(game_dir, &manifest.series_id);
     check_normal_directory(&game_dir.join(".eternalcraft"))?;
     check_normal_file_if_present(&state_path)?;
-    let old_state = load_previous_state(&state_path, &manifest.series_id)?;
-    let old_state_bytes = fs::read(&state_path).ok();
+    let (old_state, old_state_bytes) =
+        load_previous_state_snapshot(&state_path, &manifest.series_id)?;
     let old_names = old_state
         .as_ref()
         .map(|state| {
@@ -980,6 +987,34 @@ mod tests {
         ));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn state_snapshot_keeps_the_exact_rollback_bytes_and_propagates_read_errors() {
+        let root = temp_dir();
+        let path = root.join("siege-state.json");
+        let expected = PackState {
+            schema_version: 1,
+            series_id: "siege".into(),
+            version: "1.0.0".into(),
+            files: BTreeMap::new(),
+        };
+        let bytes = serde_json::to_vec(&expected).unwrap();
+        fs::write(&path, &bytes).unwrap();
+
+        let (loaded, snapshot) = load_previous_state_snapshot(&path, "siege").unwrap();
+        assert_eq!(loaded, Some(expected));
+        assert_eq!(snapshot.as_deref(), Some(bytes.as_slice()));
+
+        let missing = load_previous_state_snapshot(&root.join("missing.json"), "siege").unwrap();
+        assert_eq!(missing, (None, None));
+
+        let unreadable_path = root.join("directory-instead-of-state.json");
+        fs::create_dir(&unreadable_path).unwrap();
+        assert!(load_previous_state_snapshot(&unreadable_path, "siege")
+            .unwrap_err()
+            .contains("No se pudo leer el registro del pack"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

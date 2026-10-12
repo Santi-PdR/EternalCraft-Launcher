@@ -572,6 +572,14 @@ mod tests {
     impl ProgressReporter for QuietProgress {
         fn report(&mut self, _: ProgressEvent) {}
     }
+
+    struct RecordingProgress(Vec<ProgressEvent>);
+
+    impl ProgressReporter for RecordingProgress {
+        fn report(&mut self, event: ProgressEvent) {
+            self.0.push(event);
+        }
+    }
     #[cfg(unix)]
     use std::{fs, time::SystemTime};
 
@@ -617,6 +625,33 @@ mod tests {
         )
         .is_ok());
         assert!(validate_link_target(Path::new("bin/java"), "../../outside").is_err());
+    }
+
+    #[test]
+    fn runtime_download_reader_reports_received_bytes_and_total() {
+        use std::io::Read;
+
+        let source = b"Java runtime";
+        let mut progress = RecordingProgress(Vec::new());
+        let mut reader = super::RuntimeProgressReader {
+            inner: Cursor::new(source),
+            label: "Java · bin/java".into(),
+            received: 0,
+            total_bytes: Some(source.len() as u64),
+            progress: &mut progress,
+        };
+        let mut downloaded = Vec::new();
+        reader.read_to_end(&mut downloaded).unwrap();
+
+        assert_eq!(downloaded, source);
+        assert!(matches!(
+            progress.0.as_slice(),
+            [ProgressEvent::BytesReceived {
+                label,
+                received,
+                total: Some(total),
+            }] if label == "Java · bin/java" && *received == source.len() as u64 && *total == source.len() as u64
+        ));
     }
 
     #[cfg(unix)]

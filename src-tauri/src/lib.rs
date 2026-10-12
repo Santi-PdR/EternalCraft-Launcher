@@ -27,11 +27,13 @@ use std::sync::{OnceLock, RwLock};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     env, fs,
-    io::{self, Read, Seek, SeekFrom, Write},
+    io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
+    sync::mpsc,
+    thread,
     time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, Manager};
@@ -827,28 +829,47 @@ fn install_forge_profile(
             installer_path: installer_path.clone(),
             minecraft_dir: game_dir.clone(),
         };
-        let output = Command::new(&invocation.java_executable)
+        let mut child = Command::new(&invocation.java_executable)
             .args(installer_command_args(&invocation))
             .current_dir(&game_dir)
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|error| format!("No se pudo iniciar el instalador Forge: {error}"))?;
-        let combined = format!(
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+        let (sender, receiver) = mpsc::sync_channel(32);
+        let stdout_reader = forward_forge_output(
+            child.stdout.take().expect("Forge stdout was piped"),
+            "stdout",
+            sender.clone(),
         );
-        for line in combined
-            .lines()
-            .rev()
-            .take(20)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-        {
-            progress.emit(line);
+        let stderr_reader = forward_forge_output(
+            child.stderr.take().expect("Forge stderr was piped"),
+            "stderr",
+            sender,
+        );
+        let mut recent_output = VecDeque::with_capacity(20);
+        let mut last_report = None;
+        for line in receiver {
+            if recent_output.len() == 20 {
+                recent_output.pop_front();
+            }
+            recent_output.push_back(line.clone());
+            let now = Instant::now();
+            if progress_update_due(last_report, now, Duration::from_millis(500), false) {
+                progress.emit(&line);
+                last_report = Some(now);
+            }
         }
-        if !output.status.success() {
-            return Err(format!("El instalador Forge terminó con código {:?}. Revisa los últimos mensajes del proceso.", output.status.code()));
+        let status = child
+            .wait()
+            .map_err(|error| format!("No se pudo esperar al instalador Forge: {error}"))?;
+        let _ = stdout_reader.join();
+        let _ = stderr_reader.join();
+        if !status.success() {
+            for line in &recent_output {
+                progress.emit(line);
+            }
+            return Err(format!("El instalador Forge terminó con código {:?}. Revisa los últimos mensajes del proceso.", status.code()));
         }
         let _ = fs::remove_file(installer_path);
     }
@@ -894,6 +915,123 @@ fn ensure_forge_launcher_profiles(game_dir: &Path) -> Result<(), String> {
             let _ = fs::remove_file(&standard);
             format!("No se pudo escribir el perfil de Minecraft para Forge: {error}")
         })
+}
+
+fn forward_forge_output<R: Read + Send + 'static>(
+    stream: R,
+    stream_name: &'static str,
+    sender: mpsc::SyncSender<String>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stream);
+        let mut bytes = Vec::new();
+        loop {
+            bytes.clear();
+            match read_bounded_forge_line(&mut reader, &mut bytes) {
+                Ok(None) => break,
+                Ok(Some(truncated)) => {
+                    let mut line = String::from_utf8_lossy(&bytes).trim().to_string();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if truncated || line.chars().count() > 2048 {
+                        line = line.chars().take(2048).collect();
+                        line.push('…');
+                    }
+                    if sender.send(format!("[Forge {stream_name}] {line}")).is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = sender.send(format!("[Forge {stream_name}] Error leyendo salida: {error}"));
+                    break;
+                }
+            }
+        }
+    })
+}
+
+const MAX_FORGE_OUTPUT_LINE_BYTES: usize = 8192;
+
+fn read_bounded_forge_line<R: BufRead>(
+    reader: &mut R,
+    bytes: &mut Vec<u8>,
+) -> io::Result<Option<bool>> {
+    bytes.clear();
+    let mut truncated = false;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok((!bytes.is_empty()).then_some(truncated));
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map_or(available.len(), |index| index + 1);
+        let remaining = MAX_FORGE_OUTPUT_LINE_BYTES.saturating_sub(bytes.len());
+        let copied = consumed.min(remaining);
+        bytes.extend_from_slice(&available[..copied]);
+        truncated |= copied < consumed;
+        reader.consume(consumed);
+        if newline.is_some() {
+            return Ok(Some(truncated));
+        }
+    }
+}
+
+#[cfg(test)]
+mod forge_output_tests {
+    use super::*;
+
+    #[test]
+    fn forwards_forge_output_lines_and_trims_line_endings() {
+        let (sender, receiver) = mpsc::sync_channel(32);
+        let reader = forward_forge_output(
+            io::Cursor::new(b"Preparing libraries\r\nInstalled Forge\n".to_vec()),
+            "stdout",
+            sender,
+        );
+
+        let lines = receiver.into_iter().collect::<Vec<_>>();
+        reader.join().unwrap();
+
+        assert_eq!(
+            lines,
+            vec![
+                "[Forge stdout] Preparing libraries",
+                "[Forge stdout] Installed Forge"
+            ]
+        );
+    }
+
+    #[test]
+    fn limits_a_single_forge_output_line() {
+        let (sender, receiver) = mpsc::sync_channel(32);
+        let reader = forward_forge_output(
+            io::Cursor::new(format!("{}\n", "x".repeat(4096)).into_bytes()),
+            "stderr",
+            sender,
+        );
+
+        let line = receiver.into_iter().next().unwrap();
+        reader.join().unwrap();
+
+        assert_eq!(
+            line.chars().count(),
+            2048 + "[Forge stderr] ".chars().count() + 1
+        );
+        assert!(line.ends_with('…'));
+    }
+
+    #[test]
+    fn bounds_forge_line_memory_and_keeps_following_lines_readable() {
+        let input = format!("{}\nnext line\n", "x".repeat(MAX_FORGE_OUTPUT_LINE_BYTES + 1024));
+        let mut reader = BufReader::new(io::Cursor::new(input.into_bytes()));
+        let mut bytes = Vec::new();
+
+        assert_eq!(read_bounded_forge_line(&mut reader, &mut bytes).unwrap(), Some(true));
+        assert_eq!(bytes.len(), MAX_FORGE_OUTPUT_LINE_BYTES);
+        assert_eq!(read_bounded_forge_line(&mut reader, &mut bytes).unwrap(), Some(false));
+        assert_eq!(String::from_utf8(bytes).unwrap(), "next line\n");
+    }
 }
 
 fn list_jar_files(directory: &Path) -> Result<Vec<ModFileEntry>, String> {

@@ -1570,6 +1570,7 @@ fn memory_bounds(total_mb: u32) -> (u32, u32) {
     (min_mb, max_mb)
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn effective_memory_mb(host_total_mb: u32, cgroup_limit_bytes: Option<u64>) -> u32 {
     let Some(limit_bytes) = cgroup_limit_bytes else {
         return host_total_mb;
@@ -1582,12 +1583,18 @@ fn effective_memory_mb(host_total_mb: u32, cgroup_limit_bytes: Option<u64>) -> u
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn cgroup_memory_limit_in_tree(
     mount_root: &Path,
     group_path: &str,
     limit_file: &str,
 ) -> Option<u64> {
-    if Path::new(limit_file).components().count() != 1 {
+    let mut limit_components = Path::new(limit_file).components();
+    if !matches!(
+        limit_components.next(),
+        Some(std::path::Component::Normal(_))
+    ) || limit_components.next().is_some()
+    {
         return None;
     }
     let relative = Path::new(group_path).strip_prefix("/").ok()?;
@@ -1616,6 +1623,7 @@ fn cgroup_memory_limit_in_tree(
     most_restrictive
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn cgroup_memory_limit_from_membership(
     membership: &str,
     v2_mount: &Path,
@@ -2837,6 +2845,10 @@ mod tests {
         );
         assert_eq!(
             cgroup_memory_limit_in_tree(&v2_mount, "/../../outside", "memory.max"),
+            None,
+        );
+        assert_eq!(
+            cgroup_memory_limit_in_tree(&v2_mount, "/system.slice", "../memory.max"),
             None,
         );
 

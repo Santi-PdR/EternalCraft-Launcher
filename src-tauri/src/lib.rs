@@ -1582,14 +1582,73 @@ fn effective_memory_mb(host_total_mb: u32, cgroup_limit_bytes: Option<u64>) -> u
     }
 }
 
+fn cgroup_memory_limit_in_tree(
+    mount_root: &Path,
+    group_path: &str,
+    limit_file: &str,
+) -> Option<u64> {
+    if Path::new(limit_file).components().count() != 1 {
+        return None;
+    }
+    let relative = Path::new(group_path).strip_prefix("/").ok()?;
+    if relative
+        .components()
+        .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    let mut directory = mount_root.join(relative);
+    if !directory.starts_with(mount_root) {
+        return None;
+    }
+
+    let mut most_restrictive = None;
+    loop {
+        if let Ok(content) = fs::read_to_string(directory.join(limit_file)) {
+            if let Ok(limit) = content.trim().parse::<u64>() {
+                most_restrictive = Some(most_restrictive.map_or(limit, |current: u64| current.min(limit)));
+            }
+        }
+        if directory == mount_root || !directory.pop() || !directory.starts_with(mount_root) {
+            break;
+        }
+    }
+    most_restrictive
+}
+
+fn cgroup_memory_limit_from_membership(
+    membership: &str,
+    v2_mount: &Path,
+    v1_memory_mount: &Path,
+) -> Option<u64> {
+    let mut most_restrictive = None;
+    for line in membership.lines() {
+        let mut fields = line.splitn(3, ':');
+        let Some(hierarchy) = fields.next() else { continue };
+        let Some(controllers) = fields.next() else { continue };
+        let Some(group_path) = fields.next() else { continue };
+        let limit = if hierarchy == "0" && controllers.is_empty() {
+            cgroup_memory_limit_in_tree(v2_mount, group_path, "memory.max")
+        } else if controllers.split(',').any(|controller| controller == "memory") {
+            cgroup_memory_limit_in_tree(v1_memory_mount, group_path, "memory.limit_in_bytes")
+        } else {
+            None
+        };
+        if let Some(limit) = limit {
+            most_restrictive = Some(most_restrictive.map_or(limit, |current: u64| current.min(limit)));
+        }
+    }
+    most_restrictive
+}
+
 #[cfg(target_os = "linux")]
 fn linux_cgroup_memory_limit_bytes() -> Option<u64> {
-    [
-        Path::new("/sys/fs/cgroup/memory.max"),
-        Path::new("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
-    ]
-    .into_iter()
-    .find_map(|path| fs::read_to_string(path).ok()?.trim().parse::<u64>().ok())
+    let membership = fs::read_to_string("/proc/self/cgroup").ok()?;
+    cgroup_memory_limit_from_membership(
+        &membership,
+        Path::new("/sys/fs/cgroup"),
+        Path::new("/sys/fs/cgroup/memory"),
+    )
 }
 
 fn memory_status(settings: &Settings) -> MemoryStatus {
@@ -2741,6 +2800,47 @@ mod tests {
             host_total_mb,
         );
         assert_eq!(effective_memory_mb(host_total_mb, Some(0)), host_total_mb);
+    }
+
+    #[test]
+    fn cgroup_memory_budget_uses_the_tightest_parent_limit() {
+        let fixture = std::env::temp_dir().join(format!(
+            "eternalcraft-cgroup-memory-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let v2_mount = fixture.join("v2");
+        let v1_mount = fixture.join("v1");
+        fs::create_dir_all(v2_mount.join("system.slice/app.scope")).unwrap();
+        fs::create_dir_all(v1_mount.join("user.slice/session.scope")).unwrap();
+        fs::write(v2_mount.join("memory.max"), "max\n").unwrap();
+        fs::write(v2_mount.join("system.slice/memory.max"), "4294967296\n").unwrap();
+        fs::write(v2_mount.join("system.slice/app.scope/memory.max"), "6442450944\n").unwrap();
+        fs::write(
+            v1_mount.join("user.slice/memory.limit_in_bytes"),
+            "3221225472\n",
+        )
+        .unwrap();
+        fs::write(
+            v1_mount.join("user.slice/session.scope/memory.limit_in_bytes"),
+            "5368709120\n",
+        )
+        .unwrap();
+
+        let membership = "0::/system.slice/app.scope\n5:memory:/user.slice/session.scope\n";
+        assert_eq!(
+            cgroup_memory_limit_from_membership(membership, &v2_mount, &v1_mount),
+            Some(3 * 1024 * 1024 * 1024),
+        );
+        assert_eq!(
+            cgroup_memory_limit_in_tree(&v2_mount, "/../../outside", "memory.max"),
+            None,
+        );
+
+        fs::remove_dir_all(fixture).unwrap();
     }
 
     #[cfg(unix)]

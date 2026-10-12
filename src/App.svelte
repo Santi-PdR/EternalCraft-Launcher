@@ -128,7 +128,10 @@
       });
     };
     subscribe<InstallProgress>('forge-install-progress', (payload) => {
-      if (payload.seriesId === installingSeries) installMessage = payload.message;
+      if (payload.seriesId === installingSeries) {
+        const completed = payload.completedFiles > 0 ? ` · ${payload.completedFiles} archivos procesados` : '';
+        installMessage = `${payload.stage}${completed} · ${payload.message}`;
+      }
     });
     subscribe<PackSyncProgress>('pack-sync-progress', (payload) => {
       if (payload.seriesId === selected?.id) {

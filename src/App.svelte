@@ -88,8 +88,8 @@
     { id: 'lavender-light', name: 'Lavanda', kind: 'Claro', bg: '#f0eef6', sidebar: '#fcfbff', surface: '#fcfbff', raised: '#e6e2ef', line: '#d1cadd', muted: '#6b6578', text: '#292632', accent: '#7663ab' },
     { id: 'carbon', name: 'Carbono', kind: 'Oscuro', bg: '#151719', sidebar: '#1c2023', surface: '#24292c', raised: '#30373b', line: '#444d52', muted: '#a5afb3', text: '#eef0f1', accent: '#e28a63' }
   ];
-  const selectedTheme = $derived(themes.find((theme) => theme.id === bootstrap?.themeId) ?? themes[0]);
-  const themeMode = $derived(selectedTheme.kind === 'Claro' ? 'light' : 'dark');
+  let selectedTheme = $derived(themes.find((theme) => theme.id === bootstrap?.themeId) ?? themes[0]);
+  let themeMode = $derived(selectedTheme.kind === 'Claro' ? 'light' : 'dark');
   let backgroundUrl = $derived.by(() => {
     // Backgrounds stay online; the launcher does not copy local images into its config.
     const presetId = !bootstrap?.backgroundPreset || bootstrap.backgroundPreset === 'auto'

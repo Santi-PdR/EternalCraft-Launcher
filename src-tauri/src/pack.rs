@@ -812,9 +812,17 @@ fn retryable_pack_io_error(error: &std::io::Error) -> bool {
     )
 }
 
-fn retry_pack_download_after(attempt: usize) {
-    let seconds = 1_u64 << attempt.saturating_sub(1).min(3);
-    std::thread::sleep(Duration::from_secs(seconds));
+fn pack_download_retry_delay(attempt: usize, retry_after: Option<&str>) -> Duration {
+    let seconds = retry_after
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|seconds| seconds.clamp(1, 120))
+        .unwrap_or_else(|| 1_u64 << attempt.saturating_sub(1).min(3));
+    Duration::from_secs(seconds)
+}
+
+fn retry_pack_download_after(attempt: usize, retry_after: Option<&str>) {
+    let delay = pack_download_retry_delay(attempt, retry_after);
+    std::thread::sleep(delay);
 }
 
 fn download_pack_file(
@@ -836,12 +844,17 @@ fn download_pack_file(
             Ok(response) if response.status().is_success() => response,
             Ok(response) => {
                 let status = response.status();
+                let retry_after = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
                 let error = response.error_for_status().unwrap_err();
                 last_error = format!("No se pudo descargar {name} ({status}): {error}");
                 if !retryable_pack_http_status(status) || attempt == MAX_PACK_DOWNLOAD_ATTEMPTS {
                     return Err(last_error);
                 }
-                retry_pack_download_after(attempt);
+                retry_pack_download_after(attempt, retry_after.as_deref());
                 continue;
             }
             Err(error) => {
@@ -850,7 +863,7 @@ fn download_pack_file(
                 if !retryable || attempt == MAX_PACK_DOWNLOAD_ATTEMPTS {
                     return Err(last_error);
                 }
-                retry_pack_download_after(attempt);
+                retry_pack_download_after(attempt, None);
                 continue;
             }
         };
@@ -858,9 +871,12 @@ fn download_pack_file(
             .content_length()
             .is_some_and(|length| length != file.size_bytes)
         {
-            return Err(format!(
-                "El servidor informó un tamaño inesperado para {name}"
-            ));
+            last_error = format!("El servidor informó un tamaño inesperado para {name}");
+            if attempt == MAX_PACK_DOWNLOAD_ATTEMPTS {
+                return Err(last_error);
+            }
+            retry_pack_download_after(attempt, None);
+            continue;
         }
         let mut output = fs::OpenOptions::new()
             .write(true)
@@ -881,7 +897,7 @@ fn download_pack_file(
                 if !retryable_pack_io_error(&error) || attempt == MAX_PACK_DOWNLOAD_ATTEMPTS {
                     return Err(last_error);
                 }
-                retry_pack_download_after(attempt);
+                retry_pack_download_after(attempt, None);
                 continue;
             }
         };
@@ -897,7 +913,7 @@ fn download_pack_file(
         let _ = fs::remove_file(staged);
         last_error = format!("La descarga de {name} no pasó la verificación de tamaño y SHA-256");
         if attempt < MAX_PACK_DOWNLOAD_ATTEMPTS {
-            retry_pack_download_after(attempt);
+            retry_pack_download_after(attempt, None);
         }
     }
     Err(format!(
@@ -1287,6 +1303,26 @@ mod tests {
         assert!(!retryable_pack_io_error(&std::io::Error::from(
             std::io::ErrorKind::PermissionDenied
         )));
+    }
+
+    #[test]
+    fn pack_download_retry_delay_honors_bounded_retry_after() {
+        assert_eq!(
+            pack_download_retry_delay(1, Some("7")),
+            Duration::from_secs(7)
+        );
+        assert_eq!(
+            pack_download_retry_delay(1, Some("0")),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            pack_download_retry_delay(1, Some("999")),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            pack_download_retry_delay(3, Some("not-a-number")),
+            Duration::from_secs(4)
+        );
     }
 
     #[test]

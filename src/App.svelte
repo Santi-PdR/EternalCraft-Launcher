@@ -121,6 +121,7 @@
       if (document.visibilityState !== 'visible' || disposed) return;
       void refreshMinecraftStatus();
       if (bootstrap && !bootstrap.catalogOnline) void retryCatalogConnection();
+      else if (bootstrap?.catalogOnline) void refreshOnlineCatalog();
       if (developerLoginStatus.status === 'pending' && !developerPollBusy) void pollGitHubDeveloperLogin();
     };
     const subscribe = <T,>(event: string, callback: (payload: T) => void) => {
@@ -156,6 +157,11 @@
         void retryCatalogConnection();
       }
     }, 30000);
+    const catalogRefreshTimer = window.setInterval(() => {
+      if (!disposed && document.visibilityState === 'visible' && bootstrap?.catalogOnline) {
+        void refreshOnlineCatalog();
+      }
+    }, 300000);
     const developerTimer = window.setInterval(() => {
       if (document.visibilityState === 'visible' && developerLoginStatus.status === 'pending' && !developerPollBusy) void pollGitHubDeveloperLogin();
     }, Math.max(5000, (developerLoginStatus.intervalSeconds ?? 5) * 1000));
@@ -166,6 +172,7 @@
       window.clearTimeout(updateTimer);
       window.clearInterval(statusTimer);
       window.clearInterval(catalogTimer);
+      window.clearInterval(catalogRefreshTimer);
       window.clearInterval(developerTimer);
       unlisteners.forEach((stop) => stop());
     };
@@ -176,19 +183,68 @@
   async function retryCatalogConnection() {
     if (!bootstrap || bootstrap.catalogOnline || catalogRetryBusy) return;
     catalogRetryBusy = true;
-    const previousSeriesId = bootstrap.activeSeriesId;
+    const previousCatalog = JSON.stringify(bootstrap.series);
     try {
       const updated = await invoke<Bootstrap>('get_bootstrap');
-      bootstrap = updated;
+      await applyCatalogRefresh(updated, previousCatalog);
       if (updated.catalogOnline) {
         notice = 'Conexión recuperada: catálogo de series actualizado.';
-        if (updated.activeSeriesId !== previousSeriesId) await loadMods(updated.activeSeriesId);
       }
     } catch {
       // Keep the embedded catalog available and try again while the window is visible.
     } finally {
       catalogRetryBusy = false;
     }
+  }
+
+  async function refreshOnlineCatalog() {
+    if (!bootstrap?.catalogOnline || catalogRetryBusy) return;
+    catalogRetryBusy = true;
+    const previousCatalog = JSON.stringify(bootstrap.series);
+    try {
+      const updated = await invoke<Bootstrap>('get_bootstrap');
+      if (await applyCatalogRefresh(updated, previousCatalog)) {
+        notice = 'Catálogo de series actualizado.';
+      }
+    } catch {
+      // Keep the last verified catalog if a background refresh fails.
+    } finally {
+      catalogRetryBusy = false;
+    }
+  }
+
+  async function applyCatalogRefresh(updated: Bootstrap, previousCatalog: string) {
+    if (!bootstrap) return false;
+    const current = bootstrap;
+    const previousSeriesId = current.activeSeriesId;
+    const activeSeriesId = updated.series.some((series) => series.id === previousSeriesId)
+      ? previousSeriesId
+      : updated.activeSeriesId;
+    const catalogChanged = JSON.stringify(updated.series) !== previousCatalog;
+    const existingSeriesIds = new Set(current.series.map((series) => series.id));
+    const mergeSeriesMap = (
+      currentMap: Record<string, string>,
+      refreshedMap: Record<string, string>
+    ): Record<string, string> => {
+      const merged: Record<string, string> = {};
+      for (const { id } of updated.series) {
+        const value = existingSeriesIds.has(id) ? currentMap[id] : refreshedMap[id];
+        if (value !== undefined) merged[id] = value;
+      }
+      return merged;
+    };
+    bootstrap = {
+      ...current,
+      series: updated.series,
+      activeSeriesId,
+      catalogOnline: updated.catalogOnline,
+      gameDirectories: mergeSeriesMap(current.gameDirectories, updated.gameDirectories),
+      suggestedDirectories: mergeSeriesMap(current.suggestedDirectories, updated.suggestedDirectories),
+      managedGameDirectories: mergeSeriesMap(current.managedGameDirectories, updated.managedGameDirectories),
+      installedProfiles: mergeSeriesMap(current.installedProfiles, updated.installedProfiles)
+    };
+    if (activeSeriesId !== previousSeriesId) await loadMods(activeSeriesId);
+    return catalogChanged;
   }
 
   async function loadMods(seriesId: string | undefined) {

@@ -76,6 +76,11 @@ struct Catalog {
 
 static RUNTIME_CATALOG: OnceLock<RwLock<Option<Catalog>>> = OnceLock::new();
 static RUNTIME_CATALOG_ONLINE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static RUNTIME_CATALOG_LAST_ATTEMPT: OnceLock<std::sync::Mutex<Option<Instant>>> = OnceLock::new();
+
+const CATALOG_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const CATALOG_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+const MAX_CATALOG_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -340,11 +345,48 @@ fn current_catalog() -> Result<Catalog, String> {
     parse_catalog()
 }
 
+fn catalog_refresh_due(
+    now: Instant,
+    last_attempt: Option<Instant>,
+    has_cached_catalog: bool,
+) -> bool {
+    let interval = if has_cached_catalog {
+        CATALOG_REFRESH_INTERVAL
+    } else {
+        CATALOG_RETRY_INTERVAL
+    };
+    last_attempt.is_none_or(|last| now.saturating_duration_since(last) >= interval)
+}
+
+fn read_bounded_body(reader: impl Read, max_bytes: usize) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(max_bytes.min(8192));
+    reader
+        .take(max_bytes as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "response body exceeds the configured size limit",
+        ));
+    }
+    Ok(bytes)
+}
+
 fn refresh_runtime_catalog() -> Result<(), String> {
-    if RUNTIME_CATALOG.get_or_init(|| RwLock::new(None)).read()
-        .map_err(|_| "El catálogo local quedó bloqueado".to_string())?.is_some() {
+    let mut last_attempt = RUNTIME_CATALOG_LAST_ATTEMPT
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .map_err(|_| "El estado de actualización del catálogo quedó bloqueado".to_string())?;
+    let has_cached_catalog = RUNTIME_CATALOG
+        .get_or_init(|| RwLock::new(None))
+        .read()
+        .map_err(|_| "El catálogo local quedó bloqueado".to_string())?
+        .is_some();
+    let now = Instant::now();
+    if !catalog_refresh_due(now, *last_attempt, has_cached_catalog) {
         return Ok(());
     }
+    *last_attempt = Some(now);
     const CATALOG_URL: &str = "https://raw.githubusercontent.com/Santi-PdR/EternalCraft-Launcher/main/resources/series/catalog.json";
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(8))
@@ -356,13 +398,14 @@ fn refresh_runtime_catalog() -> Result<(), String> {
     if !response.status().is_success() {
         return Err(format!("GitHub respondió {} al consultar el catálogo", response.status()));
     }
-    if response.content_length().is_some_and(|length| length > 1024 * 1024) {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_CATALOG_BYTES as u64)
+    {
         return Err("El catálogo remoto excede 1 MiB".into());
     }
-    let bytes = response.bytes().map_err(|error| format!("No se pudo leer el catálogo remoto: {error}"))?;
-    if bytes.len() > 1024 * 1024 {
-        return Err("El catálogo remoto excede 1 MiB".into());
-    }
+    let bytes = read_bounded_body(response, MAX_CATALOG_BYTES)
+        .map_err(|error| format!("No se pudo leer el catálogo remoto: {error}"))?;
     let catalog: Catalog = serde_json::from_slice(&bytes)
         .map_err(|error| format!("El catálogo remoto no es válido: {error}"))?;
     let catalog = validate_catalog(catalog)?;
@@ -2860,6 +2903,45 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn catalog_refresh_uses_a_short_retry_without_cache_and_a_five_minute_cache_ttl() {
+        use std::time::{Duration, Instant};
+
+        let now = Instant::now() + Duration::from_secs(600);
+        assert!(super::catalog_refresh_due(now, None, false));
+        assert!(!super::catalog_refresh_due(
+            now,
+            Some(now - Duration::from_secs(29)),
+            false
+        ));
+        assert!(super::catalog_refresh_due(
+            now,
+            Some(now - Duration::from_secs(30)),
+            false
+        ));
+        assert!(!super::catalog_refresh_due(
+            now,
+            Some(now - Duration::from_secs(299)),
+            true
+        ));
+        assert!(super::catalog_refresh_due(
+            now,
+            Some(now - Duration::from_secs(300)),
+            true
+        ));
+    }
+
+    #[test]
+    fn remote_catalog_body_limit_is_enforced_while_reading() {
+        use std::io::Cursor;
+
+        assert_eq!(
+            super::read_bounded_body(Cursor::new(b"catalog".to_vec()), 7).unwrap(),
+            b"catalog"
+        );
+        assert!(super::read_bounded_body(Cursor::new(b"too large".to_vec()), 8).is_err());
+    }
+
     #[test]
     fn pack_and_personal_mod_mutations_are_blocked_only_for_the_running_series() {
         let running = super::MinecraftStatus {

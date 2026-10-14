@@ -349,8 +349,9 @@ fn catalog_refresh_due(
     now: Instant,
     last_attempt: Option<Instant>,
     has_cached_catalog: bool,
+    currently_online: bool,
 ) -> bool {
-    let interval = if has_cached_catalog {
+    let interval = if has_cached_catalog && currently_online {
         CATALOG_REFRESH_INTERVAL
     } else {
         CATALOG_RETRY_INTERVAL
@@ -383,10 +384,12 @@ fn refresh_runtime_catalog() -> Result<(), String> {
         .map_err(|_| "El catálogo local quedó bloqueado".to_string())?
         .is_some();
     let now = Instant::now();
-    if !catalog_refresh_due(now, *last_attempt, has_cached_catalog) {
+    let currently_online = RUNTIME_CATALOG_ONLINE.load(std::sync::atomic::Ordering::Relaxed);
+    if !catalog_refresh_due(now, *last_attempt, has_cached_catalog, currently_online) {
         return Ok(());
     }
     *last_attempt = Some(now);
+    RUNTIME_CATALOG_ONLINE.store(false, std::sync::atomic::Ordering::Relaxed);
     const CATALOG_URL: &str = "https://raw.githubusercontent.com/Santi-PdR/EternalCraft-Launcher/main/resources/series/catalog.json";
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(8))
@@ -2908,26 +2911,42 @@ mod tests {
         use std::time::{Duration, Instant};
 
         let now = Instant::now() + Duration::from_secs(600);
-        assert!(super::catalog_refresh_due(now, None, false));
+        assert!(super::catalog_refresh_due(now, None, false, false));
         assert!(!super::catalog_refresh_due(
             now,
             Some(now - Duration::from_secs(29)),
+            false,
             false
         ));
         assert!(super::catalog_refresh_due(
             now,
             Some(now - Duration::from_secs(30)),
+            false,
             false
         ));
         assert!(!super::catalog_refresh_due(
             now,
             Some(now - Duration::from_secs(299)),
+            true,
             true
         ));
         assert!(super::catalog_refresh_due(
             now,
             Some(now - Duration::from_secs(300)),
+            true,
             true
+        ));
+        assert!(!super::catalog_refresh_due(
+            now,
+            Some(now - Duration::from_secs(29)),
+            true,
+            false
+        ));
+        assert!(super::catalog_refresh_due(
+            now,
+            Some(now - Duration::from_secs(30)),
+            true,
+            false
         ));
     }
 

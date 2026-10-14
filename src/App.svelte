@@ -903,7 +903,7 @@
 
       {#if activePage === 'home'}
         <section class="page home-page">
-          <div class="page-heading"><div><span class="eyebrow">TU PRÓXIMA AVENTURA</span><h1>Elige tu mundo.</h1><p>Una biblioteca, distintas historias de EternalCraft.</p></div><span class="connection-pill"><i></i> Catálogo {bootstrap.catalogOnline ? 'actualizado' : 'sin conexión'}</span></div>
+          <div class="page-heading"><div><span class="eyebrow">TU PRÓXIMA AVENTURA</span><h1>Elige tu mundo.</h1><p>Una biblioteca, distintas historias de EternalCraft.</p></div><span class="connection-pill"><i></i> Catálogo {bootstrap.catalogOnline ? 'en línea' : 'sin conexión'}</span></div>
 
           {#if !bootstrap.microsoftProfile && bootstrap.accountMode !== 'offline'}
             <section class="account-setup-card" aria-labelledby="offline-profile-title">

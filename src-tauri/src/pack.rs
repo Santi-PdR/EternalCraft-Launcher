@@ -825,6 +825,67 @@ fn retry_pack_download_after(attempt: usize, retry_after: Option<&str>) {
     std::thread::sleep(delay);
 }
 
+fn fetch_pack_manifest(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>, String> {
+    let mut last_error = String::new();
+    for attempt in 1..=MAX_PACK_DOWNLOAD_ATTEMPTS {
+        let response = match client.get(url).send() {
+            Ok(response) if response.status().is_success() => response,
+            Ok(response) => {
+                let status = response.status();
+                let retry_after = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
+                last_error = format!("El servidor devolvió {status} para el manifiesto oficial");
+                if !retryable_pack_http_status(status) || attempt == MAX_PACK_DOWNLOAD_ATTEMPTS {
+                    return Err(format!(
+                        "No se pudo consultar el manifiesto oficial: {last_error}"
+                    ));
+                }
+                retry_pack_download_after(attempt, retry_after.as_deref());
+                continue;
+            }
+            Err(error) => {
+                last_error = format!("No se pudo consultar el manifiesto oficial: {error}");
+                if !(error.is_timeout() || error.is_connect())
+                    || attempt == MAX_PACK_DOWNLOAD_ATTEMPTS
+                {
+                    return Err(last_error);
+                }
+                retry_pack_download_after(attempt, None);
+                continue;
+            }
+        };
+        let expected_length = response.content_length();
+        if expected_length.is_some_and(|length| length > MANIFEST_LIMIT) {
+            return Err("El manifiesto oficial supera el tamaño permitido".into());
+        }
+        let mut bytes = Vec::new();
+        match response.take(MANIFEST_LIMIT + 1).read_to_end(&mut bytes) {
+            Ok(_) if bytes.len() as u64 > MANIFEST_LIMIT => {
+                return Err("El manifiesto oficial supera el tamaño permitido".into());
+            }
+            Ok(_) if expected_length.is_some_and(|length| length != bytes.len() as u64) => {
+                last_error = "El manifiesto oficial llegó incompleto".into();
+            }
+            Ok(_) => return Ok(bytes),
+            Err(error) => {
+                last_error = format!("No se pudo leer el manifiesto oficial: {error}");
+                if !retryable_pack_io_error(&error) || attempt == MAX_PACK_DOWNLOAD_ATTEMPTS {
+                    return Err(last_error);
+                }
+            }
+        }
+        if attempt < MAX_PACK_DOWNLOAD_ATTEMPTS {
+            retry_pack_download_after(attempt, None);
+        }
+    }
+    Err(format!(
+        "No se pudo consultar el manifiesto oficial después de {MAX_PACK_DOWNLOAD_ATTEMPTS} intentos: {last_error}"
+    ))
+}
+
 fn download_pack_file(
     client: &reqwest::blocking::Client,
     file: &PackFile,
@@ -933,25 +994,7 @@ pub(super) fn sync_pack_locked(
         "https://raw.githubusercontent.com/Santi-PdR/EternalCraft-Launcher/main/packs/{series_id}/manifest.json"
     );
     let client = http::client().map_err(|error| error.to_string())?;
-    let response = client
-        .get(&url)
-        .send()
-        .and_then(|response| response.error_for_status())
-        .map_err(|error| format!("No se pudo consultar el manifiesto oficial: {error}"))?;
-    if response
-        .content_length()
-        .is_some_and(|length| length > MANIFEST_LIMIT)
-    {
-        return Err("El manifiesto oficial supera el tamaño permitido".into());
-    }
-    let mut manifest_bytes = Vec::new();
-    response
-        .take(MANIFEST_LIMIT + 1)
-        .read_to_end(&mut manifest_bytes)
-        .map_err(|error| format!("No se pudo leer el manifiesto oficial: {error}"))?;
-    if manifest_bytes.len() as u64 > MANIFEST_LIMIT {
-        return Err("El manifiesto oficial supera el tamaño permitido".into());
-    }
+    let manifest_bytes = fetch_pack_manifest(&client, &url)?;
     let manifest: PackManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|error| format!("El manifiesto oficial no es válido: {error}"))?;
     validate_manifest(&manifest, series_id)?;
@@ -1323,6 +1366,52 @@ mod tests {
             pack_download_retry_delay(3, Some("not-a-number")),
             Duration::from_secs(4)
         );
+    }
+
+    #[test]
+    fn pack_manifest_fetch_retries_a_temporary_server_error() {
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+
+        let body = b"{\"schemaVersion\":1}";
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                }
+                if attempt == 0 {
+                    stream.write_all(
+                        b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    ).unwrap();
+                } else {
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .unwrap();
+                    stream.write_all(body).unwrap();
+                }
+            }
+        });
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap();
+
+        let fetched = fetch_pack_manifest(&client, &format!("http://{address}/manifest.json"))
+            .unwrap();
+        assert_eq!(fetched.as_slice(), body);
+        server.join().unwrap();
     }
 
     #[test]

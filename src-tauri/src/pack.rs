@@ -1079,7 +1079,7 @@ fn download_pack_files(
     Ok(())
 }
 
-fn sync_pack_locked(
+pub(super) fn sync_pack_locked(
     game_dir: &Path,
     series_id: &str,
     minecraft_version: &str,

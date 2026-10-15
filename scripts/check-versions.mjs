@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { isStableVersion } from './version-format.mjs';
 
 const packageJson = JSON.parse(fs.readFileSync('package.json', 'utf8'));
 const packageLock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
@@ -21,6 +22,9 @@ const uniqueVersions = new Set(Object.values(versions));
 if (Object.values(versions).some((version) => typeof version !== 'string') || uniqueVersions.size !== 1) {
   const details = Object.entries(versions).map(([source, version]) => `${source}: ${version ?? 'missing'}`).join('\n');
   throw new Error(`Launcher version declarations do not match:\n${details}`);
+}
+if (!isStableVersion(packageJson.version)) {
+  throw new Error(`Launcher version must be stable SemVer x.y.z without leading zeroes: ${packageJson.version}`);
 }
 
 console.log(`Launcher version is consistent across all manifests: ${packageJson.version}`);

@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { isStableVersion } from './version-format.mjs';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const scriptPath = path.join(repositoryRoot, 'scripts', 'create-updater-manifest.mjs');
@@ -17,6 +18,13 @@ function run(...args) {
 }
 
 try {
+  assert.equal(isStableVersion('0.1.22'), true);
+  assert.equal(isStableVersion('1.0.0'), true);
+  assert.equal(isStableVersion('01.2.3'), false);
+  assert.equal(isStableVersion('1.02.3'), false);
+  assert.equal(isStableVersion('1.2.03'), false);
+  assert.equal(isStableVersion('1.2.3-beta'), false);
+
   fs.writeFileSync(appImage, 'appimage');
   fs.writeFileSync(`${appImage}.sig`, 'linux-signature\n');
   fs.writeFileSync(windowsInstaller, 'windows-installer');

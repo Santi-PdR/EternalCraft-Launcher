@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { isStableVersion } from './version-format.mjs';
 
 function fail(message) {
   throw new Error(message);
@@ -9,7 +10,7 @@ const [version, repository, appImagePath, windowsInstallerPath, outputPath] = pr
 if (!version || !repository || !appImagePath || !windowsInstallerPath || !outputPath) {
   fail('Usage: node scripts/create-updater-manifest.mjs <version> <owner/repo> <AppImage> <Windows setup.exe> <output.json>');
 }
-if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) {
+if (!isStableVersion(version)) {
   fail('Updater version must be a stable SemVer x.y.z release without leading zeroes.');
 }
 if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) fail('Repository must be an owner/name pair.');

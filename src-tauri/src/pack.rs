@@ -7,7 +7,10 @@ use std::{
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::{mpsc, Mutex, MutexGuard},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc, Mutex, MutexGuard,
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -984,9 +987,10 @@ fn download_pack_file(
     ))
 }
 
-pub(super) enum PackDownloadEvent {
+enum PackDownloadEvent {
     Progress { index: usize, received_bytes: u64 },
     Finished { index: usize, result: Result<(), String> },
+    WorkerFinished,
 }
 
 fn download_pack_files(
@@ -999,63 +1003,85 @@ fn download_pack_files(
 ) -> Result<(), String> {
     let mut file_bytes = vec![0_u64; downloads.len()];
     let mut completed_files = 0;
-    for batch_start in (0..downloads.len()).step_by(PACK_DOWNLOAD_CONCURRENCY) {
-        let batch_end = (batch_start + PACK_DOWNLOAD_CONCURRENCY).min(downloads.len());
-        let (sender, receiver) = mpsc::sync_channel(64);
-        thread::scope(|scope| -> Result<(), String> {
-            for index in batch_start..batch_end {
-                let sender = sender.clone();
-                let client = client.clone();
-                let file = downloads[index];
-                let staged = staging.join(file.path.strip_prefix("mods/").unwrap());
-                scope.spawn(move || {
+    let worker_count = downloads.len().min(PACK_DOWNLOAD_CONCURRENCY);
+    if worker_count == 0 {
+        return Ok(());
+    }
+    let next_index = AtomicUsize::new(0);
+    let stop_queue = AtomicBool::new(false);
+    let (sender, receiver) = mpsc::sync_channel(64);
+    let mut first_error = None;
+    let mut workers_finished = 0;
+    let mut last_report = None;
+
+    thread::scope(|scope| -> Result<(), String> {
+        for _ in 0..worker_count {
+            let sender = sender.clone();
+            let client = client.clone();
+            let next_index = &next_index;
+            let stop_queue = &stop_queue;
+            scope.spawn(move || {
+                loop {
+                    if stop_queue.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let index = next_index.fetch_add(1, Ordering::Relaxed);
+                    if index >= downloads.len() {
+                        break;
+                    }
+                    let file = downloads[index];
+                    let staged = staging.join(file.path.strip_prefix("mods/").unwrap());
                     let result = download_pack_file(&client, file, &staged, |received_bytes| {
                         let _ = sender.send(PackDownloadEvent::Progress { index, received_bytes });
                     });
+                    if result.is_err() {
+                        stop_queue.store(true, Ordering::Relaxed);
+                    }
                     let _ = sender.send(PackDownloadEvent::Finished { index, result });
-                });
-            }
-            drop(sender);
-            let mut finished_in_batch = 0;
-            let mut first_error = None;
-            let mut last_report = None;
-            while finished_in_batch < batch_end - batch_start {
-                let event = receiver
-                    .recv()
-                    .map_err(|error| format!("Se interrumpió la recepción de descargas: {error}"))?;
-                let (index, message, force_report) = match event {
-                    PackDownloadEvent::Progress { index, received_bytes } => {
-                        file_bytes[index] = received_bytes.min(downloads[index].size_bytes);
-                        (index, None, false)
+                }
+                let _ = sender.send(PackDownloadEvent::WorkerFinished);
+            });
+        }
+        drop(sender);
+        while workers_finished < worker_count {
+            let event = receiver
+                .recv()
+                .map_err(|error| format!("Se interrumpió la recepción de descargas: {error}"))?;
+            let (index, message, force_report) = match event {
+                PackDownloadEvent::Progress { index, received_bytes } => {
+                    file_bytes[index] = received_bytes.min(downloads[index].size_bytes);
+                    (Some(index), None, false)
+                }
+                PackDownloadEvent::Finished { index, result } => match result {
+                    Ok(()) => {
+                        file_bytes[index] = downloads[index].size_bytes;
+                        completed_files += 1;
+                        (Some(index), Some(format!("Verificado {}/{} · {}", index + 1, downloads.len(), downloads[index].path.strip_prefix("mods/").unwrap())), true)
                     }
-                    PackDownloadEvent::Finished { index, result } => {
-                        finished_in_batch += 1;
-                        match result {
-                            Ok(()) => {
-                                file_bytes[index] = downloads[index].size_bytes;
-                                completed_files += 1;
-                                (index, Some(format!("Verificado {}/{} · {}", index + 1, downloads.len(), downloads[index].path.strip_prefix("mods/").unwrap())), true)
-                            }
-                            Err(error) => {
-                                first_error.get_or_insert(error);
-                                (index, None, true)
-                            }
-                        }
+                    Err(error) => {
+                        first_error.get_or_insert(error);
+                        (Some(index), None, true)
                     }
-                };
-                let now = Instant::now();
-                if force_report || super::progress_update_due(last_report, now, Duration::from_millis(200), false) {
-                    if let Some(message) = message {
-                        last_report = Some(now);
-                        report_progress(PackProgress {
-                            series_id: series_id.into(),
-                            completed_files,
-                            total_files: downloads.len(),
-                            downloaded_bytes: file_bytes.iter().sum::<u64>().min(total_bytes),
-                            total_bytes,
-                            message,
-                        });
-                    } else if !force_report {
+                },
+                PackDownloadEvent::WorkerFinished => {
+                    workers_finished += 1;
+                    (None, None, false)
+                }
+            };
+            let now = Instant::now();
+            if force_report || super::progress_update_due(last_report, now, Duration::from_millis(200), false) {
+                if let Some(message) = message {
+                    last_report = Some(now);
+                    report_progress(PackProgress {
+                        series_id: series_id.into(),
+                        completed_files,
+                        total_files: downloads.len(),
+                        downloaded_bytes: file_bytes.iter().sum::<u64>().min(total_bytes),
+                        total_bytes,
+                        message,
+                    });
+                } else if !force_report {
+                    if let Some(index) = index {
                         let name = downloads[index].path.strip_prefix("mods/").unwrap();
                         last_report = Some(now);
                         report_progress(PackProgress {
@@ -1069,14 +1095,15 @@ fn download_pack_files(
                     }
                 }
             }
-            if let Some(error) = first_error {
-                Err(error)
-            } else {
-                Ok(())
-            }
-        })?;
+        }
+        Ok(())
+    })?;
+
+    if let Some(error) = first_error {
+        Err(error)
+    } else {
+        Ok(())
     }
-    Ok(())
 }
 
 pub(super) fn sync_pack_locked(

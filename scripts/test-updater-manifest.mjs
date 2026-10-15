@@ -42,7 +42,11 @@ try {
 
   const invalidVersion = run('0.1.22-beta', 'Santi-PdR/EternalCraft-Launcher', appImage, windowsInstaller, output);
   assert.notEqual(invalidVersion.status, 0);
-  assert.match(invalidVersion.stderr, /stable x\.y\.z/);
+  assert.match(invalidVersion.stderr, /stable SemVer x\.y\.z/);
+
+  const leadingZeroVersion = run('01.2.3', 'Santi-PdR/EternalCraft-Launcher', appImage, windowsInstaller, output);
+  assert.notEqual(leadingZeroVersion.status, 0);
+  assert.match(leadingZeroVersion.stderr, /without leading zeroes/);
 
   console.log('Updater manifest tests passed: platform URLs, signatures, stable version, and unsigned artifact rejection.');
 } finally {

@@ -9,7 +9,9 @@ const [version, repository, appImagePath, windowsInstallerPath, outputPath] = pr
 if (!version || !repository || !appImagePath || !windowsInstallerPath || !outputPath) {
   fail('Usage: node scripts/create-updater-manifest.mjs <version> <owner/repo> <AppImage> <Windows setup.exe> <output.json>');
 }
-if (!/^\d+\.\d+\.\d+$/.test(version)) fail('Updater version must be a stable x.y.z release.');
+if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) {
+  fail('Updater version must be a stable SemVer x.y.z release without leading zeroes.');
+}
 if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) fail('Repository must be an owner/name pair.');
 
 function updaterEntry(artifactPath, expectedExtension) {

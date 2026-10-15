@@ -1,3 +1,5 @@
+/home/Santipdr/.bashrc: line 47: /tmp/eternalcraft-cargo/env: No such file or directory
+/home/Santipdr/.bash_profile: line 18: /tmp/eternalcraft-cargo/env: No such file or directory
 use super::*;
 use sha2::Digest;
 use std::collections::BTreeSet;
@@ -147,11 +149,15 @@ struct GitHubRelease {
     upload_url: String,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 struct GitHubReleaseAsset {
     id: u64,
     name: String,
     digest: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    size: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -795,8 +801,29 @@ fn publish_pack_release_sync(
             if !release.draft {
                 return Err(format!("El release publicado {tag} ya contiene {} con otro hash; crea una versión nueva", source_file.published_name));
             }
-            if asset.digest.is_none() {
-                match wait_for_asset_confirmation(
+            match classify_asset_confirmation(
+                std::slice::from_ref(asset),
+                &source_file.published_name,
+                &expected_digest,
+            ) {
+                AssetConfirmation::Verified(_) => {
+                    verified_names.insert(source_file.published_name.clone());
+                    verified_bytes = verified_bytes.saturating_add(source_file.size_bytes);
+                    emit_publish_byte_progress(
+                        &app,
+                        &series_id,
+                        index + 1,
+                        total,
+                        verified_bytes,
+                        source.total_bytes,
+                        &source_file.name,
+                    );
+                    continue;
+                }
+                AssetConfirmation::Incomplete(incomplete_asset) => {
+                    delete_release_asset(&access_token, release.id, incomplete_asset.id)?;
+                }
+                AssetConfirmation::Pending { asset_exists: true } => match wait_for_asset_confirmation(
                     &app,
                     &series_id,
                     index,
@@ -820,6 +847,9 @@ fn publish_pack_release_sync(
                         );
                         continue;
                     }
+                    AssetConfirmation::Incomplete(incomplete_asset) => {
+                        delete_release_asset(&access_token, release.id, incomplete_asset.id)?;
+                    }
                     AssetConfirmation::DigestMismatch(pending_asset) => {
                         delete_release_asset(&access_token, release.id, pending_asset.id)?;
                     }
@@ -830,9 +860,11 @@ fn publish_pack_release_sync(
                         ));
                     }
                     AssetConfirmation::Pending { asset_exists: false } => {}
+                },
+                AssetConfirmation::Pending { asset_exists: false } => {}
+                AssetConfirmation::DigestMismatch(mismatched_asset) => {
+                    delete_release_asset(&access_token, release.id, mismatched_asset.id)?;
                 }
-            } else {
-                delete_release_asset(&access_token, release.id, asset.id)?;
             }
         }
         if !release.draft {
@@ -1086,6 +1118,7 @@ struct AssetUploadFailure {
 
 enum AssetConfirmation {
     Verified(GitHubReleaseAsset),
+    Incomplete(GitHubReleaseAsset),
     Pending { asset_exists: bool },
     DigestMismatch(GitHubReleaseAsset),
 }
@@ -1099,6 +1132,11 @@ fn classify_asset_confirmation(
         asset.name == name && asset.digest.as_deref() == Some(expected_digest)
     }) {
         return AssetConfirmation::Verified(asset.clone());
+    }
+    if let Some(asset) = assets.iter().find(|asset| {
+        asset.name == name && asset.state.as_deref() == Some("starter") && asset.size == Some(0)
+    }) {
+        return AssetConfirmation::Incomplete(asset.clone());
     }
     if assets
         .iter()
@@ -1255,6 +1293,9 @@ fn wait_for_asset_confirmation(
                     AssetConfirmation::DigestMismatch(asset) => {
                         return Ok(AssetConfirmation::DigestMismatch(asset));
                     }
+                    AssetConfirmation::Incomplete(asset) => {
+                        return Ok(AssetConfirmation::Incomplete(asset));
+                    }
                     pending @ AssetConfirmation::Pending { .. } => {
                         last_confirmation = pending;
                     }
@@ -1349,6 +1390,11 @@ fn upload_release_asset_resumable(
         let should_retry = match list_release_assets(token, release_id) {
             Ok(assets) => match classify_asset_confirmation(&assets, name, expected_digest) {
                 AssetConfirmation::Verified(asset) => return Ok(asset),
+                AssetConfirmation::Incomplete(asset) => {
+                    delete_release_asset(token, release_id, asset.id)?;
+                    last_error = format!("GitHub dejó {name} como un asset vacío e incompleto; se retiró para volver a subirlo");
+                    true
+                }
                 AssetConfirmation::Pending { asset_exists: true } => {
                     match wait_for_asset_confirmation(
                         app,
@@ -1366,6 +1412,11 @@ fn upload_release_asset_resumable(
                             last_error = format!(
                                 "GitHub registró {name} con un SHA-256 distinto del esperado"
                             );
+                            true
+                        }
+                        AssetConfirmation::Incomplete(asset) => {
+                            delete_release_asset(token, release_id, asset.id)?;
+                            last_error = format!("GitHub dejó {name} como un asset vacío e incompleto; se retiró para volver a subirlo");
                             true
                         }
                         AssetConfirmation::Pending { asset_exists: true } => {
@@ -2077,12 +2128,12 @@ mod tests {
             },
         ];
         let complete = vec![
-            GitHubReleaseAsset { id: 2, name: "beta.jar".into(), digest: None },
-            GitHubReleaseAsset { id: 1, name: "alpha.jar".into(), digest: None },
+            GitHubReleaseAsset { id: 2, name: "beta.jar".into(), digest: None, ..GitHubReleaseAsset::default() },
+            GitHubReleaseAsset { id: 1, name: "alpha.jar".into(), digest: None, ..GitHubReleaseAsset::default() },
         ];
         assert!(published_asset_names_match(&source, &complete));
         assert!(!published_asset_names_match(&source, &complete[..1]));
-        let with_stale_asset = [complete.as_slice(), &[GitHubReleaseAsset { id: 3, name: "retired.jar".into(), digest: None }]].concat();
+        let with_stale_asset = [complete.as_slice(), &[GitHubReleaseAsset { id: 3, name: "retired.jar".into(), digest: None, ..GitHubReleaseAsset::default() }]].concat();
         assert!(!published_asset_names_match(&source, &with_stale_asset));
     }
 
@@ -2304,6 +2355,7 @@ mod tests {
             id: 17,
             name: "example.jar".into(),
             digest: None,
+            ..GitHubReleaseAsset::default()
         };
         assert!(matches!(
             classify_asset_confirmation(std::slice::from_ref(&pending), "example.jar", "sha256:abc"),
@@ -2321,7 +2373,7 @@ mod tests {
 
         let mismatched = GitHubReleaseAsset {
             digest: Some("sha256:wrong".into()),
-            ..pending
+            ..pending.clone()
         };
         assert!(matches!(
             classify_asset_confirmation(std::slice::from_ref(&mismatched), "example.jar", "sha256:abc"),
@@ -2330,6 +2382,25 @@ mod tests {
         assert!(matches!(
             classify_asset_confirmation(&[], "example.jar", "sha256:abc"),
             AssetConfirmation::Pending { asset_exists: false }
+        ));
+
+        let empty_starter = GitHubReleaseAsset {
+            state: Some("starter".into()),
+            size: Some(0),
+            ..pending.clone()
+        };
+        assert!(matches!(
+            classify_asset_confirmation(std::slice::from_ref(&empty_starter), "example.jar", "sha256:abc"),
+            AssetConfirmation::Incomplete(asset) if asset.id == 17
+        ));
+        let uploading = GitHubReleaseAsset {
+            state: Some("starter".into()),
+            size: Some(1024),
+            ..pending.clone()
+        };
+        assert!(matches!(
+            classify_asset_confirmation(&[uploading], "example.jar", "sha256:abc"),
+            AssetConfirmation::Pending { asset_exists: true }
         ));
 
         assert!(should_retry_asset_upload(true, false, false));
@@ -2343,6 +2414,7 @@ mod tests {
             id: 17,
             name: "example.jar".into(),
             digest: None,
+            ..GitHubReleaseAsset::default()
         };
         assert!(matches!(
             classify_asset_confirmation(&[pending], "example.jar", "sha256:abc"),

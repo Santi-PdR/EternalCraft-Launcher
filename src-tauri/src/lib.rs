@@ -1,3 +1,5 @@
+/home/Santipdr/.bashrc: line 47: /tmp/eternalcraft-cargo/env: No such file or directory
+/home/Santipdr/.bash_profile: line 18: /tmp/eternalcraft-cargo/env: No such file or directory
 use atomic_write_file::AtomicWriteFile;
 use mc_launcher_core::{
     account::Account,
@@ -373,16 +375,46 @@ fn read_bounded_body(reader: impl Read, max_bytes: usize) -> io::Result<Vec<u8>>
     Ok(bytes)
 }
 
-fn refresh_runtime_catalog() -> Result<(), String> {
+fn read_catalog_cache(path: &Path) -> Option<Catalog> {
+    let file = fs::File::open(path).ok()?;
+    let bytes = read_bounded_body(file, MAX_CATALOG_BYTES).ok()?;
+    let catalog: Catalog = serde_json::from_slice(&bytes).ok()?;
+    validate_catalog(catalog).ok()
+}
+
+fn write_catalog_cache(path: &Path, catalog: &Catalog) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "La ruta de caché del catálogo no tiene carpeta".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("No se pudo preparar la caché del catálogo: {error}"))?;
+    let bytes = serde_json::to_vec(catalog).map_err(|error| error.to_string())?;
+    if bytes.len() > MAX_CATALOG_BYTES {
+        return Err("El catálogo no se guardó porque excede 1 MiB".into());
+    }
+    let mut file = AtomicWriteFile::options()
+        .open(path)
+        .map_err(|error| format!("No se pudo preparar la caché del catálogo: {error}"))?;
+    file.write_all(&bytes)
+        .map_err(|error| format!("No se pudo escribir la caché del catálogo: {error}"))?;
+    file.commit()
+        .map_err(|error| format!("No se pudo guardar la caché del catálogo: {error}"))
+}
+
+fn refresh_runtime_catalog(cache_path: &Path) -> Result<(), String> {
     let mut last_attempt = RUNTIME_CATALOG_LAST_ATTEMPT
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()
         .map_err(|_| "El estado de actualización del catálogo quedó bloqueado".to_string())?;
-    let has_cached_catalog = RUNTIME_CATALOG
-        .get_or_init(|| RwLock::new(None))
-        .read()
-        .map_err(|_| "El catálogo local quedó bloqueado".to_string())?
-        .is_some();
+    let runtime_catalog = RUNTIME_CATALOG.get_or_init(|| RwLock::new(None));
+    let mut cached_catalog = runtime_catalog
+        .write()
+        .map_err(|_| "El catálogo local quedó bloqueado".to_string())?;
+    if cached_catalog.is_none() {
+        *cached_catalog = read_catalog_cache(cache_path);
+    }
+    let has_cached_catalog = cached_catalog.is_some();
+    drop(cached_catalog);
     let now = Instant::now();
     let currently_online = RUNTIME_CATALOG_ONLINE.load(std::sync::atomic::Ordering::Relaxed);
     if !catalog_refresh_due(now, *last_attempt, has_cached_catalog, currently_online) {
@@ -412,9 +444,15 @@ fn refresh_runtime_catalog() -> Result<(), String> {
     let catalog: Catalog = serde_json::from_slice(&bytes)
         .map_err(|error| format!("El catálogo remoto no es válido: {error}"))?;
     let catalog = validate_catalog(catalog)?;
-    *RUNTIME_CATALOG.get_or_init(|| RwLock::new(None)).write()
+    *runtime_catalog.write()
         .map_err(|_| "El catálogo local quedó bloqueado".to_string())? = Some(catalog);
     RUNTIME_CATALOG_ONLINE.store(true, std::sync::atomic::Ordering::Relaxed);
+    let catalog = runtime_catalog
+        .read()
+        .map_err(|_| "El catálogo local quedó bloqueado".to_string())?
+        .clone()
+        .expect("catalog was just stored");
+    write_catalog_cache(cache_path, &catalog)?;
     Ok(())
 }
 
@@ -2028,7 +2066,15 @@ fn set_background_preset(app: AppHandle, preset_id: String) -> Result<Bootstrap,
 
 #[tauri::command]
 async fn get_bootstrap(app: AppHandle) -> Result<Bootstrap, String> {
-    let _ = tauri::async_runtime::spawn_blocking(move || refresh_runtime_catalog()).await;
+    let cache_path = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| error.to_string())?
+        .join("series-catalog.json");
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        refresh_runtime_catalog(&cache_path)
+    })
+    .await;
     make_bootstrap(&app)
 }
 
@@ -2959,6 +3005,33 @@ mod tests {
             b"catalog"
         );
         assert!(super::read_bounded_body(Cursor::new(b"too large".to_vec()), 8).is_err());
+    }
+
+    #[test]
+    fn catalog_cache_round_trips_and_rejects_invalid_or_oversized_data() {
+        use std::{
+            fs,
+            time::{SystemTime, UNIX_EPOCH},
+        };
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "eternalcraft-catalog-cache-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let cache_path = temp_dir.join("series-catalog.json");
+        let catalog = super::parse_catalog().expect("embedded catalog must be valid");
+
+        super::write_catalog_cache(&cache_path, &catalog).expect("cache write must succeed");
+        let restored = super::read_catalog_cache(&cache_path).expect("cache must validate");
+        assert_eq!(restored.series.len(), catalog.series.len());
+
+        fs::write(&cache_path, b"not json").unwrap();
+        assert!(super::read_catalog_cache(&cache_path).is_none());
+
+        fs::write(&cache_path, vec![b' '; super::MAX_CATALOG_BYTES + 1]).unwrap();
+        assert!(super::read_catalog_cache(&cache_path).is_none());
+        fs::remove_dir_all(temp_dir).unwrap();
     }
 
     #[test]

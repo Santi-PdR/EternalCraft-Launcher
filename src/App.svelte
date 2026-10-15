@@ -104,6 +104,10 @@
   onMount(() => {
     let disposed = false;
     let minecraftStatusRefreshBusy = false;
+    let statusTimer: number | undefined;
+    let catalogRetryTimer: number | undefined;
+    let catalogRefreshTimer: number | undefined;
+    let developerTimer: number | undefined;
     const unlisteners: Array<() => void> = [];
     void defaultWindowIcon().then((icon) => icon ? getCurrentWindow().setIcon(icon) : undefined).catch(() => undefined);
     const refreshMinecraftStatus = async () => {
@@ -118,11 +122,39 @@
       }
     };
     const refreshWhenVisible = () => {
-      if (document.visibilityState !== 'visible' || disposed) return;
+      if (document.visibilityState !== 'visible') {
+        stopVisibleTimers();
+        return;
+      }
+      if (disposed) return;
+      startVisibleTimers();
       void refreshMinecraftStatus();
       if (bootstrap && !bootstrap.catalogOnline) void retryCatalogConnection();
       else if (bootstrap?.catalogOnline) void refreshOnlineCatalog();
       if (developerLoginStatus.status === 'pending' && !developerPollBusy) void pollGitHubDeveloperLogin();
+    };
+    const stopVisibleTimers = () => {
+      if (statusTimer !== undefined) window.clearInterval(statusTimer);
+      if (catalogRetryTimer !== undefined) window.clearInterval(catalogRetryTimer);
+      if (catalogRefreshTimer !== undefined) window.clearInterval(catalogRefreshTimer);
+      if (developerTimer !== undefined) window.clearInterval(developerTimer);
+      statusTimer = undefined;
+      catalogRetryTimer = undefined;
+      catalogRefreshTimer = undefined;
+      developerTimer = undefined;
+    };
+    const startVisibleTimers = () => {
+      if (disposed || document.visibilityState !== 'visible' || statusTimer !== undefined) return;
+      statusTimer = window.setInterval(() => { void refreshMinecraftStatus(); }, 10000);
+      catalogRetryTimer = window.setInterval(() => {
+        if (bootstrap && !bootstrap.catalogOnline) void retryCatalogConnection();
+      }, 30000);
+      catalogRefreshTimer = window.setInterval(() => {
+        if (bootstrap?.catalogOnline) void refreshOnlineCatalog();
+      }, 300000);
+      developerTimer = window.setInterval(() => {
+        if (developerLoginStatus.status === 'pending' && !developerPollBusy) void pollGitHubDeveloperLogin();
+      }, Math.max(5000, (developerLoginStatus.intervalSeconds ?? 5) * 1000));
     };
     const subscribe = <T,>(event: string, callback: (payload: T) => void) => {
       void listen<T>(event, ({ payload }) => callback(payload)).then((stop) => {
@@ -151,29 +183,13 @@
     void refreshMinecraftStatus();
     void getVersion().then((version) => { if (!disposed) launcherVersion = version; });
     const updateTimer = window.setTimeout(() => { if (!disposed) void checkLauncherUpdate(); }, 1800);
-    const statusTimer = window.setInterval(() => { if (document.visibilityState === 'visible') void refreshMinecraftStatus(); }, 10000);
-    const catalogTimer = window.setInterval(() => {
-      if (!disposed && document.visibilityState === 'visible' && bootstrap && !bootstrap.catalogOnline) {
-        void retryCatalogConnection();
-      }
-    }, 30000);
-    const catalogRefreshTimer = window.setInterval(() => {
-      if (!disposed && document.visibilityState === 'visible' && bootstrap?.catalogOnline) {
-        void refreshOnlineCatalog();
-      }
-    }, 300000);
-    const developerTimer = window.setInterval(() => {
-      if (document.visibilityState === 'visible' && developerLoginStatus.status === 'pending' && !developerPollBusy) void pollGitHubDeveloperLogin();
-    }, Math.max(5000, (developerLoginStatus.intervalSeconds ?? 5) * 1000));
     document.addEventListener('visibilitychange', refreshWhenVisible);
+    startVisibleTimers();
     return () => {
       disposed = true;
       document.removeEventListener('visibilitychange', refreshWhenVisible);
       window.clearTimeout(updateTimer);
-      window.clearInterval(statusTimer);
-      window.clearInterval(catalogTimer);
-      window.clearInterval(catalogRefreshTimer);
-      window.clearInterval(developerTimer);
+      stopVisibleTimers();
       unlisteners.forEach((stop) => stop());
     };
   });

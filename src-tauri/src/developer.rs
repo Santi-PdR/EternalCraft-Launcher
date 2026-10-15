@@ -1299,6 +1299,15 @@ fn upload_release_asset_resumable(
     let mut last_error = String::new();
     let mut previous_attempt_unconfirmed = false;
     for attempt in 1..=MAX_ATTEMPTS {
+        emit_publish_byte_progress(
+            app,
+            series_id,
+            completed_files,
+            total_files,
+            completed_bytes,
+            total_bytes,
+            &format!("Preparando subida {attempt}/{MAX_ATTEMPTS} · {name}"),
+        );
         let progress_app = app.clone();
         let progress_series_id = series_id.to_string();
         let progress_name = name.to_string();

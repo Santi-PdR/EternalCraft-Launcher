@@ -112,26 +112,7 @@ jobs:
           appimage=(release-assets/appimage/*.AppImage)
           windows=(release-assets/nsis/*-setup.exe)
           [[ ${#appimage[@]} -eq 1 && ${#windows[@]} -eq 1 ]]
-          for installer in "${appimage[0]}" "${windows[0]}"; do
-            [[ -s "$installer" && -s "$installer.sig" ]]
-          done
-          python3 - "$version" "$REPOSITORY" "${appimage[0]}" "${windows[0]}" <<'PY'
-          import json, pathlib, sys
-          version, repository, appimage, windows = sys.argv[1:]
-          def entry(path):
-              file = pathlib.Path(path)
-              return {
-                  "url": f"https://github.com/{repository}/releases/download/launcher-v{version}/{file.name}",
-                  "signature": pathlib.Path(str(file) + ".sig").read_text().strip(),
-              }
-          manifest = {
-              "version": version,
-              "notes": f"EternalCraft Launcher {version}",
-              "pub_date": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
-              "platforms": {"linux-x86_64": entry(appimage), "windows-x86_64": entry(windows)},
-          }
-          pathlib.Path("latest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-          PY
+          node scripts/create-updater-manifest.mjs "$version" "$REPOSITORY" "${appimage[0]}" "${windows[0]}" latest.json
       - name: Publish immutable GitHub release assets
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:

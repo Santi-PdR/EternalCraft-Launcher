@@ -11,6 +11,7 @@
     "check:workflow-security": "node scripts/check-workflow-security.mjs",
     "check:release-packs": "node scripts/check-release-packs.mjs",
     "check:published-pack-assets": "node scripts/check-published-pack-assets.mjs",
+    "test:updater-manifest": "node scripts/test-updater-manifest.mjs",
     "test:release-packs": "node scripts/check-release-packs.test.mjs",
     "test:published-pack-assets": "node scripts/check-published-pack-assets.test.mjs",
     "test:updater-signature": "node scripts/test-updater-signature.mjs",

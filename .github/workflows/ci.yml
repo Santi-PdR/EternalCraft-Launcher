@@ -33,6 +33,7 @@ jobs:
       - run: npm ci
       - run: npm run test:release-packs
       - run: npm run test:published-pack-assets
+      - run: npm run test:updater-manifest
       - run: npm run check:release-packs
       - name: Verify published modpack assets
         if: runner.os == 'Linux'

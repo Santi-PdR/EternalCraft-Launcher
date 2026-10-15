@@ -1,5 +1,3 @@
-/home/Santipdr/.bashrc: line 47: /tmp/eternalcraft-cargo/env: No such file or directory
-/home/Santipdr/.bash_profile: line 18: /tmp/eternalcraft-cargo/env: No such file or directory
 # EternalCraft Launcher
 
 Native Minecraft launcher for EternalCraft, built with Tauri 2, Rust, Svelte and TypeScript.

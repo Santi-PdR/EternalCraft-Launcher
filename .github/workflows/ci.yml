@@ -135,6 +135,9 @@ jobs:
           extracted="$(mktemp -d)"
           trap 'rm -rf "$extracted"' EXIT
           dpkg-deb --extract "${deb[0]}" "$extracted"
+          desktop_entry="$(find "$extracted/usr/share/applications" -type f -name "*.desktop" -print -quit)"
+          [[ -n "$desktop_entry" ]] || { echo "No desktop entry found in the Debian package"; exit 1; }
+          grep -Fx "StartupWMClass=eternalcraft-launcher" "$desktop_entry"
           launcher_binary=""
           while IFS= read -r candidate; do
             if file "$candidate" | grep -q "ELF"; then

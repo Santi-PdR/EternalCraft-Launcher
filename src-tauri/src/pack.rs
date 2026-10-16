@@ -16,7 +16,7 @@ use std::{
 };
 
 const MANIFEST_LIMIT: u64 = 2 * 1024 * 1024;
-const MOD_LIMIT: u64 = 512 * 1024 * 1024;
+pub(super) const MOD_LIMIT: u64 = 512 * 1024 * 1024;
 const PACK_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 const STALE_STAGING_AGE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
 const MAX_PACK_DOWNLOAD_ATTEMPTS: usize = 3;

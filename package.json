@@ -8,6 +8,7 @@
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "check:versions": "node scripts/check-versions.mjs",
+    "check:theme-contrast": "node scripts/check-theme-contrast.mjs",
     "check:workflow-security": "node scripts/check-workflow-security.mjs",
     "check:release-packs": "node scripts/check-release-packs.mjs",
     "check:published-pack-assets": "node scripts/check-published-pack-assets.mjs",

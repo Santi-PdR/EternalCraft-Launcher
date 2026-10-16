@@ -29,6 +29,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm run check:versions
+      - run: npm run check:theme-contrast
       - run: npm run check:workflow-security
       - run: npm ci
       - run: npm run test:release-packs

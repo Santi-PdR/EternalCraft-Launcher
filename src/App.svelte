@@ -73,21 +73,21 @@
     }
   };
   const themes = [
-    { id: 'arena-light', name: 'Arena', kind: 'Claro', bg: '#f5f1e7', sidebar: '#fffdf7', surface: '#fffdf7', raised: '#ece7da', line: '#d8d0bd', muted: '#6d6a60', text: '#26251f', accent: '#a56b20' },
+    { id: 'arena-light', name: 'Arena', kind: 'Claro', bg: '#f5f1e7', sidebar: '#fffdf7', surface: '#fffdf7', raised: '#ece7da', line: '#d8d0bd', muted: '#6b685f', text: '#26251f', accent: '#905d1c' },
     { id: 'siege-night', name: 'SIEGE', kind: 'Oscuro', bg: '#121615', sidebar: '#181e1c', surface: '#1d2421', raised: '#28312c', line: '#39443d', muted: '#a1aaa2', text: '#edf0e9', accent: '#d1a35b' },
-    { id: 'ghouls-day', name: 'Ghouls', kind: 'Claro', bg: '#f3ece8', sidebar: '#fffaf7', surface: '#fffaf7', raised: '#eee2dc', line: '#dbc9c0', muted: '#75655f', text: '#29231f', accent: '#b65643' },
-    { id: 'outbreak-night', name: 'Outbreak', kind: 'Oscuro', bg: '#171311', sidebar: '#201a17', surface: '#28201c', raised: '#352923', line: '#514036', muted: '#b7a69b', text: '#f2e8df', accent: '#d16d4e' },
-    { id: 'glacier-light', name: 'Glaciar', kind: 'Claro', bg: '#edf3f4', sidebar: '#faffff', surface: '#faffff', raised: '#e3edef', line: '#cbdadd', muted: '#607278', text: '#202d31', accent: '#277c91' },
+    { id: 'ghouls-day', name: 'Ghouls', kind: 'Claro', bg: '#f3ece8', sidebar: '#fffaf7', surface: '#fffaf7', raised: '#eee2dc', line: '#dbc9c0', muted: '#73635e', text: '#29231f', accent: '#a24d3c' },
+    { id: 'outbreak-night', name: 'Outbreak', kind: 'Oscuro', bg: '#171311', sidebar: '#201a17', surface: '#28201c', raised: '#352923', line: '#514036', muted: '#b7a69b', text: '#f2e8df', accent: '#de7453' },
+    { id: 'glacier-light', name: 'Glaciar', kind: 'Claro', bg: '#edf3f4', sidebar: '#faffff', surface: '#faffff', raised: '#e3edef', line: '#cbdadd', muted: '#5c6d73', text: '#202d31', accent: '#247387' },
     { id: 'midnight-blue', name: 'Medianoche', kind: 'Oscuro', bg: '#10171d', sidebar: '#151f27', surface: '#1b2831', raised: '#263640', line: '#364b58', muted: '#9aabb4', text: '#e7eff3', accent: '#69b7d1' },
-    { id: 'forest-mist', name: 'Bosque', kind: 'Claro', bg: '#edf1e8', sidebar: '#fafff5', surface: '#fafff5', raised: '#e3eadc', line: '#cbd7c3', muted: '#64725f', text: '#273027', accent: '#5a824d' },
+    { id: 'forest-mist', name: 'Bosque', kind: 'Claro', bg: '#edf1e8', sidebar: '#fafff5', surface: '#fafff5', raised: '#e3eadc', line: '#cbd7c3', muted: '#5f6c5a', text: '#273027', accent: '#4f7143' },
     { id: 'deep-forest', name: 'Bosque profundo', kind: 'Oscuro', bg: '#111712', sidebar: '#18211a', surface: '#1d2920', raised: '#29372c', line: '#3b4b3d', muted: '#a0b09f', text: '#e8efe4', accent: '#8bb873' },
-    { id: 'dune-light', name: 'Duna', kind: 'Claro', bg: '#f3eadb', sidebar: '#fffaf0', surface: '#fffaf0', raised: '#eee0c8', line: '#dac7a6', muted: '#796c56', text: '#30291f', accent: '#ae782c' },
+    { id: 'dune-light', name: 'Duna', kind: 'Claro', bg: '#f3eadb', sidebar: '#fffaf0', surface: '#fffaf0', raised: '#eee0c8', line: '#dac7a6', muted: '#6f634f', text: '#30291f', accent: '#865c22' },
     { id: 'forge-dark', name: 'Forja', kind: 'Oscuro', bg: '#171513', sidebar: '#201c18', surface: '#29231d', raised: '#382e24', line: '#514334', muted: '#b4a590', text: '#f1e9de', accent: '#dc8c45' },
-    { id: 'rose-light', name: 'Rosa ceniza', kind: 'Claro', bg: '#f3ecef', sidebar: '#fffafd', surface: '#fffafd', raised: '#eee2e8', line: '#dbcbd3', muted: '#75636d', text: '#2c252b', accent: '#a95272' },
+    { id: 'rose-light', name: 'Rosa ceniza', kind: 'Claro', bg: '#f3ecef', sidebar: '#fffafd', surface: '#fffafd', raised: '#eee2e8', line: '#dbcbd3', muted: '#74626c', text: '#2c252b', accent: '#9e4c6a' },
     { id: 'eclipse', name: 'Eclipse', kind: 'Oscuro', bg: '#17131a', sidebar: '#211a25', surface: '#2a2230', raised: '#392d40', line: '#51405b', muted: '#b1a1bb', text: '#f0eaf4', accent: '#bd8dd1' },
-    { id: 'ocean-light', name: 'Océano', kind: 'Claro', bg: '#eaf2f1', sidebar: '#f8fffd', surface: '#f8fffd', raised: '#dcebe7', line: '#c3d8d2', muted: '#58716b', text: '#20312d', accent: '#268779' },
+    { id: 'ocean-light', name: 'Océano', kind: 'Claro', bg: '#eaf2f1', sidebar: '#f8fffd', surface: '#f8fffd', raised: '#dcebe7', line: '#c3d8d2', muted: '#556d68', text: '#20312d', accent: '#217468' },
     { id: 'abyss', name: 'Abismo', kind: 'Oscuro', bg: '#101819', sidebar: '#152122', surface: '#1a292a', raised: '#253738', line: '#365052', muted: '#9cb6b7', text: '#e4f1ef', accent: '#55c2b4' },
-    { id: 'lavender-light', name: 'Lavanda', kind: 'Claro', bg: '#f0eef6', sidebar: '#fcfbff', surface: '#fcfbff', raised: '#e6e2ef', line: '#d1cadd', muted: '#6b6578', text: '#292632', accent: '#7663ab' },
+    { id: 'lavender-light', name: 'Lavanda', kind: 'Claro', bg: '#f0eef6', sidebar: '#fcfbff', surface: '#fcfbff', raised: '#e6e2ef', line: '#d1cadd', muted: '#696376', text: '#292632', accent: '#6d5b9e' },
     { id: 'carbon', name: 'Carbono', kind: 'Oscuro', bg: '#151719', sidebar: '#1c2023', surface: '#24292c', raised: '#30373b', line: '#444d52', muted: '#a5afb3', text: '#eef0f1', accent: '#e28a63' }
   ];
   let selectedTheme = $derived(themes.find((theme) => theme.id === bootstrap?.themeId) ?? themes[0]);

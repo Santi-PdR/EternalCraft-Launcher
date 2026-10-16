@@ -1194,6 +1194,16 @@ fn validate_personal_mod_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_personal_mod_size(size_bytes: u64) -> Result<(), String> {
+    if size_bytes > pack::MOD_LIMIT {
+        return Err(format!(
+            "El mod personal supera el límite de {} MiB",
+            pack::MOD_LIMIT / (1024 * 1024)
+        ));
+    }
+    Ok(())
+}
+
 fn validate_forge_mod_archive(path: &Path) -> Result<(), String> {
     let file = fs::File::open(path)
         .map_err(|error| format!("No se pudo abrir el JAR {}: {error}", path.display()))?;
@@ -1387,6 +1397,7 @@ fn add_personal_mod_inner(source: &Path, mods_directory: &Path) -> Result<String
     if !metadata.is_file() {
         return Err("Selecciona un archivo JAR normal".into());
     }
+    validate_personal_mod_size(metadata.len())?;
     let name = source
         .file_name()
         .and_then(|name| name.to_str())
@@ -3913,6 +3924,13 @@ mod tests {
         assert_eq!(fs::read(&loaded_file).unwrap(), b"replacement owned by the user");
         assert_eq!(fs::read(&personal_file).unwrap(), b"original personal mod");
         fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
+    fn personal_mod_import_uses_the_official_mod_size_limit() {
+        assert!(validate_personal_mod_size(pack::MOD_LIMIT).is_ok());
+        let error = validate_personal_mod_size(pack::MOD_LIMIT + 1).unwrap_err();
+        assert!(error.contains("512 MiB"));
     }
 
     #[test]

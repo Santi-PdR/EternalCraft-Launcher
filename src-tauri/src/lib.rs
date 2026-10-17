@@ -1901,35 +1901,85 @@ fn process_is_minecraft_for_directory(process: &sysinfo::Process, game_directory
     paths_equal_for_process_check(&process_directory, &expected_directory)
 }
 
-fn find_running_minecraft_pid(game_directory: &Path) -> Option<u32> {
+fn running_minecraft_directories() -> Vec<(u32, PathBuf)> {
     let mut system = System::new();
+    // First read only process names. Command lines can contain unrelated tokens,
+    // so fetch them only for Java candidates whose arguments need inspection.
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().without_tasks(),
+    );
+    let java_pids = system
+        .processes()
+        .iter()
+        .filter(|(_, process)| {
+            java_process_name(process.name())
+                || process
+                    .exe()
+                    .and_then(Path::file_name)
+                    .is_some_and(java_process_name)
+        })
+        .map(|(pid, _)| *pid)
+        .collect::<Vec<_>>();
+    if java_pids.is_empty() {
+        return Vec::new();
+    }
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&java_pids),
         true,
         ProcessRefreshKind::nothing()
             .without_tasks()
             .with_cmd(UpdateKind::Always)
             .with_cwd(UpdateKind::Always),
     );
-    system
-        .processes()
-        .values()
-        .find(|process| process_is_minecraft_for_directory(process, game_directory))
-        .map(|process| process.pid().as_u32())
+    java_pids
+        .into_iter()
+        .filter_map(|pid| {
+            let process = system.process(pid)?;
+            if !process_is_minecraft_for_directory(process, Path::new("/")) {
+                return None;
+            }
+            let directory = game_directory_argument(process.cmd())
+                .and_then(|path| normalized_process_path(&path, process.cwd()))?;
+            Some((pid.as_u32(), directory))
+        })
+        .collect()
+}
+
+fn find_running_minecraft_pid(game_directory: &Path) -> Option<u32> {
+    let expected_directory = game_directory
+        .canonicalize()
+        .unwrap_or_else(|_| game_directory.to_path_buf());
+    running_minecraft_directories()
+        .into_iter()
+        .find(|(_, directory)| paths_equal_for_process_check(directory, &expected_directory))
+        .map(|(pid, _)| pid)
 }
 
 fn detect_external_minecraft(app: &AppHandle) -> Result<Option<MinecraftStatus>, String> {
+    let mut directories = Vec::new();
     for series in current_catalog()?.series {
         if let Some(game_directory) = resolve_isolated_series_game_directory(app, &series.id)? {
-            if let Some(pid) = find_running_minecraft_pid(&game_directory) {
-                return Ok(Some(MinecraftStatus {
-                    running: true,
-                    series_id: Some(series.id),
-                    pid: Some(pid),
-                    exit_code: None,
-                    exit_success: None,
-                }));
-            }
+            directories.push((series.id, game_directory));
+        }
+    }
+    let processes = running_minecraft_directories();
+    for (series_id, game_directory) in directories {
+        let expected_directory = game_directory
+            .canonicalize()
+            .unwrap_or(game_directory);
+        if let Some((pid, _)) = processes
+            .iter()
+            .find(|(_, directory)| paths_equal_for_process_check(directory, &expected_directory))
+        {
+            return Ok(Some(MinecraftStatus {
+                running: true,
+                series_id: Some(series_id),
+                pid: Some(*pid),
+                exit_code: None,
+                exit_success: None,
+            }));
         }
     }
     Ok(None)

@@ -3144,7 +3144,7 @@ fn get_mod_inventory(app: AppHandle, series_id: String) -> Result<ModInventory, 
 
 #[tauri::command]
 fn add_personal_mod_to_series(app: AppHandle, series_id: String) -> Result<ModInventory, String> {
-    let game_directory = resolve_isolated_series_game_directory(&app, &series_id)?
+    resolve_isolated_series_game_directory(&app, &series_id)?
         .ok_or_else(|| "Primero selecciona una carpeta de juego para esta serie".to_string())?;
     let selected = app
         .dialog()
@@ -3281,7 +3281,16 @@ async fn install_forge_base(app: AppHandle, series_id: String) -> Result<Bootstr
                 series.loader_version,
                 java,
                 game_dir,
-            )
+            )?;
+            // Persistir el perfil antes de liberar el bloqueo evita que un cambio
+            // de carpeta o una acción Jugar vea la instalación a medio registrar.
+            update_settings(&log_app, |settings| {
+                settings
+                    .managed_installs
+                    .insert(managed_series_id, installed_profile_id);
+                Ok(true)
+            })?;
+            Ok(())
         })();
         if let Err(error) = &result {
             let _ = append_install_log(&log_app, &log_series, "Error", error);
@@ -3299,12 +3308,6 @@ async fn install_forge_base(app: AppHandle, series_id: String) -> Result<Bootstr
     })
     .await
     .map_err(|error| format!("Falló la tarea de instalación: {error}"))??;
-    update_settings(&app, |settings| {
-        settings
-            .managed_installs
-            .insert(managed_series_id, installed_profile_id);
-        Ok(true)
-    })?;
     make_bootstrap(&app)
 }
 

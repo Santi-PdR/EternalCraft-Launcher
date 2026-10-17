@@ -138,13 +138,33 @@ struct AuthSession(std::sync::Mutex<Option<AuthenticatedAccount>>);
 struct MinecraftProcess(std::sync::Mutex<MinecraftProcessState>);
 
 #[derive(Default)]
-struct ForgeInstallerProcess(std::sync::Mutex<Option<std::process::Child>>);
+struct ForgeInstallerProcess(std::sync::Mutex<ForgeInstallerState>);
+
+#[derive(Default)]
+struct ForgeInstallerState {
+    active: Option<std::process::Child>,
+    shutting_down: bool,
+}
+
+fn ensure_forge_installer_can_start(state: &ForgeInstallerState) -> Result<(), String> {
+    if state.shutting_down {
+        return Err("El launcher se está cerrando; no se iniciará el instalador Forge".into());
+    }
+    if state.active.is_some() {
+        return Err("Ya hay otra instalación de Forge en curso".into());
+    }
+    Ok(())
+}
 
 fn terminate_registered_forge_installer(process: &ForgeInstallerProcess) -> bool {
-    let Ok(mut active) = process.0.lock() else {
-        return false;
+    let child = {
+        let Ok(mut state) = process.0.lock() else {
+            return false;
+        };
+        state.shutting_down = true;
+        state.active.take()
     };
-    let Some(mut child) = active.take() else {
+    let Some(mut child) = child else {
         return false;
     };
     let _ = child.kill();
@@ -159,22 +179,25 @@ fn stop_forge_installer(app: &AppHandle) {
 fn wait_for_forge_installer(app: &AppHandle) -> Result<std::process::ExitStatus, String> {
     loop {
         let process = app.state::<ForgeInstallerProcess>();
-        let mut active = process
+        let mut state = process
             .0
             .lock()
             .map_err(|_| "El estado del instalador Forge quedó bloqueado".to_string())?;
-        let Some(child) = active.as_mut() else {
+        if state.shutting_down {
+            return Err("La instalación de Forge se detuvo al cerrar el launcher".into());
+        }
+        let Some(child) = state.active.as_mut() else {
             return Err("La instalación de Forge se detuvo al cerrar el launcher".into());
         };
         match child.try_wait() {
             Ok(Some(status)) => {
-                *active = None;
+                state.active = None;
                 return Ok(status);
             }
             Ok(None) => {}
             Err(error) => return Err(format!("No se pudo consultar el instalador Forge: {error}")),
         }
-        drop(active);
+        drop(state);
         thread::sleep(Duration::from_millis(100));
     }
 }
@@ -1320,6 +1343,14 @@ fn install_forge_profile(
             installer_path: installer_path.clone(),
             minecraft_dir: game_dir.clone(),
         };
+        // Serializar el spawn con el cierre: Exit no puede comprobar el estado
+        // vacío entre el arranque del hijo y su registro.
+        let process = installer_app.state::<ForgeInstallerProcess>();
+        let mut installer_state = process
+            .0
+            .lock()
+            .map_err(|_| "El estado del instalador Forge quedó bloqueado".to_string())?;
+        ensure_forge_installer_can_start(&installer_state)?;
         let mut child = Command::new(&invocation.java_executable)
             .args(installer_command_args(&invocation))
             .current_dir(&game_dir)
@@ -1327,26 +1358,18 @@ fn install_forge_profile(
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("No se pudo iniciar el instalador Forge: {error}"))?;
-        let stdout = child.stdout.take().expect("Forge stdout was piped");
-        let stderr = child.stderr.take().expect("Forge stderr was piped");
-        {
-            let process = installer_app.state::<ForgeInstallerProcess>();
-            let mut active = match process.0.lock() {
-                Ok(active) => active,
-                Err(_) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err("El estado del instalador Forge quedó bloqueado".into());
-                }
-            };
-            if active.is_some() {
-                drop(active);
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("Ya hay otra instalación de Forge en curso".into());
-            }
-            *active = Some(child);
-        }
+        let Some(stdout) = child.stdout.take() else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("No se pudo capturar la salida del instalador Forge".into());
+        };
+        let Some(stderr) = child.stderr.take() else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("No se pudo capturar los errores del instalador Forge".into());
+        };
+        installer_state.active = Some(child);
+        drop(installer_state);
         let (sender, receiver) = mpsc::sync_channel(32);
         let stdout_reader = forward_forge_output(stdout, "stdout", sender.clone());
         let stderr_reader = forward_forge_output(stderr, "stderr", sender);
@@ -3551,7 +3574,7 @@ mod tests {
     #[test]
     fn forge_installer_is_killed_on_launcher_exit() {
         use std::process::{Command, Stdio};
-        use super::ForgeInstallerProcess;
+        use super::{ForgeInstallerProcess, ForgeInstallerState};
 
         let child = Command::new(std::env::current_exe().unwrap())
             .args([
@@ -3565,9 +3588,15 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .expect("spawn the long-running fixture");
-        let process = ForgeInstallerProcess(std::sync::Mutex::new(Some(child)));
+        let process = ForgeInstallerProcess(std::sync::Mutex::new(ForgeInstallerState {
+            active: Some(child),
+            shutting_down: false,
+        }));
         assert!(super::terminate_registered_forge_installer(&process));
-        assert!(process.0.lock().unwrap().is_none());
+        let state = process.0.lock().unwrap();
+        assert!(state.active.is_none());
+        assert!(state.shutting_down);
+        assert!(super::ensure_forge_installer_can_start(&state).is_err());
     }
 
     #[test]

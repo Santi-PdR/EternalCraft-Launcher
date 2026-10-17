@@ -44,6 +44,7 @@
   let launcherUpdateNotes = $state('');
   let launcherUpdateDownloaded = $state(0);
   let launcherUpdateSize = $state<number | null>(null);
+  let launcherUpdateLastCheckedAt = 0;
   let developerLoginStatus = $state<DeveloperLoginStatus>({ status: 'signedOut', username: null, userCode: null, verificationUri: null, expiresInSeconds: null, intervalSeconds: null, message: null });
   let developerLoginBusy = $state(false);
   let developerPollBusy = false;
@@ -108,6 +109,7 @@
     let catalogRetryTimer: number | undefined;
     let catalogRefreshTimer: number | undefined;
     let developerTimer: number | undefined;
+    let launcherUpdateTimer: number | undefined;
     const unlisteners: Array<() => void> = [];
     void defaultWindowIcon().then((icon) => icon ? getCurrentWindow().setIcon(icon) : undefined).catch(() => undefined);
     const refreshMinecraftStatus = async () => {
@@ -132,16 +134,22 @@
       if (bootstrap && !bootstrap.catalogOnline) void retryCatalogConnection();
       else if (bootstrap?.catalogOnline) void refreshOnlineCatalog();
       if (developerLoginStatus.status === 'pending' && !developerPollBusy) void pollGitHubDeveloperLogin();
+      if (
+        Date.now() - launcherUpdateLastCheckedAt >= launcherUpdateCheckIntervalMs
+        && canCheckLauncherUpdateAutomatically()
+      ) void checkLauncherUpdate();
     };
     const stopVisibleTimers = () => {
       if (statusTimer !== undefined) window.clearInterval(statusTimer);
       if (catalogRetryTimer !== undefined) window.clearInterval(catalogRetryTimer);
       if (catalogRefreshTimer !== undefined) window.clearInterval(catalogRefreshTimer);
       if (developerTimer !== undefined) window.clearInterval(developerTimer);
+      if (launcherUpdateTimer !== undefined) window.clearInterval(launcherUpdateTimer);
       statusTimer = undefined;
       catalogRetryTimer = undefined;
       catalogRefreshTimer = undefined;
       developerTimer = undefined;
+      launcherUpdateTimer = undefined;
     };
     const startVisibleTimers = () => {
       if (disposed || document.visibilityState !== 'visible' || statusTimer !== undefined) return;
@@ -155,6 +163,12 @@
       developerTimer = window.setInterval(() => {
         if (developerLoginStatus.status === 'pending' && !developerPollBusy) void pollGitHubDeveloperLogin();
       }, Math.max(5000, (developerLoginStatus.intervalSeconds ?? 5) * 1000));
+      launcherUpdateTimer = window.setInterval(() => {
+        if (
+          Date.now() - launcherUpdateLastCheckedAt >= launcherUpdateCheckIntervalMs
+          && canCheckLauncherUpdateAutomatically()
+        ) void checkLauncherUpdate();
+      }, 5 * 60 * 1000);
     };
     const subscribe = <T,>(event: string, callback: (payload: T) => void) => {
       void listen<T>(event, ({ payload }) => callback(payload)).then((stop) => {
@@ -320,8 +334,17 @@
     return Boolean(modInventory?.loadedFromModsRoot.some((file) => file.name.toLowerCase() === fileName.toLowerCase()));
   }
 
+  const launcherUpdateCheckIntervalMs = 15 * 60 * 1000;
+
+  function canCheckLauncherUpdateAutomatically() {
+    return launcherUpdateState === 'idle'
+      || launcherUpdateState === 'current'
+      || launcherUpdateState === 'error';
+  }
+
   async function checkLauncherUpdate() {
     if (launcherUpdateState === 'checking' || launcherUpdateState === 'installing') return;
+    launcherUpdateLastCheckedAt = Date.now();
     launcherUpdateState = 'checking';
     launcherUpdateMessage = 'Consultando el canal oficial y verificando la firma…';
     launcherUpdateNotes = '';

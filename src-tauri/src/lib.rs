@@ -233,6 +233,7 @@ struct ModInventory {
 const INSTALL_LOG_MAX_BYTES: u64 = 1_048_576;
 const INSTALL_LOG_MAX_MESSAGE_BYTES: usize = 16 * 1024;
 static INSTALL_LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static SETTINGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn is_valid_theme(theme_id: &str) -> bool {
     matches!(
@@ -476,26 +477,76 @@ fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("settings.json"))
 }
 
-fn read_settings(app: &AppHandle) -> Result<Settings, String> {
-    let path = settings_path(app)?;
-    match fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map_err(|error| format!("No se pudo leer {}: {error}", path.display())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Settings::default()),
+fn read_settings_file(path: &Path) -> Result<(Settings, Option<PathBuf>), String> {
+    match fs::read(path) {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(settings) => Ok((settings, None)),
+            Err(parse_error) => {
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
+                let filename = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy();
+                let backup = path.with_file_name(format!("{filename}.corrupt-{timestamp}"));
+                fs::rename(path, &backup).map_err(|rename_error| {
+                    format!(
+                        "La configuración {} no es válida ({parse_error}) y no se pudo conservar una copia en {}: {rename_error}",
+                        path.display(),
+                        backup.display()
+                    )
+                })?;
+                let defaults = Settings::default();
+                write_settings_file(path, &defaults)?;
+                Ok((defaults, Some(backup)))
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok((Settings::default(), None))
+        }
         Err(error) => Err(format!("No se pudo leer {}: {error}", path.display())),
     }
 }
 
-fn write_settings(app: &AppHandle, settings: &Settings) -> Result<(), String> {
+fn read_settings(app: &AppHandle) -> Result<Settings, String> {
+    let _guard = SETTINGS_LOCK
+        .lock()
+        .map_err(|_| "El bloqueo de configuración local dejó de estar disponible".to_string())?;
     let path = settings_path(app)?;
+    let (settings, backup) = read_settings_file(&path)?;
+    if let Some(backup) = backup {
+        let _ = append_install_log(
+            app,
+            "launcher",
+            "Configuración",
+            &format!(
+                "La configuración dañada se conservó en {}; el launcher restauró valores predeterminados.",
+                backup.display()
+            ),
+        );
+    }
+    Ok(settings)
+}
+
+fn write_settings_file(path: &Path, settings: &Settings) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(settings).map_err(|error| error.to_string())?;
     let mut file = AtomicWriteFile::options()
-        .open(&path)
+        .open(path)
         .map_err(|error| format!("No se pudo preparar la configuración: {error}"))?;
     file.write_all(&bytes)
         .map_err(|error| format!("No se pudo escribir la configuración: {error}"))?;
     file.commit()
         .map_err(|error| format!("No se pudo confirmar la configuración: {error}"))
+}
+
+fn write_settings(app: &AppHandle, settings: &Settings) -> Result<(), String> {
+    let _guard = SETTINGS_LOCK
+        .lock()
+        .map_err(|_| "El bloqueo de configuración local dejó de estar disponible".to_string())?;
+    let path = settings_path(app)?;
+    write_settings_file(&path, settings)
 }
 
 fn valid_game_dir(path: &Path) -> Result<PathBuf, String> {
@@ -717,6 +768,38 @@ fn read_log_tail(path: &Path, max_bytes: u64) -> Result<Option<String>, String> 
         text.as_ref()
     };
     Ok(Some(text.to_string()))
+}
+
+#[cfg(test)]
+mod settings_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_settings_are_preserved_and_replaced_with_valid_defaults() {
+        let fixture = std::env::temp_dir().join(format!(
+            "eternalcraft-settings-recovery-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&fixture).unwrap();
+        let path = fixture.join("settings.json");
+        let malformed = b"{ this is not valid settings json";
+        fs::write(&path, malformed).unwrap();
+
+        let (settings, backup) = read_settings_file(&path).unwrap();
+        let backup = backup.expect("malformed settings should be preserved");
+        assert_eq!(fs::read(&backup).unwrap(), malformed);
+        assert!(settings.active_series_id.is_none());
+        assert!(settings.game_directories.is_empty());
+        let saved: Settings = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(saved.active_series_id.is_none());
+        assert!(read_settings_file(&path).unwrap().1.is_none());
+
+        fs::remove_dir_all(fixture).unwrap();
+    }
 }
 
 #[cfg(test)]

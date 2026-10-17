@@ -343,19 +343,27 @@ fn pending_device_code_matches(
     pending.is_some_and(|pending| pending.device_code == expected_code)
 }
 
-fn current_authorization_status(state: &DeveloperState, expected_code: &str) -> DeveloperLoginStatus {
-    state
-        .pending
-        .as_ref()
-        .filter(|pending| pending_device_code_matches(Some(pending), expected_code))
-        .map(|pending| pending_status(pending, None))
-        .or_else(|| state.pending.as_ref().map(|pending| pending_status(pending, None)))
-        .unwrap_or_else(|| {
-            login_status(
-                "signedOut",
-                Some("La autorización fue cancelada o reemplazada."),
-            )
-        })
+fn current_authorization_status(state: &DeveloperState) -> DeveloperLoginStatus {
+    if let Some(pending) = state.pending.as_ref() {
+        return pending_status(pending, None);
+    }
+    if let Some(session) = state.session.as_ref().filter(|session| {
+        !session.expires_at.is_some_and(|deadline| Instant::now() >= deadline)
+    }) {
+        return DeveloperLoginStatus {
+            status: "authorized".into(),
+            username: Some(session.username.clone()),
+            user_code: None,
+            verification_uri: None,
+            expires_in_seconds: None,
+            interval_seconds: None,
+            message: None,
+        };
+    }
+    login_status(
+        "signedOut",
+        Some("La autorización fue cancelada o reemplazada."),
+    )
 }
 
 #[tauri::command]
@@ -406,7 +414,7 @@ pub(super) fn poll_github_developer_login(
         .lock()
         .map_err(|_| "El estado de autorización GitHub quedó bloqueado".to_string())?;
     if !pending_device_code_matches(state.pending.as_ref(), &device_code) {
-        return Ok(current_authorization_status(&state, &device_code));
+        return Ok(current_authorization_status(&state));
     }
     match token.error.as_deref() {
         Some("authorization_pending") => {
@@ -463,7 +471,7 @@ pub(super) fn poll_github_developer_login(
                 .lock()
                 .map_err(|_| "El estado de autorización GitHub quedó bloqueado".to_string())?;
             if !pending_device_code_matches(state.pending.as_ref(), &device_code) {
-                return Ok(current_authorization_status(&state, &device_code));
+                return Ok(current_authorization_status(&state));
             }
             state.pending = None;
             return Ok(login_status("failed", Some(&message)));
@@ -474,7 +482,7 @@ pub(super) fn poll_github_developer_login(
         .lock()
         .map_err(|_| "El estado de autorización GitHub quedó bloqueado".to_string())?;
     if !pending_device_code_matches(state.pending.as_ref(), &device_code) {
-        return Ok(current_authorization_status(&state, &device_code));
+        return Ok(current_authorization_status(&state));
     }
     state.pending = None;
     state.session = Some(GitHubSession {
@@ -2174,6 +2182,47 @@ mod tests {
             "old-device-code"
         ));
         assert!(!pending_device_code_matches(None, "old-device-code"));
+    }
+
+    #[test]
+    fn stale_authorization_poll_reports_the_current_pending_or_valid_session() {
+        let pending = PendingDeviceAuthorization {
+            client_id: "client-id".into(),
+            device_code: "new-device-code".into(),
+            user_code: "ABCD-1234".into(),
+            interval: Duration::from_secs(5),
+            expires_at: Instant::now() + Duration::from_secs(60),
+            next_poll_at: Instant::now(),
+        };
+        let state = DeveloperState {
+            pending: Some(pending),
+            ..DeveloperState::default()
+        };
+        let status = current_authorization_status(&state);
+        assert_eq!(status.status, "pending");
+        assert_eq!(status.user_code.as_deref(), Some("ABCD-1234"));
+
+        let state = DeveloperState {
+            session: Some(GitHubSession {
+                username: "Santi-PdR".into(),
+                access_token: "token".into(),
+                expires_at: None,
+            }),
+            ..DeveloperState::default()
+        };
+        let status = current_authorization_status(&state);
+        assert_eq!(status.status, "authorized");
+        assert_eq!(status.username.as_deref(), Some("Santi-PdR"));
+
+        let state = DeveloperState {
+            session: Some(GitHubSession {
+                username: "expired-user".into(),
+                access_token: "token".into(),
+                expires_at: Some(Instant::now() - Duration::from_secs(1)),
+            }),
+            ..DeveloperState::default()
+        };
+        assert_eq!(current_authorization_status(&state).status, "signedOut");
     }
 
     #[test]

@@ -22,7 +22,8 @@ use mc_launcher_core::{
     runtime::{get_executable_path, get_installed_jvm_runtimes},
 };
 use serde::{Deserialize, Serialize};
-use sysinfo::System;
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+use std::ffi::{OsStr, OsString};
 use std::sync::{OnceLock, RwLock};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -1822,8 +1823,116 @@ fn create_loaded_mod_alias(personal_file: &Path, loaded_file: &Path) -> Result<(
 }
 
 fn ensure_series_not_running(app: &AppHandle, series_id: &str) -> Result<(), String> {
-    let status = get_minecraft_status(app.clone())?;
-    ensure_series_status_not_running(&status, series_id)
+    let status = get_minecraft_status_sync(app.clone())?;
+    ensure_series_status_not_running(&status, series_id)?;
+    if let Some(game_directory) = resolve_isolated_series_game_directory(app, series_id)? {
+        ensure_game_directory_not_running(&game_directory)?;
+    }
+    Ok(())
+}
+
+fn ensure_game_directory_not_running(game_directory: &Path) -> Result<(), String> {
+    if let Some(pid) = find_running_minecraft_pid(game_directory) {
+        return Err(format!(
+            "Minecraft de esta instancia (PID {pid}) sigue ejecutándose. Ciérralo antes de cambiar sus mods o actualizar el pack."
+        ));
+    }
+    Ok(())
+}
+
+fn java_process_name(name: &OsStr) -> bool {
+    matches!(
+        name.to_string_lossy().to_ascii_lowercase().as_str(),
+        "java" | "java.exe" | "javaw" | "javaw.exe"
+    )
+}
+
+fn game_directory_argument(args: &[OsString]) -> Option<PathBuf> {
+    for (index, arg) in args.iter().enumerate() {
+        if arg == OsStr::new("--gameDir") {
+            return args.get(index + 1).map(PathBuf::from);
+        }
+        if let Some(value) = arg.to_string_lossy().strip_prefix("--gameDir=") {
+            return Some(PathBuf::from(value));
+        }
+    }
+    None
+}
+
+fn normalized_process_path(path: &Path, working_directory: Option<&Path>) -> Option<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        working_directory?.join(path)
+    };
+    Some(absolute.canonicalize().unwrap_or(absolute))
+}
+
+fn paths_equal_for_process_check(left: &Path, right: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        left.to_string_lossy()
+            .replace('/', "\\")
+            .eq_ignore_ascii_case(&right.to_string_lossy().replace('/', "\\"))
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
+}
+
+fn process_is_minecraft_for_directory(process: &sysinfo::Process, game_directory: &Path) -> bool {
+    if !java_process_name(process.name())
+        && !process
+            .exe()
+            .and_then(Path::file_name)
+            .is_some_and(java_process_name)
+    {
+        return false;
+    }
+    let Some(process_directory) = game_directory_argument(process.cmd())
+        .and_then(|path| normalized_process_path(&path, process.cwd()))
+    else {
+        return false;
+    };
+    let expected_directory = game_directory
+        .canonicalize()
+        .unwrap_or_else(|_| game_directory.to_path_buf());
+    paths_equal_for_process_check(&process_directory, &expected_directory)
+}
+
+fn find_running_minecraft_pid(game_directory: &Path) -> Option<u32> {
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing()
+            .without_tasks()
+            .with_cmd(UpdateKind::Always)
+            .with_cwd(UpdateKind::Always),
+    );
+    system
+        .processes()
+        .values()
+        .find(|process| process_is_minecraft_for_directory(process, game_directory))
+        .map(|process| process.pid().as_u32())
+}
+
+fn detect_external_minecraft(app: &AppHandle) -> Result<Option<MinecraftStatus>, String> {
+    for series in current_catalog()?.series {
+        if let Some(game_directory) = resolve_isolated_series_game_directory(app, &series.id)? {
+            if let Some(pid) = find_running_minecraft_pid(&game_directory) {
+                return Ok(Some(MinecraftStatus {
+                    running: true,
+                    series_id: Some(series.id),
+                    pid: Some(pid),
+                    exit_code: None,
+                    exit_success: None,
+                }));
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn ensure_series_status_not_running(status: &MinecraftStatus, series_id: &str) -> Result<(), String> {
@@ -2930,7 +3039,13 @@ fn minecraft_exit_status(series_id: &str, pid: u32, status: std::process::ExitSt
 }
 
 #[tauri::command]
-fn get_minecraft_status(app: AppHandle) -> Result<MinecraftStatus, String> {
+async fn get_minecraft_status(app: AppHandle) -> Result<MinecraftStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || get_minecraft_status_sync(app))
+        .await
+        .map_err(|error| format!("Falló la consulta del estado de Minecraft: {error}"))?
+}
+
+fn get_minecraft_status_sync(app: AppHandle) -> Result<MinecraftStatus, String> {
     let process = app.state::<MinecraftProcess>();
     let mut state = process
         .0
@@ -2950,7 +3065,18 @@ fn get_minecraft_status(app: AppHandle) -> Result<MinecraftStatus, String> {
             }
             Err(error) => return Err(format!("No se pudo consultar Minecraft: {error}")),
         },
-        None => return Ok(state.last_status.clone()),
+        None => {
+            if let Some(external) = detect_external_minecraft(&app)? {
+                state.last_status = external.clone();
+                return Ok(external);
+            }
+            if state.last_status.running {
+                state.last_status.running = false;
+                state.last_status.exit_code = None;
+                state.last_status.exit_success = None;
+            }
+            return Ok(state.last_status.clone());
+        }
     };
     let (series_id, pid, exit) = completed.ok_or_else(|| "No se pudo recuperar el estado de salida de Minecraft".to_string())?;
     let exit_success = exit.success();
@@ -3043,6 +3169,7 @@ fn launch_minecraft_sync(app: AppHandle, series_id: String) -> Result<MinecraftS
     let _pack_guard = pack::lock_pack_sync()?;
     let game_dir = resolve_isolated_series_game_directory(&app, &series_id)?
         .ok_or_else(|| "Selecciona o instala la carpeta de juego de esta serie primero.".to_string())?;
+    ensure_game_directory_not_running(&game_dir)?;
     verify_forge_profile(&game_dir, &series)?;
     pack::verify_installed_pack_locked(&game_dir, &series_id)?;
     let profile_id = expected_profile_id(&series).ok_or_else(|| "No se pudo determinar el perfil del juego".to_string())?;
@@ -3303,6 +3430,7 @@ async fn install_forge_base(app: AppHandle, series_id: String) -> Result<Bootstr
             // El mismo bloqueo evita escrituras concurrentes y lanzar durante la instalación.
             let _guard = pack::lock_pack_sync()?;
             ensure_series_not_running(&log_app, &log_series)?;
+            ensure_game_directory_not_running(&game_dir)?;
             install_forge_profile(
                 app_handle,
                 series.id.clone(),
@@ -3373,6 +3501,7 @@ async fn select_game_directory(app: AppHandle, series_id: String) -> Result<Boot
     let chosen = valid_game_dir(&chosen)?;
     let _guard = pack::lock_pack_sync()?;
     ensure_series_not_running(&app, &series_id)?;
+    ensure_game_directory_not_running(&chosen)?;
     update_settings(&app, |settings| {
         ensure_game_directory_isolated(&app, settings, &series_id, &chosen)?;
         settings.active_series_id = Some(series_id.clone());
@@ -3397,6 +3526,7 @@ fn link_detected_directory(app: AppHandle, series_id: String) -> Result<Bootstra
     let path = valid_game_dir(Path::new(path))?;
     let _guard = pack::lock_pack_sync()?;
     ensure_series_not_running(&app, &series_id)?;
+    ensure_game_directory_not_running(&path)?;
     update_settings(&app, |settings| {
         ensure_game_directory_isolated(&app, settings, &series_id, &path)?;
         settings.active_series_id = Some(series_id.clone());
@@ -3603,6 +3733,36 @@ mod tests {
         assert!(state.active.is_none());
         assert!(state.shutting_down);
         assert!(super::ensure_forge_installer_can_start(&state).is_err());
+    }
+
+    #[test]
+    fn minecraft_game_directory_argument_accepts_mojang_argument_shapes() {
+        use std::ffi::OsString;
+        assert_eq!(
+            super::game_directory_argument(&[
+                OsString::from("net.minecraft.client.main.Main"),
+                OsString::from("--gameDir"),
+                OsString::from("/games/siege"),
+            ]),
+            Some(std::path::PathBuf::from("/games/siege"))
+        );
+        assert_eq!(
+            super::game_directory_argument(&[OsString::from("--gameDir=/games/ghouls")]),
+            Some(std::path::PathBuf::from("/games/ghouls"))
+        );
+        assert_eq!(
+            super::game_directory_argument(&[OsString::from("--assetsDir=/games/siege/assets")]),
+            None
+        );
+    }
+
+    #[test]
+    fn java_process_name_recognizes_java_and_javaw_only() {
+        use std::ffi::OsStr;
+        assert!(super::java_process_name(OsStr::new("java")));
+        assert!(super::java_process_name(OsStr::new("javaw.exe")));
+        assert!(!super::java_process_name(OsStr::new("minecraft")));
+        assert!(!super::java_process_name(OsStr::new("java-helper")));
     }
 
     #[test]

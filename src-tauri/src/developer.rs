@@ -340,30 +340,57 @@ pub(super) fn begin_github_developer_login(app: AppHandle) -> Result<DeveloperLo
     })
 }
 
+fn pending_device_code_matches(
+    pending: Option<&PendingDeviceAuthorization>,
+    expected_code: &str,
+) -> bool {
+    pending.is_some_and(|pending| pending.device_code == expected_code)
+}
+
+fn current_authorization_status(state: &DeveloperState, expected_code: &str) -> DeveloperLoginStatus {
+    state
+        .pending
+        .as_ref()
+        .filter(|pending| pending_device_code_matches(Some(pending), expected_code))
+        .map(|pending| pending_status(pending, None))
+        .or_else(|| state.pending.as_ref().map(|pending| pending_status(pending, None)))
+        .unwrap_or_else(|| {
+            login_status(
+                "signedOut",
+                Some("La autorización fue cancelada o reemplazada."),
+            )
+        })
+}
+
 #[tauri::command]
 pub(super) fn poll_github_developer_login(
     app: AppHandle,
 ) -> Result<DeveloperLoginStatus, String> {
     let developer = app.state::<GitHubDeveloper>();
-    let mut state = developer
-        .0
-        .lock()
-        .map_err(|_| "El estado de autorización GitHub quedó bloqueado".to_string())?;
-    let pending = state
-        .pending
-        .as_mut()
-        .ok_or_else(|| "No hay una autorización GitHub pendiente".to_string())?;
-    let now = Instant::now();
-    if now >= pending.expires_at {
-        state.pending = None;
-        return Ok(login_status("expired", Some("El código de GitHub venció; inicia el proceso otra vez.")));
-    }
-    if now < pending.next_poll_at {
-        return Ok(pending_status(pending, None));
-    }
-    pending.next_poll_at = now + pending.interval;
-    let client_id = pending.client_id.clone();
-    let device_code = pending.device_code.clone();
+    let (client_id, device_code) = {
+        let mut state = developer
+            .0
+            .lock()
+            .map_err(|_| "El estado de autorización GitHub quedó bloqueado".to_string())?;
+        let pending = state
+            .pending
+            .as_mut()
+            .ok_or_else(|| "No hay una autorización GitHub pendiente".to_string())?;
+        let now = Instant::now();
+        if now >= pending.expires_at {
+            state.pending = None;
+            return Ok(login_status(
+                "expired",
+                Some("El código de GitHub venció; inicia el proceso otra vez."),
+            ));
+        }
+        if now < pending.next_poll_at {
+            return Ok(pending_status(pending, None));
+        }
+        pending.next_poll_at = now + pending.interval;
+        (pending.client_id.clone(), pending.device_code.clone())
+    };
+
     let client = http::client().map_err(|error| error.to_string())?;
     let response = client
         .post(GITHUB_ACCESS_TOKEN_URL)
@@ -379,10 +406,18 @@ pub(super) fn poll_github_developer_login(
     let token: TokenResponse = response
         .json()
         .map_err(|error| format!("GitHub devolvió un estado de autorización inválido: {error}"))?;
+
+    let mut state = developer
+        .0
+        .lock()
+        .map_err(|_| "El estado de autorización GitHub quedó bloqueado".to_string())?;
+    if !pending_device_code_matches(state.pending.as_ref(), &device_code) {
+        return Ok(current_authorization_status(&state, &device_code));
+    }
     match token.error.as_deref() {
         Some("authorization_pending") => {
             return Ok(pending_status(
-                state.pending.as_ref().expect("pending device login exists"),
+                state.pending.as_ref().expect("matching pending device login"),
                 None,
             ));
         }
@@ -392,7 +427,7 @@ pub(super) fn poll_github_developer_login(
                 pending.next_poll_at = Instant::now() + pending.interval;
             }
             return Ok(pending_status(
-                state.pending.as_ref().expect("pending device login exists"),
+                state.pending.as_ref().expect("matching pending device login"),
                 Some("GitHub pidió espaciar las consultas; el launcher ajustó el intervalo."),
             ));
         }
@@ -402,18 +437,26 @@ pub(super) fn poll_github_developer_login(
         }
         Some("expired_token") => {
             state.pending = None;
-            return Ok(login_status("expired", Some("El código de GitHub venció; inicia el proceso otra vez.")));
+            return Ok(login_status(
+                "expired",
+                Some("El código de GitHub venció; inicia el proceso otra vez."),
+            ));
         }
         Some(error) => {
             state.pending = None;
-            return Ok(login_status("failed", Some(token.error_description.as_deref().unwrap_or(error))));
+            return Ok(login_status(
+                "failed",
+                Some(token.error_description.as_deref().unwrap_or(error)),
+            ));
         }
         None => {}
     }
     let access_token = token
         .access_token
         .ok_or_else(|| "GitHub no devolvió un token de acceso".to_string())?;
-    let expires_at = token.expires_in.map(|seconds| Instant::now() + Duration::from_secs(seconds));
+    let expires_at = token
+        .expires_in
+        .map(|seconds| Instant::now() + Duration::from_secs(seconds));
     drop(state);
 
     let user = match get_github_user(&access_token)
@@ -421,9 +464,14 @@ pub(super) fn poll_github_developer_login(
     {
         Ok(user) => user,
         Err(message) => {
-            if let Ok(mut state) = developer.0.lock() {
-                state.pending = None;
+            let mut state = developer
+                .0
+                .lock()
+                .map_err(|_| "El estado de autorización GitHub quedó bloqueado".to_string())?;
+            if !pending_device_code_matches(state.pending.as_ref(), &device_code) {
+                return Ok(current_authorization_status(&state, &device_code));
             }
+            state.pending = None;
             return Ok(login_status("failed", Some(&message)));
         }
     };
@@ -431,6 +479,9 @@ pub(super) fn poll_github_developer_login(
         .0
         .lock()
         .map_err(|_| "El estado de autorización GitHub quedó bloqueado".to_string())?;
+    if !pending_device_code_matches(state.pending.as_ref(), &device_code) {
+        return Ok(current_authorization_status(&state, &device_code));
+    }
     state.pending = None;
     state.session = Some(GitHubSession {
         username: user.login.clone(),
@@ -2061,6 +2112,27 @@ mod tests {
         ));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn stale_device_authorization_responses_cannot_replace_a_new_flow() {
+        let pending = PendingDeviceAuthorization {
+            client_id: "client-id".into(),
+            device_code: "new-device-code".into(),
+            user_code: "ABCD-1234".into(),
+            interval: Duration::from_secs(5),
+            expires_at: Instant::now() + Duration::from_secs(60),
+            next_poll_at: Instant::now(),
+        };
+        assert!(pending_device_code_matches(
+            Some(&pending),
+            "new-device-code"
+        ));
+        assert!(!pending_device_code_matches(
+            Some(&pending),
+            "old-device-code"
+        ));
+        assert!(!pending_device_code_matches(None, "old-device-code"));
     }
 
     #[test]

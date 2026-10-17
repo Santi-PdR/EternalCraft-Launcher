@@ -1829,17 +1829,6 @@ fn add_personal_mod(source: &Path, mods_directory: &Path) -> Result<String, Stri
     add_personal_mod_inner(source, mods_directory)
 }
 
-fn add_personal_mod_for_series(
-    app: &AppHandle,
-    series_id: &str,
-    source: &Path,
-    mods_directory: &Path,
-) -> Result<String, String> {
-    let _guard = pack::lock_pack_sync()?;
-    ensure_series_not_running(app, series_id)?;
-    add_personal_mod_inner(source, mods_directory)
-}
-
 fn add_personal_mod_inner(source: &Path, mods_directory: &Path) -> Result<String, String> {
     add_personal_mod_inner_with_limit(source, mods_directory, pack::MOD_LIMIT)
 }
@@ -1924,17 +1913,6 @@ fn remove_personal_mod(name: &str, mods_directory: &Path) -> Result<(), String> 
     remove_personal_mod_inner(name, mods_directory)
 }
 
-fn remove_personal_mod_for_series(
-    app: &AppHandle,
-    series_id: &str,
-    name: &str,
-    mods_directory: &Path,
-) -> Result<(), String> {
-    let _guard = pack::lock_pack_sync()?;
-    ensure_series_not_running(app, series_id)?;
-    remove_personal_mod_inner(name, mods_directory)
-}
-
 fn remove_personal_mod_inner(name: &str, mods_directory: &Path) -> Result<(), String> {
     validate_personal_mod_name(name)?;
     let personal_directory = mods_directory.join("personales");
@@ -1985,17 +1963,6 @@ fn remove_personal_mod_inner(name: &str, mods_directory: &Path) -> Result<(), St
 
 fn activate_personal_mod(name: &str, mods_directory: &Path) -> Result<(), String> {
     let _guard = pack::lock_pack_sync()?;
-    activate_personal_mod_inner(name, mods_directory)
-}
-
-fn activate_personal_mod_for_series_inner(
-    app: &AppHandle,
-    series_id: &str,
-    name: &str,
-    mods_directory: &Path,
-) -> Result<(), String> {
-    let _guard = pack::lock_pack_sync()?;
-    ensure_series_not_running(app, series_id)?;
     activate_personal_mod_inner(name, mods_directory)
 }
 
@@ -2583,15 +2550,14 @@ async fn sync_official_pack(
     if series.pack_status != PackStatus::Available {
         return Err("Esta serie todavía no tiene un pack oficial publicado".into());
     }
-    let game_dir = resolve_isolated_series_game_directory(&app, &series_id)?.ok_or_else(|| {
-        "Primero instala o vincula una carpeta de juego para esta serie".to_string()
-    })?;
-    verify_forge_profile(&game_dir, &series)?;
     let progress_app = app.clone();
     let guard_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = pack::lock_pack_sync()?;
         ensure_series_not_running(&guard_app, &series_id)?;
+        let game_dir = resolve_isolated_series_game_directory(&guard_app, &series_id)?
+            .ok_or_else(|| "Primero instala o vincula una carpeta de juego para esta serie".to_string())?;
+        verify_forge_profile(&game_dir, &series)?;
         pack::sync_pack_locked(
             &game_dir,
             &series_id,
@@ -3043,13 +3009,12 @@ fn launch_minecraft(app: AppHandle, series_id: String) -> Result<MinecraftStatus
     } else {
         return Err("Inicia sesión con Microsoft o configura un perfil local con nombre para jugar.".into());
     };
+    // Hold the instance lock before resolving its configured directory. Folder
+    // changes use the same lock, so this launch cannot keep a stale path snapshot.
+    let _pack_guard = pack::lock_pack_sync()?;
     let game_dir = resolve_isolated_series_game_directory(&app, &series_id)?
         .ok_or_else(|| "Selecciona o instala la carpeta de juego de esta serie primero.".to_string())?;
     verify_forge_profile(&game_dir, &series)?;
-    // Keep the official and personal mod set stable from verification until
-    // Minecraft has been spawned. Pack sync and personal-mod operations share
-    // this lock, so they cannot race the launch validation.
-    let _pack_guard = pack::lock_pack_sync()?;
     pack::verify_installed_pack_locked(&game_dir, &series_id)?;
     let profile_id = expected_profile_id(&series).ok_or_else(|| "No se pudo determinar el perfil del juego".to_string())?;
     let mut java = if let Some(path) = settings.java_executable.as_deref() {
@@ -3193,7 +3158,12 @@ fn add_personal_mod_to_series(app: AppHandle, series_id: String) -> Result<ModIn
     let source = selected
         .into_path()
         .map_err(|error| format!("Ruta del mod no válida: {error}"))?;
-    add_personal_mod_for_series(&app, &series_id, &source, &game_directory.join("mods"))?;
+    let _guard = pack::lock_pack_sync()?;
+    ensure_series_not_running(&app, &series_id)?;
+    let game_directory = resolve_isolated_series_game_directory(&app, &series_id)?
+        .ok_or_else(|| "La carpeta de juego de esta serie ya no está disponible".to_string())?;
+    add_personal_mod_inner(&source, &game_directory.join("mods"))?;
+    drop(_guard);
     get_mod_inventory(app, series_id)
 }
 
@@ -3203,14 +3173,12 @@ fn activate_personal_mod_for_series(
     series_id: String,
     file_name: String,
 ) -> Result<ModInventory, String> {
+    let _guard = pack::lock_pack_sync()?;
+    ensure_series_not_running(&app, &series_id)?;
     let game_directory = resolve_isolated_series_game_directory(&app, &series_id)?
         .ok_or_else(|| "No hay una carpeta de juego seleccionada para esta serie".to_string())?;
-    activate_personal_mod_for_series_inner(
-        &app,
-        &series_id,
-        &file_name,
-        &game_directory.join("mods"),
-    )?;
+    activate_personal_mod_inner(&file_name, &game_directory.join("mods"))?;
+    drop(_guard);
     get_mod_inventory(app, series_id)
 }
 
@@ -3220,9 +3188,12 @@ fn remove_personal_mod_from_series(
     series_id: String,
     file_name: String,
 ) -> Result<ModInventory, String> {
+    let _guard = pack::lock_pack_sync()?;
+    ensure_series_not_running(&app, &series_id)?;
     let game_directory = resolve_isolated_series_game_directory(&app, &series_id)?
         .ok_or_else(|| "No hay una carpeta de juego seleccionada para esta serie".to_string())?;
-    remove_personal_mod_for_series(&app, &series_id, &file_name, &game_directory.join("mods"))?;
+    remove_personal_mod_inner(&file_name, &game_directory.join("mods"))?;
+    drop(_guard);
     get_mod_inventory(app, series_id)
 }
 
@@ -3368,6 +3339,8 @@ async fn select_game_directory(app: AppHandle, series_id: String) -> Result<Boot
         .into_path()
         .map_err(|error| format!("Ruta de carpeta no válida: {error}"))?;
     let chosen = valid_game_dir(&chosen)?;
+    let _guard = pack::lock_pack_sync()?;
+    ensure_series_not_running(&app, &series_id)?;
     update_settings(&app, |settings| {
         ensure_game_directory_isolated(&app, settings, &series_id, &chosen)?;
         settings.active_series_id = Some(series_id.clone());
@@ -3390,6 +3363,8 @@ fn link_detected_directory(app: AppHandle, series_id: String) -> Result<Bootstra
         .get(&series_id)
         .ok_or_else(|| "No se encontró una instancia compatible para esta serie".to_string())?;
     let path = valid_game_dir(Path::new(path))?;
+    let _guard = pack::lock_pack_sync()?;
+    ensure_series_not_running(&app, &series_id)?;
     update_settings(&app, |settings| {
         ensure_game_directory_isolated(&app, settings, &series_id, &path)?;
         settings.active_series_id = Some(series_id.clone());

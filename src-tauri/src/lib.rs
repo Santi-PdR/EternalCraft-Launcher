@@ -2859,6 +2859,29 @@ fn bind_microsoft_callback_listeners(
     Ok((ipv4, ipv6))
 }
 
+fn microsoft_oauth_callback_error(
+    callback: &reqwest::Url,
+    expected_state: &str,
+) -> Option<&'static str> {
+    let mut callback_state = None;
+    let mut provider_error = None;
+    for (key, value) in callback.query_pairs() {
+        match key.as_ref() {
+            "state" if callback_state.is_none() => callback_state = Some(value.into_owned()),
+            "error" if provider_error.is_none() => provider_error = Some(value.into_owned()),
+            "state" | "error" => return None,
+            _ => {}
+        }
+    }
+    if callback_state.as_deref() != Some(expected_state) {
+        return None;
+    }
+    match provider_error.as_deref()? {
+        "access_denied" => Some("Inicio de sesión Microsoft cancelado o denegado. Puedes intentarlo de nuevo."),
+        _ => Some("Microsoft no pudo completar el inicio de sesión. Inténtalo de nuevo."),
+    }
+}
+
 fn accept_microsoft_callback(
     listener: &std::net::TcpListener,
     redirect_uri: &str,
@@ -2903,7 +2926,14 @@ fn accept_microsoft_callback(
     let auth_code = match parse_auth_code_url(&callback, Some(expected_state.to_string())) {
         Ok(code) => code,
         Err(_) => {
-            let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nNo se pudo validar el inicio de sesion.");
+            let oauth_error = reqwest::Url::parse(&callback)
+                .ok()
+                .and_then(|url| microsoft_oauth_callback_error(&url, expected_state));
+            if let Some(message) = oauth_error {
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\\r\\nContent-Type: text/plain; charset=utf-8\\r\\nConnection: close\\r\\n\\r\\nInicio de sesion cancelado. Puedes cerrar esta pestana.");
+                return Err(message.to_string());
+            }
+            let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\\r\\nConnection: close\\r\\n\\r\\nNo se pudo validar el inicio de sesion.");
             return Ok(None);
         }
     };
@@ -4014,6 +4044,34 @@ mod tests {
             Some("expected".to_string())
         )
         .is_err());
+    }
+
+    #[test]
+    fn microsoft_callback_reports_provider_denial_only_after_matching_state() {
+        let denied = reqwest::Url::parse(
+            "http://localhost:49152/?error=access_denied&state=expected",
+        )
+        .unwrap();
+        assert_eq!(
+            microsoft_oauth_callback_error(&denied, "expected"),
+            Some("Inicio de sesión Microsoft cancelado o denegado. Puedes intentarlo de nuevo.")
+        );
+        assert_eq!(microsoft_oauth_callback_error(&denied, "attacker"), None);
+
+        let failed = reqwest::Url::parse(
+            "http://localhost:49152/?error=temporarily_unavailable&state=expected",
+        )
+        .unwrap();
+        assert_eq!(
+            microsoft_oauth_callback_error(&failed, "expected"),
+            Some("Microsoft no pudo completar el inicio de sesión. Inténtalo de nuevo.")
+        );
+
+        let duplicate_state = reqwest::Url::parse(
+            "http://localhost:49152/?error=access_denied&state=expected&state=attacker",
+        )
+        .unwrap();
+        assert_eq!(microsoft_oauth_callback_error(&duplicate_state, "expected"), None);
     }
 
     #[test]

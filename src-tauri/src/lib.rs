@@ -3269,7 +3269,7 @@ async fn install_forge_base(app: AppHandle, series_id: String) -> Result<Bootstr
                 completed_files: 0,
             },
         );
-        let result = (|| {
+        let result: Result<(), String> = (|| -> Result<(), String> {
             // Forge comparte el directorio de la instancia con el pack y los mods.
             // El mismo bloqueo evita escrituras concurrentes y lanzar durante la instalación.
             let _guard = pack::lock_pack_sync()?;

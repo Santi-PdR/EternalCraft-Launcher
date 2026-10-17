@@ -1,0 +1,664 @@
+{
+  "schemaVersion": 1,
+  "seriesId": "ghouls-outbreak",
+  "version": "1.0.0",
+  "minecraftVersion": "1.20.1",
+  "loader": "Forge",
+  "loaderVersion": "47.4.10",
+  "files": [
+    {
+      "path": "mods/1.20.1.SecurityCraft.v1.9.12.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/1.20.1.SecurityCraft.v1.9.12.jar",
+      "sizeBytes": 4553681,
+      "sha256": "4f749406931e71b2d5cb005e8ccf795806d89e0dd4029724308e0cc72f3b5ae3"
+    },
+    {
+      "path": "mods/advanced-xray-forge-1.20.1-2.18.1-build.22.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/advanced-xray-forge-1.20.1-2.18.1-build.22.jar",
+      "sizeBytes": 146862,
+      "sha256": "d8894b190024135b706fb228e5f29336afc877d701b1690ec8df470ab3f35f77"
+    },
+    {
+      "path": "mods/alltheleaks-1.1.1+1.20.1-forge.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/alltheleaks-1.1.1%2B1.20.1-forge.jar",
+      "sizeBytes": 1187126,
+      "sha256": "7b8e945da294b745e6aed9f88f28e232a767e032d7c2b8137a8ef36421d9fb33"
+    },
+    {
+      "path": "mods/AmbientSounds_FORGE_v6.1.4_mc1.20.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/AmbientSounds_FORGE_v6.1.4_mc1.20.1.jar",
+      "sizeBytes": 83885724,
+      "sha256": "701e90966b207c6362daf4446cfac72eed550b7d9b16df3a5154e38615c55547"
+    },
+    {
+      "path": "mods/ApothicAttributes-1.20.1-1.3.7.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/ApothicAttributes-1.20.1-1.3.7.jar",
+      "sizeBytes": 227511,
+      "sha256": "68487b11c0d4e2f67a85f2b04bf65e99ac15294f2923f4391f83e9542293187a"
+    },
+    {
+      "path": "mods/appleskin-forge-mc1.20.1-2.5.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/appleskin-forge-mc1.20.1-2.5.1.jar",
+      "sizeBytes": 47428,
+      "sha256": "e12419e43e3babc810af289403c5cd96bd7f09809b389acc6bb2f122b4b2a426"
+    },
+    {
+      "path": "mods/architectury-9.2.14-forge.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/architectury-9.2.14-forge.jar",
+      "sizeBytes": 580602,
+      "sha256": "218b471d0b8a1f6cda14cfc1beb9eeb0df54304500acc6c5613d9b88ec65d9af"
+    },
+    {
+      "path": "mods/automobility-0.4.2+1.20.1-forge.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/automobility-0.4.2%2B1.20.1-forge.jar",
+      "sizeBytes": 1054094,
+      "sha256": "4ea3933ee2a9ffed5b739bbbf8a8c974737fd59cb6517c61c54b3eae9465ff54"
+    },
+    {
+      "path": "mods/BadMobs-1.20.1-19.0.4.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/BadMobs-1.20.1-19.0.4.jar",
+      "sizeBytes": 10425,
+      "sha256": "b36e64f510404c0984d7d5358e6e99937516d0eeab3ec534eaa638c8b29dfd85"
+    },
+    {
+      "path": "mods/bagus_lib-1.20.1-5.6.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/bagus_lib-1.20.1-5.6.1.jar",
+      "sizeBytes": 185510,
+      "sha256": "aeca001b9692235beb2a7c46cb110d55fc9ada0dbc8acff61dfa2f9e39158ffb"
+    },
+    {
+      "path": "mods/better-whips-forge-1.20.1-actualizado.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/better-whips-forge-1.20.1-actualizado.jar",
+      "sizeBytes": 4036817,
+      "sha256": "ed31316b4363260135e66c100157483c7cae46f5d6a5e9c5d7d991a3955c80d6"
+    },
+    {
+      "path": "mods/BetterClouds-1.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/BetterClouds-1.1.jar",
+      "sizeBytes": 416098,
+      "sha256": "791c7ae54521423e70d8c69a686184b2d2bf8fab76284a494d9c5670db817397"
+    },
+    {
+      "path": "mods/bettercombat-forge-1.9.0+1.20.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/bettercombat-forge-1.9.0%2B1.20.1.jar",
+      "sizeBytes": 1054339,
+      "sha256": "49c69dccf2c641246b4e3deca81ebac21f0ee119e81fc713b838b8e33569eea1"
+    },
+    {
+      "path": "mods/BetterPingDisplay-1.20.1-1.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/BetterPingDisplay-1.20.1-1.1.jar",
+      "sizeBytes": 15889,
+      "sha256": "055e30e18e836f41879093e9e60842019d529a0205a6fa0c05e607a3cc9815db"
+    },
+    {
+      "path": "mods/Bookshelf-Forge-1.20.1-20.2.15.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/Bookshelf-Forge-1.20.1-20.2.15.jar",
+      "sizeBytes": 343925,
+      "sha256": "7980d4a0beed1dcd2c283cf65f3c93f6b0085833f3ac490014979c95f1dfaf67"
+    },
+    {
+      "path": "mods/Brutality-TERMINADO.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/Brutality-TERMINADO.jar",
+      "sizeBytes": 41931612,
+      "sha256": "cbbe45802e99f5a0499a5b810ef3778033af98f12490c633fca781677837cf36"
+    },
+    {
+      "path": "mods/caelus-forge-3.2.0+1.20.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/caelus-forge-3.2.0%2B1.20.1.jar",
+      "sizeBytes": 40125,
+      "sha256": "37495445e79df8b30a3a038a0051f3c8aa8447f91a9d0aa0d20baef69dda9368"
+    },
+    {
+      "path": "mods/canary-mc1.20.1-0.3.3.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/canary-mc1.20.1-0.3.3.jar",
+      "sizeBytes": 594191,
+      "sha256": "51f6d78dd6c7874657e5757fd2f5d780aa3cd415052ad071077b8894c6430942"
+    },
+    {
+      "path": "mods/CerbonsAPI-Forge-1.20.1-1.1.0.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/CerbonsAPI-Forge-1.20.1-1.1.0.jar",
+      "sizeBytes": 241148,
+      "sha256": "54a0a20da56ab1af2d0d7f5cf1133c059a7523485d567521084f822e81505dfb"
+    },
+    {
+      "path": "mods/chat_heads-0.15.3-forge-1.20.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/chat_heads-0.15.3-forge-1.20.jar",
+      "sizeBytes": 722325,
+      "sha256": "a6690085e43aab04f3f6fa758f4d32d79b7617d16e502c3ffdd640bc518755aa"
+    },
+    {
+      "path": "mods/citadel-2.6.0-1.20.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/citadel-2.6.0-1.20.1.jar",
+      "sizeBytes": 3173174,
+      "sha256": "549596de295d90a84ee70625076087a9724dabca1de0567ef6ef03435aab7d5d"
+    },
+    {
+      "path": "mods/clientsort-forge-2.2.2+1.20.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/clientsort-forge-2.2.2%2B1.20.1.jar",
+      "sizeBytes": 944538,
+      "sha256": "5b355cd62843d471082d605f7347cfdf6ab987435a628923ba5925e43dc25a65"
+    },
+    {
+      "path": "mods/cloth-config-11.1.136-forge.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/cloth-config-11.1.136-forge.jar",
+      "sizeBytes": 1181413,
+      "sha256": "1e895e85cf5b1e1905ef3178ec155c8badfe22a1577b92c09143a5aa1f4ce0f2"
+    },
+    {
+      "path": "mods/Controlling-forge-1.20.1-12.0.2.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/Controlling-forge-1.20.1-12.0.2.jar",
+      "sizeBytes": 115280,
+      "sha256": "cff8c3426a77f9e7412262b6d79e423979eff3831e010b3b1ea9677e1ecd74cd"
+    },
+    {
+      "path": "mods/copyl-3.3.0.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/copyl-3.3.0.jar",
+      "sizeBytes": 43375,
+      "sha256": "b1c2bf9ebd32c259442f1abb30b658daff8c4b5d09decef3c73342a77373741b"
+    },
+    {
+      "path": "mods/create-1.20.1-0.5.1.j.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/create-1.20.1-0.5.1.j.jar",
+      "sizeBytes": 15583566,
+      "sha256": "a18763be04f6a7921d2e3bc5e9150b0bb5bc89b5ef45a607e93939972021f932"
+    },
+    {
+      "path": "mods/create_botanic_-0.2-forge-1.20.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/create_botanic_-0.2-forge-1.20.1.jar",
+      "sizeBytes": 473508,
+      "sha256": "b8303eaa03edc0b86034505d61452a2cee168ba56af8b3c8db969d2cce9dfb3b"
+    },
+    {
+      "path": "mods/create_enhanced-.Forge.1.20.1-132.34.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/create_enhanced-.Forge.1.20.1-132.34.jar",
+      "sizeBytes": 1779473,
+      "sha256": "8d8bc952fc59a36092e90572b21877a174e93c3cb837befcbb17560af00ca181"
+    },
+    {
+      "path": "mods/create_ultimate_factory-2.2.4-forge.1.20.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/create_ultimate_factory-2.2.4-forge.1.20.1.jar",
+      "sizeBytes": 232374,
+      "sha256": "0e7129ab79833e4e3a906bfc9fd0c63129572a14aff4100b6d3f130cc3048dde"
+    },
+    {
+      "path": "mods/CreativeCore_FORGE_v2.12.32_mc1.20.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/CreativeCore_FORGE_v2.12.32_mc1.20.1.jar",
+      "sizeBytes": 1158417,
+      "sha256": "3d2271f7d9d2e32fca46d19f3b6ab4372d30e0ea3eb26c809c23366e8d503e16"
+    },
+    {
+      "path": "mods/CullLessLeaves-Reforged-1.20.1-1.0.5.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/CullLessLeaves-Reforged-1.20.1-1.0.5.jar",
+      "sizeBytes": 22474,
+      "sha256": "b91ca5cd028b1c919e28851b984edd61874d44ad8038cdeee87315d2656cb292"
+    },
+    {
+      "path": "mods/curios-forge-5.14.1+1.20.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/curios-forge-5.14.1%2B1.20.1.jar",
+      "sizeBytes": 398066,
+      "sha256": "1e817919a35b37cf30524aaec73f0ca5130452f23f168f844854df282eb8e51f"
+    },
+    {
+      "path": "mods/darkesthoursElUltimodeHoyDia-1.0.0.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/darkesthoursElUltimodeHoyDia-1.0.0.jar",
+      "sizeBytes": 118987739,
+      "sha256": "5a790e02ca9b7f013b659e44ff6f1b8af77c0752054259305e3085b2800d61f4"
+    },
+    {
+      "path": "mods/DistantHorizons-3.3.3-1.20.1-fabric-forge.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/DistantHorizons-3.3.3-1.20.1-fabric-forge.jar",
+      "sizeBytes": 27700542,
+      "sha256": "a537a71171d935540b56b7598d0de2c106f6f5026336c713d89a1d9ea0ea14e3"
+    },
+    {
+      "path": "mods/dynamic-fps-3.11.4+minecraft-1.20.0-forge.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/dynamic-fps-3.11.4%2Bminecraft-1.20.0-forge.jar",
+      "sizeBytes": 402345,
+      "sha256": "b0ecdf3a0619208441062ceeebce79256223ac4e341844a09a6859170d671920"
+    },
+    {
+      "path": "mods/embeddium-0.3.31+mc1.20.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/embeddium-0.3.31%2Bmc1.20.1.jar",
+      "sizeBytes": 1320675,
+      "sha256": "eed3d1325f2acc2fd4e69bb495e5ccb91d962126ac5330f0582ebc2a3daf47fb"
+    },
+    {
+      "path": "mods/EnchantmentDescriptions-Forge-1.20.1-17.1.21.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/EnchantmentDescriptions-Forge-1.20.1-17.1.21.jar",
+      "sizeBytes": 66883,
+      "sha256": "909d1941d4ef6e4b7336738ee31380d6e1117c3c22feb70b64fed47f1cba2b07"
+    },
+    {
+      "path": "mods/enhancedai-2.6.8.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/enhancedai-2.6.8.jar",
+      "sizeBytes": 1212915,
+      "sha256": "5d76aee1fb0a7ddf256c8eb4126674b634375fb61653e8097e94a6aa25f99617"
+    },
+    {
+      "path": "mods/entityculling-forge-1.10.1-mc1.20.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/entityculling-forge-1.10.1-mc1.20.1.jar",
+      "sizeBytes": 1583021,
+      "sha256": "1231bb17e3db1a7d4e98800bb070ec1e7e7c016b934e1eb11c1cc63d11d0aa2d"
+    },
+    {
+      "path": "mods/farsighted-mobs-forge-1.1-1.20.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/farsighted-mobs-forge-1.1-1.20.1.jar",
+      "sizeBytes": 12335,
+      "sha256": "792ea152d7c061de4c0fa3f6df87c284b65bd408905357c89850392878af7e88"
+    },
+    {
+      "path": "mods/fastplace-1.0.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/fastplace-1.0.1.jar",
+      "sizeBytes": 5843,
+      "sha256": "9563d6c2c8d18d4808460451cfc6b404f1e1e7ff17131403f198965a2af33ca0"
+    },
+    {
+      "path": "mods/ferritecore-6.0.1-forge.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/ferritecore-6.0.1-forge.jar",
+      "sizeBytes": 123034,
+      "sha256": "9c2c9396a49e796d88497758caa4637d2bcbb433c318e2dd9cebcffbaf0f6c54"
+    },
+    {
+      "path": "mods/FpsReducer2-forge-1.20.1-2.5.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/FpsReducer2-forge-1.20.1-2.5.1.jar",
+      "sizeBytes": 125660,
+      "sha256": "997f034210e0fca20fa5a0e6ddd370c5444854fc97e69910161104160cea41ce"
+    },
+    {
+      "path": "mods/framework-forge-1.20.1-0.7.15.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/framework-forge-1.20.1-0.7.15.jar",
+      "sizeBytes": 309560,
+      "sha256": "0c29b9bab2ca7209a6cc8d80b2cd06daa4be2da81b636f7292cebebfaaea6c08"
+    },
+    {
+      "path": "mods/geckolib-forge-1.20.1-4.8.4.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/geckolib-forge-1.20.1-4.8.4.jar",
+      "sizeBytes": 1038209,
+      "sha256": "c04abba4fd354dd8c0e8a732f1f05f4dca893d2e1d962b2ab128bbd411478747"
+    },
+    {
+      "path": "mods/gpumemleakfix-1.20.1-1.8.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/gpumemleakfix-1.20.1-1.8.jar",
+      "sizeBytes": 7997,
+      "sha256": "a7019442f1b07b1a4a875fe404d04d162905cc7fd42e0b3c843aefc7b39efc46"
+    },
+    {
+      "path": "mods/gripeverde-0.30.0.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/gripeverde-0.30.0.jar",
+      "sizeBytes": 8940785,
+      "sha256": "d8a4d8d3c197fba41668c9ee8c02de6abb0b6bfd69fec6c50263208d7dffef5a"
+    },
+    {
+      "path": "mods/illageandspillageNEWRELEASE.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/illageandspillageNEWRELEASE.jar",
+      "sizeBytes": 33593317,
+      "sha256": "345e1e5f468b94bf252fc166fbdf7270f456094000abb35144bfba595f503f82"
+    },
+    {
+      "path": "mods/illagerstructures-forge-1.20.1-0.0.2.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/illagerstructures-forge-1.20.1-0.0.2.jar",
+      "sizeBytes": 1358264,
+      "sha256": "919dbad017011e3a2ea3e11ec29b19174a776bff5ef974119b71bda5bfbcefb9"
+    },
+    {
+      "path": "mods/illagersweararmor-1.20.1-1.5.0.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/illagersweararmor-1.20.1-1.5.0.jar",
+      "sizeBytes": 46477,
+      "sha256": "7e912c2d472c263ce0b0742439b009177cbac63eba0df1887013af9a4c60432c"
+    },
+    {
+      "path": "mods/ImmediatelyFast-Forge-1.5.5+1.20.4.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/ImmediatelyFast-Forge-1.5.5%2B1.20.4.jar",
+      "sizeBytes": 532063,
+      "sha256": "82db19cc65b5c11a444498fb4b8cbcb0393c043e794cb5bf368631a0af765035"
+    },
+    {
+      "path": "mods/IMPR-Forge-3_485_10-1.20.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/IMPR-Forge-3_485_10-1.20.1.jar",
+      "sizeBytes": 10190584,
+      "sha256": "6f527d914e1a1fffa9649eba78cfa155f5d6281fbb8a465c87b1640f2fc28f31"
+    },
+    {
+      "path": "mods/insanelib-1.21.3.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/insanelib-1.21.3.jar",
+      "sizeBytes": 340525,
+      "sha256": "c7bceca33177f49838926ced2c7aefae30b9209fee30d2d5b89c861ae1936488"
+    },
+    {
+      "path": "mods/InvMove-0.9.0+1.20.1-Forge.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/InvMove-0.9.0%2B1.20.1-Forge.jar",
+      "sizeBytes": 312084,
+      "sha256": "cb2ebdfd8e70b959ae0b63f6e327496b5a94c5ef96a9bfc2996e8bcc5e4e2c07"
+    },
+    {
+      "path": "mods/irons_lib-1.20.1-2.1.0.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/irons_lib-1.20.1-2.1.0.jar",
+      "sizeBytes": 428969,
+      "sha256": "db4c7cc853c0ffb1d36a0f19af22c224a8608b2a55c747adc70fb44455baf097"
+    },
+    {
+      "path": "mods/Item-Obliterator-NeoForge-MC1.20.1-2.3.1.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/Item-Obliterator-NeoForge-MC1.20.1-2.3.1.1.jar",
+      "sizeBytes": 22930,
+      "sha256": "a0de109d3405fbf4290e10df4f812eadd5125debb16ea7e9d908acbbabcb516b"
+    },
+    {
+      "path": "mods/Jade-1.20.1-Forge-11.12.3.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/Jade-1.20.1-Forge-11.12.3.jar",
+      "sizeBytes": 547769,
+      "sha256": "c8fc883acd8a7b1a10cad75dd06529d2bedec8c4efe1e64ce279126120c792cc"
+    },
+    {
+      "path": "mods/jei-1.20.1-forge-15.20.0.112.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/jei-1.20.1-forge-15.20.0.112.jar",
+      "sizeBytes": 1385600,
+      "sha256": "2d3a86f503dbde51afa5142951525c37e227016ce8d9e7dfd10bbdd9233f0204"
+    },
+    {
+      "path": "mods/journeymap-1.20.1-5.10.3-forge.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/journeymap-1.20.1-5.10.3-forge.jar",
+      "sizeBytes": 7160405,
+      "sha256": "8b2679b7b4881e0aa430fd24345ea446de919faf8a45bd2a71d37c7e8ff6ae1e"
+    },
+    {
+      "path": "mods/JustEnoughGuns-0.13.1-1.20.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/JustEnoughGuns-0.13.1-1.20.1.jar",
+      "sizeBytes": 9752625,
+      "sha256": "cca6517009d614080e3aeab81a2748649ed40dfd3f156fed11bfab8b9bd12d1e"
+    },
+    {
+      "path": "mods/kogtyv-TownyAndVillage-1.4-Forge-1.20.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/kogtyv-TownyAndVillage-1.4-Forge-1.20.jar",
+      "sizeBytes": 6031637,
+      "sha256": "5f1d485ef1ab44903f7ed239504229c3ec2f244abd1985c78c04a9e2a369fc4f"
+    },
+    {
+      "path": "mods/kotlinforforge-4.11.0-all.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/kotlinforforge-4.11.0-all.jar",
+      "sizeBytes": 7193768,
+      "sha256": "ef988f86d170af499d147ea8a5c34c99dbd6d8f4a5ad236a4b43818dc4470a10"
+    },
+    {
+      "path": "mods/ldlib-forge-1.20.1-1.0.52.a.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/ldlib-forge-1.20.1-1.0.52.a.jar",
+      "sizeBytes": 3125867,
+      "sha256": "a9b0827d264e0d15f90482de0d4783a28fc2dad9dfb477f344dc5e959168838d"
+    },
+    {
+      "path": "mods/lethality_0.4.0_1.20.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/lethality_0.4.0_1.20.1.jar",
+      "sizeBytes": 3538368,
+      "sha256": "863357f292e19deccd2f9b0b174f9c878f3a59ddffcec56337156718a5785c49"
+    },
+    {
+      "path": "mods/MCreatorMemFix-1.0.4.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/MCreatorMemFix-1.0.4.jar",
+      "sizeBytes": 230374,
+      "sha256": "3eb2bab5ac5a8b451623918a589b5dd6e60909764b76ac521a69790eb6062088"
+    },
+    {
+      "path": "mods/memguard-1.0.3.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/memguard-1.0.3.jar",
+      "sizeBytes": 9130,
+      "sha256": "410eaf38597777f84f2f4d65fb944e9e76d49e323da54325eefa8f66f53b32d9"
+    },
+    {
+      "path": "mods/mobbattle-1.20.1-2.5.3-forge.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/mobbattle-1.20.1-2.5.3-forge.jar",
+      "sizeBytes": 519518,
+      "sha256": "15d25638577b28871c40d02dee61a5f6dae2761cc4c68ff332865f8388801556"
+    },
+    {
+      "path": "mods/modernfix-forge-5.27.83+mc1.20.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/modernfix-forge-5.27.83%2Bmc1.20.1.jar",
+      "sizeBytes": 1003230,
+      "sha256": "954ff22f601be8de3978a0d7636a138dc93801c6ac55cfd71ef1cd2895de8e5f"
+    },
+    {
+      "path": "mods/MouseTweaks-forge-mc1.20.1-2.25.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/MouseTweaks-forge-mc1.20.1-2.25.1.jar",
+      "sizeBytes": 76237,
+      "sha256": "6c27d16aa715ac6613a55fc463739e2c7b78279e4e4c4cede299e4a2d4a70f08"
+    },
+    {
+      "path": "mods/NaN_fixer-1.0.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/NaN_fixer-1.0.1.jar",
+      "sizeBytes": 5086,
+      "sha256": "ded54029203f0bf5f6564216ff76052b46970dd9c583080566c9e0f33cddf11f"
+    },
+    {
+      "path": "mods/Necronomicon-Forge-1.6.0+1.20.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/Necronomicon-Forge-1.6.0%2B1.20.1.jar",
+      "sizeBytes": 33251,
+      "sha256": "403b23457288c624a55feb90d5e813c88c23a611bc42cda397c4bfac94b4c3a3"
+    },
+    {
+      "path": "mods/notenoughcrashes-4.4.9+1.20.1-forge.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/notenoughcrashes-4.4.9%2B1.20.1-forge.jar",
+      "sizeBytes": 134885,
+      "sha256": "e944656f2671b87d52af9756c48bcfb5b90956bef1a40bf1b5fcae731a367518"
+    },
+    {
+      "path": "mods/OctoLib-FORGE-0.5.0.1+1.20.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/OctoLib-FORGE-0.5.0.1%2B1.20.1.jar",
+      "sizeBytes": 424035,
+      "sha256": "5bb146c691f2c5054752f006a61aab6335ecb1cd9718a9643733de5367971047"
+    },
+    {
+      "path": "mods/offlineskins-1.20.1-v1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/offlineskins-1.20.1-v1.jar",
+      "sizeBytes": 93967,
+      "sha256": "ac4eb2a373b83a0383cd89e5dbb763f61776415ccb6371ec168365a8ea1bcddf"
+    },
+    {
+      "path": "mods/otyacraftengine-forge-mc1.20.1-3.7.0-1.20.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/otyacraftengine-forge-mc1.20.1-3.7.0-1.20.1.jar",
+      "sizeBytes": 649724,
+      "sha256": "a7c86f15c909cc728b2e7986dc697f3aa89def7ea2cd01134981ebf0c750a6b8"
+    },
+    {
+      "path": "mods/outbreak_kf-1.1.0-forge-1.20.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/outbreak_kf-1.1.0-forge-1.20.1.jar",
+      "sizeBytes": 6388793,
+      "sha256": "98f4c32372080da61664eed150248988972b07936d3a8b850d77be46d8086fd6"
+    },
+    {
+      "path": "mods/packetfixer-3.3.1-1.18-1.20.4-merged.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/packetfixer-3.3.1-1.18-1.20.4-merged.jar",
+      "sizeBytes": 188673,
+      "sha256": "4f641e4e204315a55b3f5a33e3039076ba08c95b68ac9280ea0081fb27470c13"
+    },
+    {
+      "path": "mods/Patchouli-1.20.1-85-FORGE.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/Patchouli-1.20.1-85-FORGE.jar",
+      "sizeBytes": 642732,
+      "sha256": "05f7b5d52f6b8f0fd7f8b4822fa07a192d1394d83a264309c9d221d6d4fd21c5"
+    },
+    {
+      "path": "mods/Pehkui-3.8.2+1.20.1-forge.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/Pehkui-3.8.2%2B1.20.1-forge.jar",
+      "sizeBytes": 671605,
+      "sha256": "54210f454c166f65a1bcbbfe4ea52e6f73e07844a793c7132f1af4076a0f42fc"
+    },
+    {
+      "path": "mods/photon-forge-1.20.1-1.1.17.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/photon-forge-1.20.1-1.1.17.jar",
+      "sizeBytes": 5078005,
+      "sha256": "3bd09a759744e9e3b3e7315eaafa9dcd27945ef13331148e8b8169950560e5fb"
+    },
+    {
+      "path": "mods/Placebo-1.20.1-8.6.2.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/Placebo-1.20.1-8.6.2.jar",
+      "sizeBytes": 285351,
+      "sha256": "1fcacfb17c4f5f3880d99a1bf29c76bc2d6bf6ed6e02ca8051a3b6eee4c99c5a"
+    },
+    {
+      "path": "mods/player-animation-lib-forge-1.0.2-rc1+1.20.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/player-animation-lib-forge-1.0.2-rc1%2B1.20.jar",
+      "sizeBytes": 181437,
+      "sha256": "90d9965cb9efdbda29fdc5610be3914cf7008bf5c392ff34f7ab25f96a852691"
+    },
+    {
+      "path": "mods/pyro_and_twins-1.0.0.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/pyro_and_twins-1.0.0.jar",
+      "sizeBytes": 582108,
+      "sha256": "db7e33acc00e3dd8f02c5ad7ec74126c81cc8e0fb689658095ee60106278375d"
+    },
+    {
+      "path": "mods/relics-1.20.1-0.8.0.9.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/relics-1.20.1-0.8.0.9.jar",
+      "sizeBytes": 1520280,
+      "sha256": "03ed32063a3be26f8c58ae9e9645016ecdc659569f8b1efd5f5bf54fa8444352"
+    },
+    {
+      "path": "mods/sa_decor-forge-1.20.1-1.0.3.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/sa_decor-forge-1.20.1-1.0.3.jar",
+      "sizeBytes": 13353633,
+      "sha256": "cd0fce65054568024a38e5dd5f4beecef2eb5cffe6c89257a7904920155f9a46"
+    },
+    {
+      "path": "mods/sa_lib-forge-1.20.1-1.0.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/sa_lib-forge-1.20.1-1.0.1.jar",
+      "sizeBytes": 1703021,
+      "sha256": "6af72b4220eb3abfd1af403456cb8850e6eb0241aa0cc27fb6c8c4d4eb356ba0"
+    },
+    {
+      "path": "mods/saturn-mc1.20.1-0.1.3.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/saturn-mc1.20.1-0.1.3.jar",
+      "sizeBytes": 92319,
+      "sha256": "7e6dcc7c2b0db19ec2f965fac91a49e13dcc611f2d86f6bb56d7d68da901aaf8"
+    },
+    {
+      "path": "mods/ScalingHealth-1.20.1-8.0.2+9.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/ScalingHealth-1.20.1-8.0.2%2B9.jar",
+      "sizeBytes": 535471,
+      "sha256": "6639d197f36d43973526f4832b24b1a2feaba4c9576bfc208a62de8cb0743481"
+    },
+    {
+      "path": "mods/screenlib-forge-1.20.1-1.1.0-beta.2.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/screenlib-forge-1.20.1-1.1.0-beta.2.jar",
+      "sizeBytes": 1626869,
+      "sha256": "a54e337cd4879c410aa67a4bfb4d158268880dec49f11ee14ca61971c6a35107"
+    },
+    {
+      "path": "mods/Searchables-forge-1.20.1-1.0.3.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/Searchables-forge-1.20.1-1.0.3.jar",
+      "sizeBytes": 77732,
+      "sha256": "461add180eb595004d3c9f5ac0ce337752e403077f96b38304800eadf01fb825"
+    },
+    {
+      "path": "mods/ShoulderSurfing-Forge-1.20.1-4.6.3.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/ShoulderSurfing-Forge-1.20.1-4.6.3.jar",
+      "sizeBytes": 246698,
+      "sha256": "123d0f130fb2306eba02992ed4b6e62fba605dbade7f55c1955e0b5df6a1b1b8"
+    },
+    {
+      "path": "mods/silent-lib-1.20.1-8.0.0.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/silent-lib-1.20.1-8.0.0.jar",
+      "sizeBytes": 225949,
+      "sha256": "9ca45fb6d723474d145227bed27dd1791cca30ac96fd8f05084417b0779e0e01"
+    },
+    {
+      "path": "mods/SimpleLogin-1.20.1-1.0.2-all.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/SimpleLogin-1.20.1-1.0.2-all.jar",
+      "sizeBytes": 99700,
+      "sha256": "1e923563c4d85793ef59849114c0a7c51ba1e1446e1976eeedb58acb81f52b44"
+    },
+    {
+      "path": "mods/skinlayers3d-forge-1.11.2-mc1.20.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/skinlayers3d-forge-1.11.2-mc1.20.1.jar",
+      "sizeBytes": 2168901,
+      "sha256": "2d35eff3e2642e8a6f7fb4cc7461211699ee2e32b9644e0d3b3bd6ba1574551c"
+    },
+    {
+      "path": "mods/SmartBrainLib-forge-1.20.1-1.15.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/SmartBrainLib-forge-1.20.1-1.15.jar",
+      "sizeBytes": 362338,
+      "sha256": "665f65f77cc36379a9ae11c09db5d9efa1ad4f8d017edc8f65903ff27cacdb1d"
+    },
+    {
+      "path": "mods/smoothbootreloaded-mc1.20.1-0.0.4.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/smoothbootreloaded-mc1.20.1-0.0.4.jar",
+      "sizeBytes": 41044,
+      "sha256": "5a0d2682493ffa7b140a7b81f0d1e70c7536c97969397cf9e718e31391b5b9d5"
+    },
+    {
+      "path": "mods/sophisticatedbackpacks-1.20.1-3.23.23.1289.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/sophisticatedbackpacks-1.20.1-3.23.23.1289.jar",
+      "sizeBytes": 930761,
+      "sha256": "a611a7c1d0d8e8d0d4705da8097c94d5767bd2ce21f74352b29222202e03d1a5"
+    },
+    {
+      "path": "mods/sophisticatedcore-1.20.1-1.2.78.1059.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/sophisticatedcore-1.20.1-1.2.78.1059.jar",
+      "sizeBytes": 1338184,
+      "sha256": "e351fe882d764106130644c92980bcfc2f5ede863f99acfb6b2587fabcd8031a"
+    },
+    {
+      "path": "mods/superbwarfare-0.8.9-mc1.20.1-95d7cfe4e-all.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/superbwarfare-0.8.9-mc1.20.1-95d7cfe4e-all.jar",
+      "sizeBytes": 31294323,
+      "sha256": "3c7d6c13b903dc337d8eecab47ef9ce84c7aa2b30c313d73b6fca2569ee67d0a"
+    },
+    {
+      "path": "mods/tacz-1.20.1-1.1.8-hotfix2.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/tacz-1.20.1-1.1.8-hotfix2.jar",
+      "sizeBytes": 57472579,
+      "sha256": "2cbb89f44333d2eb4e825d86d789ff119b272ff75184390b55bafd4f0e7f10c2"
+    },
+    {
+      "path": "mods/tengosuenowe-1.0.0.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/tengosuenowe-1.0.0.jar",
+      "sizeBytes": 1477791,
+      "sha256": "b1f6b9a95b6c374660f50208f53751579306091daf3e6ffee2864cf264742fe1"
+    },
+    {
+      "path": "mods/terramity-0.9.8-forge-1.20.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/terramity-0.9.8-forge-1.20.1.jar",
+      "sizeBytes": 26896860,
+      "sha256": "2d4f4c436530e99b59c37ece75af81d14b48eecc9c4759dd10fecd8d143d0d3f"
+    },
+    {
+      "path": "mods/THEUNDEADREVAMPED_2.1h_1.20.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/THEUNDEADREVAMPED_2.1h_1.20.1.jar",
+      "sizeBytes": 8078110,
+      "sha256": "a43b77da2e072a14c761b37aff9401a6fee6f569fd949f1d29c31a0b6df36412"
+    },
+    {
+      "path": "mods/timeout_fixes-1.20.1-1.0.0.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/timeout_fixes-1.20.1-1.0.0.jar",
+      "sizeBytes": 10209,
+      "sha256": "6c925a6b252f742b686619c8bfd1bf00ff72fc0c435c2a403cbe28a611ec271f"
+    },
+    {
+      "path": "mods/toolleveling-forge-1.20.1-2.0.0.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/toolleveling-forge-1.20.1-2.0.0.jar",
+      "sizeBytes": 125055,
+      "sha256": "b950167cedd4574be80e80441b1e77bd9981d97b06f27daa8c3844421aeca51a"
+    },
+    {
+      "path": "mods/turbopaja-13.0.0.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/turbopaja-13.0.0.jar",
+      "sizeBytes": 24126089,
+      "sha256": "527f312077e5c9f0d270f441242b65986717318c4e7ef1c617d1f754f93e97cc"
+    },
+    {
+      "path": "mods/velthoric-forge-0.6.0.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/velthoric-forge-0.6.0.jar",
+      "sizeBytes": 10145056,
+      "sha256": "fae98161b64c3a2aa723f8a9a9cbbf47081e223aacba1b96000efe08c4a71506"
+    },
+    {
+      "path": "mods/visuality-forge-2.0.2.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/visuality-forge-2.0.2.jar",
+      "sizeBytes": 215750,
+      "sha256": "336a9f11f9d55f2d600c56ec1a8dcba93b80534fc749b143096e129c9c9c985d"
+    },
+    {
+      "path": "mods/zergatul.freecam-2.0.1-forge-1.20.1.jar",
+      "url": "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/download/ghouls-outbreak-v1.0.0/zergatul.freecam-2.0.1-forge-1.20.1.jar",
+      "sizeBytes": 52223,
+      "sha256": "c10ed01385afa76b1b86fd6dbb89dced862bdce05e7372dd73c52523755eaca4"
+    }
+  ]
+}

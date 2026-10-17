@@ -231,6 +231,7 @@ struct ModInventory {
 }
 
 const INSTALL_LOG_MAX_BYTES: u64 = 1_048_576;
+const MAX_SETTINGS_BYTES: u64 = 1_048_576;
 const INSTALL_LOG_MAX_MESSAGE_BYTES: usize = 16 * 1024;
 static INSTALL_LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static SETTINGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -478,35 +479,45 @@ fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn read_settings_file(path: &Path) -> Result<(Settings, Option<PathBuf>), String> {
-    match fs::read(path) {
-        Ok(bytes) => match serde_json::from_slice(&bytes) {
-            Ok(settings) => Ok((settings, None)),
-            Err(parse_error) => {
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos();
-                let filename = path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy();
-                let backup = path.with_file_name(format!("{filename}.corrupt-{timestamp}"));
-                fs::rename(path, &backup).map_err(|rename_error| {
-                    format!(
-                        "La configuración {} no es válida ({parse_error}) y no se pudo conservar una copia en {}: {rename_error}",
-                        path.display(),
-                        backup.display()
-                    )
-                })?;
-                let defaults = Settings::default();
-                write_settings_file(path, &defaults)?;
-                Ok((defaults, Some(backup)))
-            }
-        },
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok((Settings::default(), None))
+            return Ok((Settings::default(), None));
         }
-        Err(error) => Err(format!("No se pudo leer {}: {error}", path.display())),
+        Err(error) => return Err(format!("No se pudo leer {}: {error}", path.display())),
+    };
+    let mut bytes = Vec::with_capacity((MAX_SETTINGS_BYTES + 1) as usize);
+    file.take(MAX_SETTINGS_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("No se pudo leer {}: {error}", path.display()))?;
+    let parsed = if bytes.len() as u64 > MAX_SETTINGS_BYTES {
+        Err(format!("la configuración supera el límite de 1 MiB"))
+    } else {
+        serde_json::from_slice(&bytes).map_err(|error| error.to_string())
+    };
+    match parsed {
+        Ok(settings) => Ok((settings, None)),
+        Err(parse_error) => {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let filename = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy();
+            let backup = path.with_file_name(format!("{filename}.corrupt-{timestamp}"));
+            fs::rename(path, &backup).map_err(|rename_error| {
+                format!(
+                    "La configuración {} no es válida ({parse_error}) y no se pudo conservar una copia en {}: {rename_error}",
+                    path.display(),
+                    backup.display()
+                )
+            })?;
+            let defaults = Settings::default();
+            write_settings_file(path, &defaults)?;
+            Ok((defaults, Some(backup)))
+        }
     }
 }
 
@@ -773,6 +784,32 @@ fn read_log_tail(path: &Path, max_bytes: u64) -> Result<Option<String>, String> 
 #[cfg(test)]
 mod settings_recovery_tests {
     use super::*;
+
+    #[test]
+    fn oversized_settings_are_preserved_and_replaced_with_valid_defaults() {
+        let fixture = std::env::temp_dir().join(format!(
+            "eternalcraft-settings-size-limit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&fixture).unwrap();
+        let path = fixture.join("settings.json");
+        let oversized = vec![b'x'; MAX_SETTINGS_BYTES as usize + 32];
+        fs::write(&path, &oversized).unwrap();
+
+        let (settings, backup) = read_settings_file(&path).unwrap();
+        let backup = backup.expect("oversized settings should be preserved");
+        assert_eq!(fs::read(&backup).unwrap(), oversized);
+        assert!(settings.active_series_id.is_none());
+        assert!(settings.game_directories.is_empty());
+        let saved: Settings = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(saved.active_series_id.is_none());
+
+        fs::remove_dir_all(fixture).unwrap();
+    }
 
     #[test]
     fn malformed_settings_are_preserved_and_replaced_with_valid_defaults() {

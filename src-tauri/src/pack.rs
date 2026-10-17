@@ -16,6 +16,7 @@ use std::{
 };
 
 const MANIFEST_LIMIT: u64 = 2 * 1024 * 1024;
+const PACK_STATE_LIMIT: u64 = 2 * 1024 * 1024;
 pub(super) const MOD_LIMIT: u64 = 512 * 1024 * 1024;
 const PACK_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 const STALE_STAGING_AGE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
@@ -307,26 +308,40 @@ fn load_previous_state_snapshot(
     path: &Path,
     series_id: &str,
 ) -> Result<(Option<PackState>, Option<Vec<u8>>), String> {
-    match fs::read(path) {
-        Ok(bytes) => {
-            let state: PackState = serde_json::from_slice(&bytes)
-                .map_err(|error| format!("El registro del pack está dañado: {error}"))?;
-            if state.schema_version != 1 || state.series_id != series_id {
-                return Err("El registro guardado no corresponde a esta serie".into());
-            }
-            for (name, hash) in &state.files {
-                if !valid_file_name(name)
-                    || hash.len() != 64
-                    || !hash.bytes().all(|c| c.is_ascii_hexdigit())
-                {
-                    return Err("El registro guardado contiene una ruta o hash inválido".into());
-                }
-            }
-            Ok((Some(state), Some(bytes)))
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
+        Ok(_) => {
+            return Err("No se pudo leer el registro del pack: la ruta no es un archivo normal".into())
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((None, None)),
-        Err(error) => Err(format!("No se pudo leer el registro del pack: {error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((None, None)),
+        Err(error) => return Err(format!("No se pudo leer el registro del pack: {error}")),
+    };
+    if metadata.len() > PACK_STATE_LIMIT {
+        return Err("El registro local del pack supera el límite de 2 MiB".into());
     }
+    let mut file = fs::File::open(path)
+        .map_err(|error| format!("No se pudo leer el registro del pack: {error}"))?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(PACK_STATE_LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("No se pudo leer el registro del pack: {error}"))?;
+    if bytes.len() as u64 > PACK_STATE_LIMIT {
+        return Err("El registro local del pack supera el límite de 2 MiB".into());
+    }
+    let state: PackState = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("El registro del pack está dañado: {error}"))?;
+    if state.schema_version != 1 || state.series_id != series_id {
+        return Err("El registro guardado no corresponde a esta serie".into());
+    }
+    for (name, hash) in &state.files {
+        if !valid_file_name(name)
+            || hash.len() != 64
+            || !hash.bytes().all(|c| c.is_ascii_hexdigit())
+        {
+            return Err("El registro guardado contiene una ruta o hash inválido".into());
+        }
+    }
+    Ok((Some(state), Some(bytes)))
 }
 
 fn verify_installed_mod_pair(
@@ -1252,6 +1267,20 @@ mod tests {
         assert!(load_previous_state_snapshot(&unreadable_path, "siege")
             .unwrap_err()
             .contains("No se pudo leer el registro del pack"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn oversized_pack_state_is_rejected_before_full_read() {
+        let root = temp_dir();
+        let path = root.join("siege-state.json");
+        let bytes = vec![b' '; (PACK_STATE_LIMIT + 1) as usize];
+        fs::write(&path, &bytes).unwrap();
+
+        let error = load_previous_state_snapshot(&path, "siege").unwrap_err();
+        assert!(error.contains("supera el límite de 2 MiB"));
+        assert_eq!(fs::metadata(&path).unwrap().len(), bytes.len() as u64);
+
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -3245,14 +3245,20 @@ async fn install_forge_base(app: AppHandle, series_id: String) -> Result<Bootstr
                 completed_files: 0,
             },
         );
-        let result = install_forge_profile(
-            app_handle,
-            series.id.clone(),
-            series.minecraft_version,
-            series.loader_version,
-            java,
-            game_dir,
-        );
+        let result = (|| {
+            // Forge comparte el directorio de la instancia con el pack y los mods.
+            // El mismo bloqueo evita escrituras concurrentes y lanzar durante la instalación.
+            let _guard = pack::lock_pack_sync()?;
+            ensure_series_not_running(&log_app, &log_series)?;
+            install_forge_profile(
+                app_handle,
+                series.id.clone(),
+                series.minecraft_version,
+                series.loader_version,
+                java,
+                game_dir,
+            )
+        })();
         if let Err(error) = &result {
             let _ = append_install_log(&log_app, &log_series, "Error", error);
             let _ = log_app.emit(

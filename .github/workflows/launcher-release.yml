@@ -63,15 +63,18 @@ jobs:
       - run: npm run check
       - run: npm run build
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
-      - name: Enable signed updater artifacts
-        shell: bash
-        run: printf '{"bundle":{"createUpdaterArtifacts":true}}\n' > src-tauri/tauri.release.conf.json
+      - name: Create signed updater configuration
+        run: node scripts/create-tauri-release-config.mjs src-tauri/tauri.release.conf.json
+        env:
+          ETERNAL_TAURI_UPDATER_PUBLIC_KEY: ${{ vars.ETERNAL_TAURI_UPDATER_PUBLIC_KEY }}
       - name: Build signed bundles
         run: npm run tauri -- build --ci --config src-tauri/tauri.release.conf.json --bundles ${{ matrix.bundles }}
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       - name: Verify update signatures
         shell: bash
+        env:
+          ETERNALCRAFT_UPDATER_CONFIG_PATH: src-tauri/tauri.release.conf.json
         run: |
           set -euo pipefail
           if [[ "$RUNNER_OS" == Linux ]]; then

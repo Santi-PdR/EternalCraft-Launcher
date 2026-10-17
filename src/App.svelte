@@ -25,6 +25,7 @@
   let offlineUsernameDraft = $state('');
   let minecraftStatus = $state<MinecraftStatus>({ running: false, seriesId: null, pid: null, exitCode: null, exitSuccess: null });
   let modInventory = $state<ModInventory | null>(null);
+  let modInventoryRequestId = 0;
   let modsLoading = $state(false);
   let modsBusy = $state(false);
   let modsError = $state('');
@@ -279,15 +280,21 @@
 
   async function loadMods(seriesId: string | undefined) {
     if (!seriesId) return;
+    const requestId = ++modInventoryRequestId;
     modsLoading = true;
     modsError = '';
     modInventory = null;
     try {
-      modInventory = await invoke<ModInventory>('get_mod_inventory', { seriesId });
+      const inventory = await invoke<ModInventory>('get_mod_inventory', { seriesId });
+      if (requestId === modInventoryRequestId && bootstrap?.activeSeriesId === seriesId) {
+        modInventory = inventory;
+      }
     } catch (reason) {
-      modsError = String(reason);
+      if (requestId === modInventoryRequestId && bootstrap?.activeSeriesId === seriesId) {
+        modsError = String(reason);
+      }
     } finally {
-      modsLoading = false;
+      if (requestId === modInventoryRequestId) modsLoading = false;
     }
   }
 

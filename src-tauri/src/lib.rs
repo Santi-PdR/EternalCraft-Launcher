@@ -1330,6 +1330,34 @@ fn copy_file_create_new(source: &Path, destination: &Path) -> io::Result<u64> {
     result
 }
 
+fn copy_file_create_new_limited(
+    source: &Path,
+    destination: &Path,
+    max_bytes: u64,
+) -> io::Result<u64> {
+    let mut input = fs::File::open(source)?;
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    let result = (|| {
+        let copied = io::copy(&mut input.by_ref().take(max_bytes.saturating_add(1)), &mut output)?;
+        if copied > max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "source exceeded the configured size limit",
+            ));
+        }
+        output.sync_all()?;
+        Ok(copied)
+    })();
+    if result.is_err() {
+        drop(output);
+        let _ = fs::remove_file(destination);
+    }
+    result
+}
+
 fn create_loaded_mod_alias(personal_file: &Path, loaded_file: &Path) -> Result<(), String> {
     match fs::hard_link(personal_file, loaded_file) {
         Ok(()) => Ok(()),
@@ -1428,7 +1456,7 @@ fn add_personal_mod_inner(source: &Path, mods_directory: &Path) -> Result<String
         .as_nanos();
     let temporary =
         personal_directory.join(format!(".{name}.{}.{}.tmp", std::process::id(), unique));
-    if let Err(error) = copy_file_create_new(&source, &temporary) {
+    if let Err(error) = copy_file_create_new_limited(&source, &temporary, pack::MOD_LIMIT) {
         let _ = fs::remove_file(&temporary);
         return Err(format!("No se pudo preparar la copia personal: {error}"));
     }
@@ -3923,6 +3951,27 @@ mod tests {
         assert!(remove_personal_mod("custom.jar", &mods).is_err());
         assert_eq!(fs::read(&loaded_file).unwrap(), b"replacement owned by the user");
         assert_eq!(fs::read(&personal_file).unwrap(), b"original personal mod");
+        fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
+    fn limited_copy_removes_partial_files_when_the_source_exceeds_the_limit() {
+        let fixture = std::env::temp_dir().join(format!(
+            "eternalcraft-limited-copy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&fixture).unwrap();
+        let source = fixture.join("source.jar");
+        let destination = fixture.join("destination.jar");
+        fs::write(&source, b"1234567").unwrap();
+
+        let error = copy_file_create_new_limited(&source, &destination, 6).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(!destination.exists());
         fs::remove_dir_all(fixture).unwrap();
     }
 

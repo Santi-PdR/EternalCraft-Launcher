@@ -594,6 +594,65 @@ fn valid_game_dir(path: &Path) -> Result<PathBuf, String> {
         .map_err(|error| format!("No se pudo resolver la carpeta seleccionada: {error}"))
 }
 
+fn game_directories_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
+fn ensure_game_directory_isolated(
+    app: &AppHandle,
+    settings: &Settings,
+    series_id: &str,
+    game_directory: &Path,
+) -> Result<(), String> {
+    let game_directory = valid_game_dir(game_directory)?;
+    let catalog = current_catalog()?;
+
+    let mut other_directories = Vec::new();
+    for (other_id, configured_path) in &settings.game_directories {
+        if other_id != series_id {
+            if let Ok(path) = valid_game_dir(Path::new(configured_path)) {
+                other_directories.push((other_id.clone(), path));
+            }
+        }
+    }
+
+    let managed_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("instances");
+    for other in catalog.series.iter().filter(|other| other.id != series_id) {
+        let managed = managed_root.join(&other.id);
+        if managed.is_dir() {
+            if let Ok(path) = valid_game_dir(&managed) {
+                other_directories.push((other.id.clone(), path));
+            }
+        }
+    }
+
+    if let Some((other_id, _)) = other_directories
+        .into_iter()
+        .find(|(_, other)| game_directories_overlap(&game_directory, other))
+    {
+        return Err(format!(
+            "La carpeta de juego se superpone con la instancia de {other_id}. Asigna una carpeta independiente a cada serie."
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_isolated_series_game_directory(
+    app: &AppHandle,
+    series_id: &str,
+) -> Result<Option<PathBuf>, String> {
+    let game_directory = resolve_series_game_directory(app, series_id)?;
+    if let Some(path) = game_directory.as_deref() {
+        let settings = read_settings(app)?;
+        ensure_game_directory_isolated(app, &settings, series_id, path)?;
+    }
+    Ok(game_directory)
+}
+
 fn managed_game_dir(app: &AppHandle, series_id: &str) -> Result<PathBuf, String> {
     let catalog = current_catalog()?;
     if !catalog.series.iter().any(|series| series.id == series_id) {
@@ -2451,7 +2510,7 @@ async fn sync_official_pack(
     if series.pack_status != PackStatus::Available {
         return Err("Esta serie todavía no tiene un pack oficial publicado".into());
     }
-    let game_dir = resolve_series_game_directory(&app, &series_id)?.ok_or_else(|| {
+    let game_dir = resolve_isolated_series_game_directory(&app, &series_id)?.ok_or_else(|| {
         "Primero instala o vincula una carpeta de juego para esta serie".to_string()
     })?;
     verify_forge_profile(&game_dir, &series)?;
@@ -2911,7 +2970,7 @@ fn launch_minecraft(app: AppHandle, series_id: String) -> Result<MinecraftStatus
     } else {
         return Err("Inicia sesión con Microsoft o configura un perfil local con nombre para jugar.".into());
     };
-    let game_dir = resolve_series_game_directory(&app, &series_id)?
+    let game_dir = resolve_isolated_series_game_directory(&app, &series_id)?
         .ok_or_else(|| "Selecciona o instala la carpeta de juego de esta serie primero.".to_string())?;
     verify_forge_profile(&game_dir, &series)?;
     // Keep the official and personal mod set stable from verification until
@@ -3041,13 +3100,13 @@ fn mod_inventory_for_path(path: Option<PathBuf>) -> Result<ModInventory, String>
 #[tauri::command]
 fn get_mod_inventory(app: AppHandle, series_id: String) -> Result<ModInventory, String> {
     let _guard = pack::lock_pack_sync()?;
-    let game_directory = resolve_series_game_directory(&app, &series_id)?;
+    let game_directory = resolve_isolated_series_game_directory(&app, &series_id)?;
     mod_inventory_for_path(game_directory)
 }
 
 #[tauri::command]
 fn add_personal_mod_to_series(app: AppHandle, series_id: String) -> Result<ModInventory, String> {
-    let game_directory = resolve_series_game_directory(&app, &series_id)?
+    let game_directory = resolve_isolated_series_game_directory(&app, &series_id)?
         .ok_or_else(|| "Primero selecciona una carpeta de juego para esta serie".to_string())?;
     let selected = app
         .dialog()
@@ -3071,7 +3130,7 @@ fn activate_personal_mod_for_series(
     series_id: String,
     file_name: String,
 ) -> Result<ModInventory, String> {
-    let game_directory = resolve_series_game_directory(&app, &series_id)?
+    let game_directory = resolve_isolated_series_game_directory(&app, &series_id)?
         .ok_or_else(|| "No hay una carpeta de juego seleccionada para esta serie".to_string())?;
     activate_personal_mod_for_series_inner(
         &app,
@@ -3088,7 +3147,7 @@ fn remove_personal_mod_from_series(
     series_id: String,
     file_name: String,
 ) -> Result<ModInventory, String> {
-    let game_directory = resolve_series_game_directory(&app, &series_id)?
+    let game_directory = resolve_isolated_series_game_directory(&app, &series_id)?
         .ok_or_else(|| "No hay una carpeta de juego seleccionada para esta serie".to_string())?;
     remove_personal_mod_for_series(&app, &series_id, &file_name, &game_directory.join("mods"))?;
     get_mod_inventory(app, series_id)
@@ -3231,6 +3290,7 @@ async fn select_game_directory(app: AppHandle, series_id: String) -> Result<Boot
         .map_err(|error| format!("Ruta de carpeta no válida: {error}"))?;
     let chosen = valid_game_dir(&chosen)?;
     update_settings(&app, |settings| {
+        ensure_game_directory_isolated(&app, settings, &series_id, &chosen)?;
         settings.active_series_id = Some(series_id.clone());
         settings
             .game_directories
@@ -3252,6 +3312,7 @@ fn link_detected_directory(app: AppHandle, series_id: String) -> Result<Bootstra
         .ok_or_else(|| "No se encontró una instancia compatible para esta serie".to_string())?;
     let path = valid_game_dir(Path::new(path))?;
     update_settings(&app, |settings| {
+        ensure_game_directory_isolated(&app, settings, &series_id, &path)?;
         settings.active_series_id = Some(series_id.clone());
         settings
             .game_directories
@@ -3921,6 +3982,16 @@ mod tests {
             .values()
             .any(|profile| profile["lastVersionId"] == "1.20.1-forge-47.4.10"));
         fs::remove_dir_all(game_dir).unwrap();
+    }
+
+    #[test]
+    fn game_directory_overlap_detects_equal_and_nested_instances() {
+        let root = Path::new("/games/eternalcraft/siege");
+        assert!(game_directories_overlap(root, root));
+        assert!(game_directories_overlap(root, Path::new("/games/eternalcraft/siege/mods")));
+        assert!(game_directories_overlap(Path::new("/games/eternalcraft"), root));
+        assert!(!game_directories_overlap(root, Path::new("/games/eternalcraft/ghouls")));
+        assert!(!game_directories_overlap(root, Path::new("/games/other")));
     }
 
     #[test]

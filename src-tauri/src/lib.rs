@@ -2930,10 +2930,10 @@ fn accept_microsoft_callback(
                 .ok()
                 .and_then(|url| microsoft_oauth_callback_error(&url, expected_state));
             if let Some(message) = oauth_error {
-                let _ = stream.write_all(b"HTTP/1.1 200 OK\\r\\nContent-Type: text/plain; charset=utf-8\\r\\nConnection: close\\r\\n\\r\\nInicio de sesion cancelado. Puedes cerrar esta pestana.");
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\nInicio de sesion cancelado. Puedes cerrar esta pestana.");
                 return Err(message.to_string());
             }
-            let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\\r\\nConnection: close\\r\\n\\r\\nNo se pudo validar el inicio de sesion.");
+            let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nNo se pudo validar el inicio de sesion.");
             return Ok(None);
         }
     };

@@ -2967,7 +2967,13 @@ fn get_minecraft_status(app: AppHandle) -> Result<MinecraftStatus, String> {
 }
 
 #[tauri::command]
-fn launch_minecraft(app: AppHandle, series_id: String) -> Result<MinecraftStatus, String> {
+async fn launch_minecraft(app: AppHandle, series_id: String) -> Result<MinecraftStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || launch_minecraft_sync(app, series_id))
+        .await
+        .map_err(|error| format!("Falló la tarea de inicio de Minecraft: {error}"))?
+}
+
+fn launch_minecraft_sync(app: AppHandle, series_id: String) -> Result<MinecraftStatus, String> {
     let series = current_catalog()?
         .series
         .into_iter()

@@ -595,7 +595,20 @@ fn valid_game_dir(path: &Path) -> Result<PathBuf, String> {
 }
 
 fn game_directories_overlap(left: &Path, right: &Path) -> bool {
-    left.starts_with(right) || right.starts_with(left)
+    #[cfg(windows)]
+    {
+        // Windows normalmente resuelve rutas sin distinguir mayúsculas. Normalizar
+        // antes de comparar evita asignar la misma instancia dos veces con casing distinto.
+        let left = left.to_string_lossy().replace('/', "\\\\").to_lowercase();
+        let right = right.to_string_lossy().replace('/', "\\\\").to_lowercase();
+        let left = Path::new(&left);
+        let right = Path::new(&right);
+        left.starts_with(right) || right.starts_with(left)
+    }
+    #[cfg(not(windows))]
+    {
+        left.starts_with(right) || right.starts_with(left)
+    }
 }
 
 fn ensure_game_directory_isolated(
@@ -616,18 +629,25 @@ fn ensure_game_directory_isolated(
         }
     }
 
-    let managed_root = app
+    let app_data = app
         .path()
         .app_data_dir()
-        .map_err(|error| error.to_string())?
-        .join("instances");
+        .map_err(|error| error.to_string())?;
+    let managed_root = app_data.join("instances");
+    let managed_root_for_comparison = managed_root
+        .canonicalize()
+        .or_else(|_| app_data.canonicalize().map(|path| path.join("instances")))
+        .unwrap_or_else(|_| managed_root.clone());
     for other in catalog.series.iter().filter(|other| other.id != series_id) {
         let managed = managed_root.join(&other.id);
-        if managed.is_dir() {
-            if let Ok(path) = valid_game_dir(&managed) {
-                other_directories.push((other.id.clone(), path));
-            }
-        }
+        // Incluir también rutas aún no creadas: un directorio elegido como padre
+        // de una futura instancia administrada podría mezclar o borrar su pack.
+        let path = if managed.is_dir() {
+            valid_game_dir(&managed)?
+        } else {
+            managed_root_for_comparison.join(&other.id)
+        };
+        other_directories.push((other.id.clone(), path));
     }
 
     if let Some((other_id, _)) = other_directories
@@ -3992,6 +4012,19 @@ mod tests {
         assert!(game_directories_overlap(Path::new("/games/eternalcraft"), root));
         assert!(!game_directories_overlap(root, Path::new("/games/eternalcraft/ghouls")));
         assert!(!game_directories_overlap(root, Path::new("/games/other")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn game_directory_overlap_is_case_insensitive_on_windows() {
+        assert!(game_directories_overlap(
+            Path::new(r"C:\Games\EternalCraft\Siege"),
+            Path::new(r"c:\games\eternalcraft\siege\mods")
+        ));
+        assert!(!game_directories_overlap(
+            Path::new(r"C:\Games\EternalCraft\Siege"),
+            Path::new(r"C:\Games\EternalCraft\Ghouls")
+        ));
     }
 
     #[test]

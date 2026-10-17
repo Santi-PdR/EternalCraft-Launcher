@@ -3444,14 +3444,15 @@ pub fn run() {
             reset_memory_limit,
             launch_minecraft
         ])
+        .build(tauri::generate_context!())
+        .expect("error while building EternalCraft Launcher")
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
                 // Tauri termina el proceso con std::process::exit; los destructores
                 // no son un lugar fiable para detener el hijo Forge.
                 stop_forge_installer(app);
             }
-        })
-        .expect("error while running EternalCraft Launcher");
+        });
 }
 
 #[cfg(test)]

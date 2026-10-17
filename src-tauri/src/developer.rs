@@ -12,6 +12,8 @@ const PUBLISH_REPOSITORY: &str = "Santi-PdR/EternalCraft-Launcher";
 const MAX_SOURCE_JAR_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_SOURCE_PACK_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_GITHUB_ASSETS_PER_RELEASE: usize = 1000;
+const MAX_GITHUB_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_GITHUB_ERROR_BYTES: usize = 16 * 1024;
 
 #[derive(Default)]
 pub(super) struct GitHubDeveloper(std::sync::Mutex<DeveloperState>);
@@ -297,14 +299,8 @@ pub(super) fn begin_github_developer_login(app: AppHandle) -> Result<DeveloperLo
         .form(&[("client_id", client_id.to_string())])
         .send()
         .map_err(|error| format!("No se pudo solicitar autorización a GitHub: {error}"))?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().unwrap_or_default();
-        return Err(format!("GitHub rechazó el inicio de sesión ({status}): {}", body.chars().take(300).collect::<String>()));
-    }
-    let device: DeviceCodeResponse = response
-        .json()
-        .map_err(|error| format!("GitHub devolvió una respuesta de autorización inválida: {error}"))?;
+    let device: DeviceCodeResponse =
+        github_json(response, "Solicitar código de inicio de sesión")?;
     if device.device_code.is_empty()
         || device.user_code.is_empty()
         || !device.verification_uri.starts_with("https://github.com/")
@@ -403,9 +399,7 @@ pub(super) fn poll_github_developer_login(
         ])
         .send()
         .map_err(|error| format!("No se pudo consultar la autorización GitHub: {error}"))?;
-    let token: TokenResponse = response
-        .json()
-        .map_err(|error| format!("GitHub devolvió un estado de autorización inválido: {error}"))?;
+    let token: TokenResponse = github_json(response, "Consultar autorización GitHub")?;
 
     let mut state = developer
         .0
@@ -568,12 +562,7 @@ fn get_github_user(access_token: &str) -> Result<GitHubUser, String> {
         .header("User-Agent", "EternalCraft-Launcher")
         .send()
         .map_err(|error| format!("No se pudo validar la cuenta GitHub: {error}"))?;
-    if !response.status().is_success() {
-        return Err("GitHub no pudo validar esta sesión".into());
-    }
-    response
-        .json()
-        .map_err(|error| format!("GitHub devolvió una cuenta inválida: {error}"))
+    github_json(response, "Validar la cuenta GitHub")
 }
 
 fn installation_has_contents_write(permissions: &BTreeMap<String, String>) -> bool {
@@ -606,9 +595,8 @@ fn ensure_repository_write_access(access_token: &str) -> Result<(), String> {
                 response.status()
             ));
         }
-        let result: UserInstallationsResponse = response
-            .json()
-            .map_err(|error| format!("GitHub devolvió instalaciones inválidas: {error}"))?;
+        let result: UserInstallationsResponse =
+            github_json(response, "Leer instalaciones GitHub")?;
         let count = result.installations.len();
         installations.extend(result.installations);
         if count < 100 {
@@ -638,9 +626,8 @@ fn ensure_repository_write_access(access_token: &str) -> Result<(), String> {
                     response.status()
                 ));
             }
-            let result: InstallationRepositoriesResponse = response
-                .json()
-                .map_err(|error| format!("GitHub devolvió repositorios instalados inválidos: {error}"))?;
+            let result: InstallationRepositoriesResponse =
+                github_json(response, "Leer repositorios de la instalación GitHub")?;
             let count = result.repositories.len();
             if let Some(repository) = result.repositories.into_iter().find(|repository| {
                 repository.full_name.eq_ignore_ascii_case(PUBLISH_REPOSITORY)
@@ -1090,13 +1077,64 @@ fn parse_pack_version(version: &str) -> Option<(u32, u32, u32)> {
     Some((parts.next()?.ok()?, parts.next()?.ok()?, parts.next()?.ok()?))
 }
 
-fn github_json<T: for<'de> Deserialize<'de>>(response: reqwest::blocking::Response, context: &str) -> Result<T, String> {
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().unwrap_or_default();
-        return Err(format!("{context} falló ({status}): {}", body.chars().take(500).collect::<String>()));
+fn read_bounded_github_body(
+    reader: impl Read,
+    max_bytes: usize,
+    context: &str,
+) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::with_capacity(max_bytes.min(16 * 1024));
+    reader
+        .take(max_bytes as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("{context}: no se pudo leer la respuesta de GitHub: {error}"))?;
+    if bytes.len() > max_bytes {
+        return Err(format!("{context}: la respuesta de GitHub supera el límite permitido"));
     }
-    response.json().map_err(|error| format!("{context}: respuesta inválida de GitHub: {error}"))
+    Ok(bytes)
+}
+
+fn bounded_github_response_body(
+    response: reqwest::blocking::Response,
+    max_bytes: usize,
+    context: &str,
+) -> Result<Vec<u8>, String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        return Err(format!("{context}: la respuesta de GitHub supera el límite permitido"));
+    }
+    read_bounded_github_body(response, max_bytes, context)
+}
+
+fn github_error_message(response: reqwest::blocking::Response, context: &str) -> String {
+    let status = response.status();
+    let detail = bounded_github_response_body(response, MAX_GITHUB_ERROR_BYTES, context)
+        .map(|body| String::from_utf8_lossy(&body).chars().take(500).collect::<String>())
+        .unwrap_or_else(|_| "el cuerpo de error excede el límite permitido".into());
+    format!("{context} falló ({status}): {detail}")
+}
+
+fn github_json<T: for<'de> Deserialize<'de>>(
+    response: reqwest::blocking::Response,
+    context: &str,
+) -> Result<T, String> {
+    let status = response.status();
+    let limit = if status.is_success() {
+        MAX_GITHUB_RESPONSE_BYTES
+    } else {
+        MAX_GITHUB_ERROR_BYTES
+    };
+    let bytes = bounded_github_response_body(response, limit, context)?;
+    if !status.is_success() {
+        let detail = String::from_utf8_lossy(&bytes)
+            .chars()
+            .take(500)
+            .collect::<String>();
+        return Err(format!("{context} falló ({status}): {detail}"));
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|error| format!("{context}: respuesta inválida de GitHub: {error}"))
 }
 
 fn get_or_create_draft_release(token: &str, tag: &str, series_name: &str) -> Result<GitHubRelease, String> {
@@ -1112,8 +1150,7 @@ fn get_or_create_draft_release(token: &str, tag: &str, series_name: &str) -> Res
     }
     if response.status().as_u16() != 404 {
         let status = response.status();
-        let body = response.text().unwrap_or_default();
-        return Err(format!("No se pudo consultar el release ({status}): {}", body.chars().take(400).collect::<String>()));
+        return Err(github_error_message(response, "Consultar el release"));
     }
     let response = client.post(format!("{GITHUB_API}/repos/{PUBLISH_REPOSITORY}/releases"))
         .bearer_auth(token).header("Accept", "application/vnd.github+json")
@@ -1292,18 +1329,16 @@ fn upload_release_asset_once(
         })?;
     let status = response.status();
     if !status.is_success() {
-        let body = response.text().unwrap_or_default();
         return Err(AssetUploadFailure {
-            message: format!(
-                "Subir {name} falló ({status}): {}",
-                body.chars().take(500).collect::<String>()
-            ),
+            message: github_error_message(response, &format!("Subir {name}")),
             retryable: retryable_upload_status(status),
         });
     }
-    response.json().map_err(|error| AssetUploadFailure {
-        message: format!("GitHub devolvió una respuesta inválida al subir {name}: {error}"),
-        retryable: true,
+    github_json(response, &format!("Confirmar el asset {name}")).map_err(|message| {
+        AssetUploadFailure {
+            message,
+            retryable: true,
+        }
     })
 }
 
@@ -1550,8 +1585,14 @@ fn put_repository_file(token: &str, path: &str, bytes: &[u8], message: &str) -> 
     let response = client.put(endpoint).bearer_auth(token).header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28").header("User-Agent", "EternalCraft-Launcher")
         .json(&body).send().map_err(|error| format!("No se pudo guardar {path} en GitHub: {error}"))?;
-    if response.status().is_success() { Ok(()) }
-    else { Err(format!("GitHub rechazó actualizar {path} ({}): {}", response.status(), response.text().unwrap_or_default().chars().take(400).collect::<String>())) }
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(github_error_message(
+            response,
+            &format!("Actualizar {path}"),
+        ))
+    }
 }
 
 fn get_repository_file(token: &str, path: &str) -> Result<Option<GitHubContentResponse>, String> {
@@ -2133,6 +2174,14 @@ mod tests {
             "old-device-code"
         ));
         assert!(!pending_device_code_matches(None, "old-device-code"));
+    }
+
+    #[test]
+    fn github_api_response_reader_rejects_bodies_over_the_limit() {
+        let accepted =
+            read_bounded_github_body(std::io::Cursor::new(b"1234"), 4, "test").unwrap();
+        assert_eq!(accepted, b"1234");
+        assert!(read_bounded_github_body(std::io::Cursor::new(b"12345"), 4, "test").is_err());
     }
 
     #[test]

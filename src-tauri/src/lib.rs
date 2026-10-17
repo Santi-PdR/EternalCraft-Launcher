@@ -3566,11 +3566,14 @@ mod tests {
     #[test]
     #[ignore = "subprocess fixture for forge_installer_is_killed_on_launcher_exit"]
     fn forge_installer_child_waits_for_shutdown() {
-        thread::sleep(Duration::from_secs(60));
+        std::thread::sleep(std::time::Duration::from_secs(60));
     }
 
     #[test]
     fn forge_installer_is_killed_on_launcher_exit() {
+        use std::process::{Command, Stdio};
+        use super::ForgeInstallerProcess;
+
         let child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",

@@ -552,12 +552,38 @@ fn write_settings_file(path: &Path, settings: &Settings) -> Result<(), String> {
         .map_err(|error| format!("No se pudo confirmar la configuración: {error}"))
 }
 
-fn write_settings(app: &AppHandle, settings: &Settings) -> Result<(), String> {
+fn update_settings_file(
+    path: &Path,
+    update: impl FnOnce(&mut Settings) -> Result<bool, String>,
+) -> Result<(Settings, Option<PathBuf>), String> {
     let _guard = SETTINGS_LOCK
         .lock()
         .map_err(|_| "El bloqueo de configuración local dejó de estar disponible".to_string())?;
+    let (mut settings, backup) = read_settings_file(path)?;
+    if update(&mut settings)? {
+        write_settings_file(path, &settings)?;
+    }
+    Ok((settings, backup))
+}
+
+fn update_settings(
+    app: &AppHandle,
+    update: impl FnOnce(&mut Settings) -> Result<bool, String>,
+) -> Result<Settings, String> {
     let path = settings_path(app)?;
-    write_settings_file(&path, settings)
+    let (settings, backup) = update_settings_file(&path, update)?;
+    if let Some(backup) = backup {
+        let _ = append_install_log(
+            app,
+            "launcher",
+            "Configuración",
+            &format!(
+                "La configuración dañada se conservó en {}; el launcher restauró valores predeterminados.",
+                backup.display()
+            ),
+        );
+    }
+    Ok(settings)
 }
 
 fn valid_game_dir(path: &Path) -> Result<PathBuf, String> {
@@ -784,6 +810,64 @@ fn read_log_tail(path: &Path, max_bytes: u64) -> Result<Option<String>, String> 
 #[cfg(test)]
 mod settings_recovery_tests {
     use super::*;
+
+    #[test]
+    fn concurrent_settings_updates_do_not_overwrite_each_other() {
+        let fixture = std::env::temp_dir().join(format!(
+            "eternalcraft-settings-concurrent-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&fixture).unwrap();
+        let path = fixture.join("settings.json");
+        write_settings_file(&path, &Settings::default()).unwrap();
+
+        let (first_entered_tx, first_entered_rx) = std::sync::mpsc::channel();
+        let (release_first_tx, release_first_rx) = std::sync::mpsc::channel();
+        let first_path = path.clone();
+        let first = thread::spawn(move || {
+            update_settings_file(&first_path, |settings| {
+                first_entered_tx.send(()).unwrap();
+                release_first_rx.recv().unwrap();
+                settings.active_series_id = Some("siege".into());
+                Ok(true)
+            })
+        });
+        first_entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first update should enter its transaction");
+
+        let (second_started_tx, second_started_rx) = std::sync::mpsc::channel();
+        let (second_entered_tx, second_entered_rx) = std::sync::mpsc::channel();
+        let second_path = path.clone();
+        let second = thread::spawn(move || {
+            second_started_tx.send(()).unwrap();
+            update_settings_file(&second_path, |settings| {
+                second_entered_tx.send(()).unwrap();
+                settings.theme_id = Some("siege-night".into());
+                Ok(true)
+            })
+        });
+        second_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("second update should start");
+        assert!(second_entered_rx.recv_timeout(Duration::from_millis(50)).is_err());
+
+        release_first_tx.send(()).unwrap();
+        first.join().unwrap().unwrap();
+        second_entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("second update should run after the first commits");
+        second.join().unwrap().unwrap();
+
+        let (saved, _) = read_settings_file(&path).unwrap();
+        assert_eq!(saved.active_series_id.as_deref(), Some("siege"));
+        assert_eq!(saved.theme_id.as_deref(), Some("siege-night"));
+        fs::remove_dir_all(fixture).unwrap();
+    }
 
     #[test]
     fn oversized_settings_are_preserved_and_replaced_with_valid_defaults() {
@@ -2183,12 +2267,11 @@ fn with_memory_arguments(
 
 fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
     let catalog = current_catalog()?;
-    let mut settings = read_settings(app)?;
-    let mut migrated = migrate_theme_preference(&mut settings);
-    migrated |= migrate_microsoft_client_id_preference(&mut settings);
-    if migrated {
-        write_settings(app, &settings)?;
-    }
+    let settings = update_settings(app, |settings| {
+        let mut migrated = migrate_theme_preference(settings);
+        migrated |= migrate_microsoft_client_id_preference(settings);
+        Ok(migrated)
+    })?;
     let memory = memory_status(&settings);
     let default_series = catalog
         .series
@@ -2295,10 +2378,11 @@ fn set_theme(app: AppHandle, theme_id: String) -> Result<Bootstrap, String> {
     if !is_valid_theme(&theme_id) {
         return Err("El tema solicitado no está disponible".into());
     }
-    let mut settings = read_settings(&app)?;
-    settings.theme_id = Some(theme_id);
-    settings.theme_migrated = true;
-    write_settings(&app, &settings)?;
+    update_settings(&app, |settings| {
+        settings.theme_id = Some(theme_id);
+        settings.theme_migrated = true;
+        Ok(true)
+    })?;
     make_bootstrap(&app)
 }
 
@@ -2311,9 +2395,10 @@ fn set_background_preset(app: AppHandle, preset_id: String) -> Result<Bootstrap,
     if preset_id != "auto" && !is_valid_background_preset(&preset_id) {
         return Err("El fondo seleccionado no está disponible".into());
     }
-    let mut settings = read_settings(&app)?;
-    settings.background_preset = Some(preset_id);
-    write_settings(&app, &settings)?;
+    update_settings(&app, |settings| {
+        settings.background_preset = Some(preset_id);
+        Ok(true)
+    })?;
     make_bootstrap(&app)
 }
 
@@ -2602,9 +2687,10 @@ fn login_microsoft(app: AppHandle) -> Result<Bootstrap, String> {
         .0
         .lock()
         .map_err(|_| "La sesión Microsoft quedó bloqueada".to_string())? = Some(session);
-    let mut settings = read_settings(&app)?;
-    settings.account_mode = Some(AccountMode::Microsoft);
-    write_settings(&app, &settings)?;
+    update_settings(&app, |settings| {
+        settings.account_mode = Some(AccountMode::Microsoft);
+        Ok(true)
+    })?;
     make_bootstrap(&app)
 }
 
@@ -2614,11 +2700,14 @@ fn logout_microsoft(app: AppHandle) -> Result<Bootstrap, String> {
         .0
         .lock()
         .map_err(|_| "La sesión Microsoft quedó bloqueada".to_string())? = None;
-    let mut settings = read_settings(&app)?;
-    if settings.account_mode == Some(AccountMode::Microsoft) {
-        settings.account_mode = None;
-        write_settings(&app, &settings)?;
-    }
+    update_settings(&app, |settings| {
+        if settings.account_mode == Some(AccountMode::Microsoft) {
+            settings.account_mode = None;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    })?;
     make_bootstrap(&app)
 }
 
@@ -2653,16 +2742,17 @@ fn login_offline(app: AppHandle, username: String) -> Result<Bootstrap, String> 
     if !valid_offline_username(username) {
         return Err("El nombre local debe tener entre 3 y 16 caracteres: letras ASCII, números o guion bajo".into());
     }
-    let mut settings = read_settings(&app)?;
-    let offline_uuid = offline_uuid_for_profile(
-        username,
-        settings.offline_username.as_deref(),
-        settings.offline_uuid.as_deref(),
-    );
-    settings.offline_username = Some(username.to_string());
-    settings.offline_uuid = Some(offline_uuid);
-    settings.account_mode = Some(AccountMode::Offline);
-    write_settings(&app, &settings)?;
+    update_settings(&app, |settings| {
+        let offline_uuid = offline_uuid_for_profile(
+            username,
+            settings.offline_username.as_deref(),
+            settings.offline_uuid.as_deref(),
+        );
+        settings.offline_username = Some(username.to_string());
+        settings.offline_uuid = Some(offline_uuid);
+        settings.account_mode = Some(AccountMode::Offline);
+        Ok(true)
+    })?;
     *app.state::<AuthSession>()
         .0
         .lock()
@@ -2672,36 +2762,39 @@ fn login_offline(app: AppHandle, username: String) -> Result<Bootstrap, String> 
 
 #[tauri::command]
 fn logout_offline(app: AppHandle) -> Result<Bootstrap, String> {
-    let mut settings = read_settings(&app)?;
-    settings.offline_username = None;
-    settings.offline_uuid = None;
-    if settings.account_mode == Some(AccountMode::Offline) {
-        settings.account_mode = None;
-    }
-    write_settings(&app, &settings)?;
+    update_settings(&app, |settings| {
+        settings.offline_username = None;
+        settings.offline_uuid = None;
+        if settings.account_mode == Some(AccountMode::Offline) {
+            settings.account_mode = None;
+        }
+        Ok(true)
+    })?;
     make_bootstrap(&app)
 }
 
 #[tauri::command]
 fn set_memory_limit(app: AppHandle, memory_mb: u32) -> Result<Bootstrap, String> {
-    let mut settings = read_settings(&app)?;
-    let limits = memory_status(&settings);
-    if memory_mb < limits.min_mb || memory_mb > limits.max_mb || memory_mb % 512 != 0 {
-        return Err(format!(
-            "El valor debe estar entre {} y {} MiB en pasos de 512 MiB",
-            limits.min_mb, limits.max_mb
-        ));
-    }
-    settings.memory_limit_mb = Some(memory_mb);
-    write_settings(&app, &settings)?;
+    update_settings(&app, |settings| {
+        let limits = memory_status(settings);
+        if memory_mb < limits.min_mb || memory_mb > limits.max_mb || memory_mb % 512 != 0 {
+            return Err(format!(
+                "El valor debe estar entre {} y {} MiB en pasos de 512 MiB",
+                limits.min_mb, limits.max_mb
+            ));
+        }
+        settings.memory_limit_mb = Some(memory_mb);
+        Ok(true)
+    })?;
     make_bootstrap(&app)
 }
 
 #[tauri::command]
 fn reset_memory_limit(app: AppHandle) -> Result<Bootstrap, String> {
-    let mut settings = read_settings(&app)?;
-    settings.memory_limit_mb = None;
-    write_settings(&app, &settings)?;
+    update_settings(&app, |settings| {
+        settings.memory_limit_mb = None;
+        Ok(true)
+    })?;
     make_bootstrap(&app)
 }
 
@@ -2803,8 +2896,13 @@ fn launch_minecraft(app: AppHandle, series_id: String) -> Result<MinecraftStatus
             settings.offline_uuid.as_deref(),
         );
         if settings.offline_uuid.as_deref() != Some(offline_uuid.as_str()) {
-            settings.offline_uuid = Some(offline_uuid.clone());
-            write_settings(&app, &settings)?;
+            update_settings(&app, |settings| {
+                if settings.offline_uuid.as_deref() == Some(offline_uuid.as_str()) {
+                    return Ok(false);
+                }
+                settings.offline_uuid = Some(offline_uuid.clone());
+                Ok(true)
+            })?;
         }
         Account::Offline {
             username: username.to_string(),
@@ -3021,17 +3119,19 @@ fn select_java_executable(app: AppHandle) -> Result<Bootstrap, String> {
     if status.major != Some(17) {
         return Err(status.detail);
     }
-    let mut settings = read_settings(&app)?;
-    settings.java_executable = Some(path.to_string_lossy().into_owned());
-    write_settings(&app, &settings)?;
+    update_settings(&app, |settings| {
+        settings.java_executable = Some(path.to_string_lossy().into_owned());
+        Ok(true)
+    })?;
     make_bootstrap(&app)
 }
 
 #[tauri::command]
 fn reset_java_selection(app: AppHandle) -> Result<Bootstrap, String> {
-    let mut settings = read_settings(&app)?;
-    settings.java_executable = None;
-    write_settings(&app, &settings)?;
+    update_settings(&app, |settings| {
+        settings.java_executable = None;
+        Ok(true)
+    })?;
     make_bootstrap(&app)
 }
 
@@ -3090,11 +3190,12 @@ async fn install_forge_base(app: AppHandle, series_id: String) -> Result<Bootstr
     })
     .await
     .map_err(|error| format!("Falló la tarea de instalación: {error}"))??;
-    let mut settings = read_settings(&app)?;
-    settings
-        .managed_installs
-        .insert(managed_series_id, installed_profile_id);
-    write_settings(&app, &settings)?;
+    update_settings(&app, |settings| {
+        settings
+            .managed_installs
+            .insert(managed_series_id, installed_profile_id);
+        Ok(true)
+    })?;
     make_bootstrap(&app)
 }
 
@@ -3104,9 +3205,10 @@ fn set_active_series(app: AppHandle, series_id: String) -> Result<Bootstrap, Str
     if !catalog.series.iter().any(|series| series.id == series_id) {
         return Err("La serie solicitada no existe en el catálogo".into());
     }
-    let mut settings = read_settings(&app)?;
-    settings.active_series_id = Some(series_id);
-    write_settings(&app, &settings)?;
+    update_settings(&app, |settings| {
+        settings.active_series_id = Some(series_id);
+        Ok(true)
+    })?;
     make_bootstrap(&app)
 }
 
@@ -3128,12 +3230,13 @@ async fn select_game_directory(app: AppHandle, series_id: String) -> Result<Boot
         .into_path()
         .map_err(|error| format!("Ruta de carpeta no válida: {error}"))?;
     let chosen = valid_game_dir(&chosen)?;
-    let mut settings = read_settings(&app)?;
-    settings.active_series_id = Some(series_id.clone());
-    settings
-        .game_directories
-        .insert(series_id, chosen.to_string_lossy().into_owned());
-    write_settings(&app, &settings)?;
+    update_settings(&app, |settings| {
+        settings.active_series_id = Some(series_id.clone());
+        settings
+            .game_directories
+            .insert(series_id, chosen.to_string_lossy().into_owned());
+        Ok(true)
+    })?;
     make_bootstrap(&app)
 }
 
@@ -3148,12 +3251,13 @@ fn link_detected_directory(app: AppHandle, series_id: String) -> Result<Bootstra
         .get(&series_id)
         .ok_or_else(|| "No se encontró una instancia compatible para esta serie".to_string())?;
     let path = valid_game_dir(Path::new(path))?;
-    let mut settings = read_settings(&app)?;
-    settings.active_series_id = Some(series_id.clone());
-    settings
-        .game_directories
-        .insert(series_id, path.to_string_lossy().into_owned());
-    write_settings(&app, &settings)?;
+    update_settings(&app, |settings| {
+        settings.active_series_id = Some(series_id.clone());
+        settings
+            .game_directories
+            .insert(series_id, path.to_string_lossy().into_owned());
+        Ok(true)
+    })?;
     make_bootstrap(&app)
 }
 

@@ -1881,24 +1881,17 @@ fn paths_equal_for_process_check(left: &Path, right: &Path) -> bool {
     }
 }
 
-fn process_is_minecraft_for_directory(process: &sysinfo::Process, game_directory: &Path) -> bool {
+fn process_minecraft_game_directory(process: &sysinfo::Process) -> Option<PathBuf> {
     if !java_process_name(process.name())
         && !process
             .exe()
             .and_then(Path::file_name)
             .is_some_and(java_process_name)
     {
-        return false;
+        return None;
     }
-    let Some(process_directory) = game_directory_argument(process.cmd())
+    game_directory_argument(process.cmd())
         .and_then(|path| normalized_process_path(&path, process.cwd()))
-    else {
-        return false;
-    };
-    let expected_directory = game_directory
-        .canonicalize()
-        .unwrap_or_else(|_| game_directory.to_path_buf());
-    paths_equal_for_process_check(&process_directory, &expected_directory)
 }
 
 fn running_minecraft_directories() -> Vec<(u32, PathBuf)> {
@@ -1937,11 +1930,7 @@ fn running_minecraft_directories() -> Vec<(u32, PathBuf)> {
         .into_iter()
         .filter_map(|pid| {
             let process = system.process(pid)?;
-            if !process_is_minecraft_for_directory(process, Path::new("/")) {
-                return None;
-            }
-            let directory = game_directory_argument(process.cmd())
-                .and_then(|path| normalized_process_path(&path, process.cwd()))?;
+            let directory = process_minecraft_game_directory(process)?;
             Some((pid.as_u32(), directory))
         })
         .collect()

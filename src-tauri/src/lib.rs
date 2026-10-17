@@ -231,6 +231,7 @@ struct ModInventory {
 }
 
 const INSTALL_LOG_MAX_BYTES: u64 = 1_048_576;
+const INSTALL_LOG_MAX_MESSAGE_BYTES: usize = 16 * 1024;
 static INSTALL_LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn is_valid_theme(theme_id: &str) -> bool {
@@ -606,6 +607,32 @@ fn append_install_log(
     append_install_log_at(&path, series_id, stage, message)
 }
 
+fn sanitize_install_log_message(message: &str) -> String {
+    let mut safe = String::with_capacity(message.len().min(INSTALL_LOG_MAX_MESSAGE_BYTES));
+    let mut truncated = false;
+    for character in message.chars() {
+        let character = if matches!(character, '\\n' | '\\r') {
+            ' '
+        } else {
+            character
+        };
+        if safe.len() + character.len_utf8() > INSTALL_LOG_MAX_MESSAGE_BYTES {
+            truncated = true;
+            break;
+        }
+        safe.push(character);
+    }
+    if truncated {
+        const MARKER: &str = "…[truncado]";
+        let content_limit = INSTALL_LOG_MAX_MESSAGE_BYTES - MARKER.len();
+        while safe.len() > content_limit {
+            safe.pop();
+        }
+        safe.push_str(MARKER);
+    }
+    safe
+}
+
 fn append_install_log_at(
     path: &Path,
     series_id: &str,
@@ -620,23 +647,32 @@ fn append_install_log_at(
         .ok_or_else(|| "La ruta del registro no contiene una carpeta".to_string())?;
     fs::create_dir_all(parent)
         .map_err(|error| format!("No se pudo crear la carpeta del registro: {error}"))?;
-    if fs::metadata(path).is_ok_and(|metadata| metadata.len() >= INSTALL_LOG_MAX_BYTES) {
+
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let line = format!(
+        "{seconds} [{series_id}] [{stage}] {}\\n",
+        sanitize_install_log_message(message)
+    );
+    if fs::metadata(path).is_ok_and(|metadata| {
+        metadata
+            .len()
+            .saturating_add(line.len() as u64)
+            > INSTALL_LOG_MAX_BYTES
+    }) {
         let previous = path.with_extension("log.1");
         let _ = fs::remove_file(&previous);
         fs::rename(path, previous)
             .map_err(|error| format!("No se pudo rotar el registro local: {error}"))?;
     }
-    let seconds = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let safe_message = message.replace(['\n', '\r'], " ");
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
         .map_err(|error| format!("No se pudo abrir el registro local: {error}"))?;
-    writeln!(file, "{seconds} [{series_id}] [{stage}] {safe_message}")
+    file.write_all(line.as_bytes())
         .map_err(|error| format!("No se pudo escribir el registro local: {error}"))
 }
 
@@ -686,6 +722,53 @@ fn read_log_tail(path: &Path, max_bytes: u64) -> Result<Option<String>, String> 
 #[cfg(test)]
 mod log_tests {
     use super::*;
+
+    #[test]
+    fn oversized_log_messages_are_truncated_before_writing() {
+        let fixture = std::env::temp_dir().join(format!(
+            "eternalcraft-log-message-limit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&fixture).unwrap();
+        let log = fixture.join("launcher.log");
+        let message = "x".repeat(INSTALL_LOG_MAX_MESSAGE_BYTES * 2);
+
+        append_install_log_at(&log, "siege", "Network", &message).unwrap();
+
+        let contents = fs::read_to_string(&log).unwrap();
+        assert!(contents.len() <= INSTALL_LOG_MAX_MESSAGE_BYTES + 128);
+        assert!(contents.contains("…[truncado]"));
+        assert!(contents.ends_with('\\n'));
+        fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
+    fn log_rotates_before_the_next_line_would_exceed_the_limit() {
+        let fixture = std::env::temp_dir().join(format!(
+            "eternalcraft-log-rotation-bound-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&fixture).unwrap();
+        let log = fixture.join("launcher.log");
+        fs::write(&log, vec![b'x'; INSTALL_LOG_MAX_BYTES as usize - 8]).unwrap();
+
+        append_install_log_at(&log, "siege", "Network", "line").unwrap();
+
+        assert_eq!(
+            fs::metadata(fixture.join("launcher.log.1")).unwrap().len(),
+            INSTALL_LOG_MAX_BYTES - 8
+        );
+        assert!(fs::metadata(&log).unwrap().len() < INSTALL_LOG_MAX_BYTES);
+        fs::remove_dir_all(fixture).unwrap();
+    }
 
     #[test]
     fn reads_only_complete_recent_lines_from_large_logs() {

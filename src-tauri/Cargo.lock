@@ -968,7 +968,7 @@ dependencies = [
 
 [[package]]
 name = "eternalcraft-launcher"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "atomic-write-file",
  "base64 0.22.1",

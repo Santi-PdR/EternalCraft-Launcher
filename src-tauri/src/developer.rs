@@ -598,10 +598,7 @@ fn ensure_repository_write_access(access_token: &str) -> Result<(), String> {
             .send()
             .map_err(|error| format!("No se pudieron validar las instalaciones de la GitHub App: {error}"))?;
         if !response.status().is_success() {
-            return Err(format!(
-                "GitHub no pudo validar la instalación de la App ({})",
-                response.status()
-            ));
+            return Err(github_error_message(response, "Validar la instalación de la App"));
         }
         let result: UserInstallationsResponse =
             github_json(response, "Leer instalaciones GitHub")?;
@@ -629,9 +626,9 @@ fn ensure_repository_write_access(access_token: &str) -> Result<(), String> {
                 .send()
                 .map_err(|error| format!("No se pudo comprobar el acceso de la GitHub App al repositorio: {error}"))?;
             if !response.status().is_success() {
-                return Err(format!(
-                    "GitHub no pudo comprobar los repositorios de la instalación ({})",
-                    response.status()
+                return Err(github_error_message(
+                    response,
+                    "Comprobar repositorios de la instalación",
                 ));
             }
             let result: InstallationRepositoriesResponse =

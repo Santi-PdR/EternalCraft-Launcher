@@ -550,18 +550,20 @@
   }
 
   async function launchMinecraft() {
-    if (!selected || selected.packStatus !== 'available') return;
+    const launchSeries = selected;
+    if (!launchSeries || launchSeries.packStatus !== 'available') return;
+    const seriesId = launchSeries.id;
     busy = true;
     error = '';
     try {
-      if (!bootstrap?.installedProfiles[selected.id] && !isLinked(selected)) {
-        const installed = await installBase();
+      if (!bootstrap?.installedProfiles[seriesId] && !isLinked(launchSeries)) {
+        const installed = await installBaseForSeries(launchSeries);
         if (!installed) return;
       }
-      const synced = await syncOfficialPack();
+      const synced = await syncOfficialPackForSeries(launchSeries);
       if (!synced) return;
-      minecraftStatus = await invoke<MinecraftStatus>('launch_minecraft', { seriesId: selected.id });
-      notice = `Minecraft se inició${minecraftStatus.pid ? ` (PID ${minecraftStatus.pid})` : ''}. El launcher seguirá disponible para ver su estado y registros.`;
+      minecraftStatus = await invoke<MinecraftStatus>('launch_minecraft', { seriesId });
+      notice = `Minecraft de ${launchSeries.name} se inició${minecraftStatus.pid ? ` (PID ${minecraftStatus.pid})` : ''}. El launcher seguirá disponible para ver su estado y registros.`;
     } catch (reason) {
       error = String(reason);
     } finally {
@@ -695,8 +697,13 @@
   }
 
   async function installBase(): Promise<boolean> {
-    if (!selected || installingSeries !== null) return false;
-    const seriesId = selected.id;
+    if (!selected) return false;
+    return installBaseForSeries(selected);
+  }
+
+  async function installBaseForSeries(series: Series): Promise<boolean> {
+    if (installingSeries !== null) return false;
+    const seriesId = series.id;
     installingSeries = seriesId;
     installError = '';
     installErrorSeries = null;
@@ -705,7 +712,7 @@
     try {
       bootstrap = await invoke<Bootstrap>('install_forge_base', { seriesId });
       await loadMods(seriesId);
-      notice = 'La base de Minecraft y Forge quedó instalada y verificada.';
+      notice = `La base de Minecraft y Forge de ${series.name} quedó instalada y verificada.`;
       return true;
     } catch (reason) {
       installError = String(reason);
@@ -718,19 +725,24 @@
   }
 
   async function syncOfficialPack(): Promise<boolean> {
-    if (!selected || selected.packStatus !== 'available') return false;
-    if (!bootstrap?.installedProfiles[selected.id] && !isLinked(selected)) {
-      const installed = await installBase();
+    if (!selected) return false;
+    return syncOfficialPackForSeries(selected);
+  }
+
+  async function syncOfficialPackForSeries(series: Series): Promise<boolean> {
+    if (series.packStatus !== 'available') return false;
+    if (!bootstrap?.installedProfiles[series.id] && !isLinked(series)) {
+      const installed = await installBaseForSeries(series);
       if (!installed) return false;
     }
     syncingPack = true;
     packSyncProgress = null;
-    packSyncMessage = 'Consultando la versión oficial…';
+    packSyncMessage = `Consultando la versión oficial de ${series.name}…`;
     error = '';
     try {
-      const result = await invoke<PackSyncResult>('sync_official_pack', { seriesId: selected.id });
-      await loadMods(selected.id);
-      notice = `Pack ${result.version} sincronizado: ${result.downloadedFiles} mods oficiales; ${result.removedFiles} retirados.`;
+      const result = await invoke<PackSyncResult>('sync_official_pack', { seriesId: series.id });
+      await loadMods(series.id);
+      notice = `Pack ${series.name} ${result.version} sincronizado: ${result.downloadedFiles} mods oficiales; ${result.removedFiles} retirados.`;
       return true;
     } catch (reason) {
       error = String(reason);

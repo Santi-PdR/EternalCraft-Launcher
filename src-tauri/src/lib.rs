@@ -1194,11 +1194,16 @@ fn validate_personal_mod_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_personal_mod_size(size_bytes: u64) -> Result<(), String> {
-    if size_bytes > pack::MOD_LIMIT {
+fn validate_personal_mod_size(size_bytes: u64, limit_bytes: u64) -> Result<(), String> {
+    if size_bytes > limit_bytes {
+        let megabyte = 1024 * 1024;
+        let limit = if limit_bytes % megabyte == 0 {
+            format!("{} MiB", limit_bytes / megabyte)
+        } else {
+            format!("{limit_bytes} bytes")
+        };
         return Err(format!(
-            "El mod personal supera el límite de {} MiB",
-            pack::MOD_LIMIT / (1024 * 1024)
+            "El mod personal supera el límite permitido de {limit}"
         ));
     }
     Ok(())
@@ -1417,6 +1422,14 @@ fn add_personal_mod_for_series(
 }
 
 fn add_personal_mod_inner(source: &Path, mods_directory: &Path) -> Result<String, String> {
+    add_personal_mod_inner_with_limit(source, mods_directory, pack::MOD_LIMIT)
+}
+
+fn add_personal_mod_inner_with_limit(
+    source: &Path,
+    mods_directory: &Path,
+    max_bytes: u64,
+) -> Result<String, String> {
     let source = source
         .canonicalize()
         .map_err(|error| format!("No se pudo resolver el archivo seleccionado: {error}"))?;
@@ -1425,7 +1438,7 @@ fn add_personal_mod_inner(source: &Path, mods_directory: &Path) -> Result<String
     if !metadata.is_file() {
         return Err("Selecciona un archivo JAR normal".into());
     }
-    validate_personal_mod_size(metadata.len())?;
+    validate_personal_mod_size(metadata.len(), max_bytes)?;
     let name = source
         .file_name()
         .and_then(|name| name.to_str())
@@ -1456,7 +1469,7 @@ fn add_personal_mod_inner(source: &Path, mods_directory: &Path) -> Result<String
         .as_nanos();
     let temporary =
         personal_directory.join(format!(".{name}.{}.{}.tmp", std::process::id(), unique));
-    if let Err(error) = copy_file_create_new_limited(&source, &temporary, pack::MOD_LIMIT) {
+    if let Err(error) = copy_file_create_new_limited(&source, &temporary, max_bytes) {
         let _ = fs::remove_file(&temporary);
         return Err(format!("No se pudo preparar la copia personal: {error}"));
     }
@@ -3976,9 +3989,30 @@ mod tests {
     }
 
     #[test]
+    fn personal_mod_import_rejects_oversized_source_before_opening_the_jar() {
+        let fixture = std::env::temp_dir().join(format!(
+            "eternalcraft-personal-size-check-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&fixture).unwrap();
+        let source = fixture.join("oversized.jar");
+        let mods = fixture.join("game/mods");
+        fs::write(&source, b"not a valid jar").unwrap();
+
+        let error = add_personal_mod_inner_with_limit(&source, &mods, 6).unwrap_err();
+        assert!(error.contains("6 bytes"));
+        assert!(!mods.exists());
+        fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
     fn personal_mod_import_uses_the_official_mod_size_limit() {
-        assert!(validate_personal_mod_size(pack::MOD_LIMIT).is_ok());
-        let error = validate_personal_mod_size(pack::MOD_LIMIT + 1).unwrap_err();
+        assert!(validate_personal_mod_size(pack::MOD_LIMIT, pack::MOD_LIMIT).is_ok());
+        let error = validate_personal_mod_size(pack::MOD_LIMIT + 1, pack::MOD_LIMIT).unwrap_err();
         assert!(error.contains("512 MiB"));
     }
 

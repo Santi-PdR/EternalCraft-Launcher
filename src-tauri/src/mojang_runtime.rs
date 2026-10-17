@@ -394,8 +394,8 @@ fn create_runtime_hard_links(root: &Path, links: &[(PathBuf, String)]) -> Result
     let mut pending = links.to_vec();
 
     while !pending.is_empty() {
+        let pending_count = pending.len();
         let mut unresolved = Vec::new();
-        let mut created_or_verified = false;
         for (relative_link, target) in pending {
             let relative_link_name = relative_link.to_string_lossy();
             let relative_link = safe_relative_path(&relative_link_name)?;
@@ -463,12 +463,11 @@ fn create_runtime_hard_links(root: &Path, links: &[(PathBuf, String)]) -> Result
                     ));
                 }
             }
-            created_or_verified = true;
         }
         if unresolved.is_empty() {
             return Ok(());
         }
-        if !created_or_verified {
+        if unresolved.len() == pending_count {
             let unresolved_names = unresolved
                 .iter()
                 .map(|(path, _)| path.display().to_string())

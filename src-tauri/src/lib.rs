@@ -611,7 +611,7 @@ fn sanitize_install_log_message(message: &str) -> String {
     let mut safe = String::with_capacity(message.len().min(INSTALL_LOG_MAX_MESSAGE_BYTES));
     let mut truncated = false;
     for character in message.chars() {
-        let character = if matches!(character, '\\n' | '\\r') {
+        let character = if matches!(character, '\n' | '\r') {
             ' '
         } else {
             character
@@ -653,7 +653,7 @@ fn append_install_log_at(
         .unwrap_or_default()
         .as_secs();
     let line = format!(
-        "{seconds} [{series_id}] [{stage}] {}\\n",
+        "{seconds} [{series_id}] [{stage}] {}\n",
         sanitize_install_log_message(message)
     );
     if fs::metadata(path).is_ok_and(|metadata| {
@@ -742,7 +742,7 @@ mod log_tests {
         let contents = fs::read_to_string(&log).unwrap();
         assert!(contents.len() <= INSTALL_LOG_MAX_MESSAGE_BYTES + 128);
         assert!(contents.contains("…[truncado]"));
-        assert!(contents.ends_with('\\n'));
+        assert!(contents.ends_with('\n'));
         fs::remove_dir_all(fixture).unwrap();
     }
 

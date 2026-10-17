@@ -1953,6 +1953,9 @@ fn detect_external_minecraft(app: &AppHandle) -> Result<Option<MinecraftStatus>,
             directories.push((series.id, game_directory));
         }
     }
+    if directories.is_empty() {
+        return Ok(None);
+    }
     let processes = running_minecraft_directories();
     for (series_id, game_directory) in directories {
         let expected_directory = game_directory

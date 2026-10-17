@@ -224,7 +224,7 @@ pub fn install_java_runtime(
     Ok(())
 }
 
-fn read_bounded_runtime_body(mut reader: impl Read, max_bytes: usize) -> io::Result<Vec<u8>> {
+fn read_bounded_runtime_body(reader: impl Read, max_bytes: usize) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::with_capacity(max_bytes.min(16 * 1024));
     reader
         .take(max_bytes as u64 + 1)
@@ -765,7 +765,7 @@ mod tests {
             b"Mojang runtime uses LZMA-alone, not XZ.".len() as u64 - 1,
         );
         assert!(result.is_err());
-        assert_eq!(output.len(), b"Mojang runtime uses LZMA-alone, not XZ.".len() - 1);
+        assert_eq!(output.len(), b"Mojang runtime uses LZMA-alone, not XZ.".len());
     }
 
     #[test]
@@ -809,6 +809,7 @@ mod tests {
         let client = reqwest::blocking::Client::new();
         let download = RuntimeDownload {
             sha1: expected_hash,
+            size: b"outside runtime".len() as u64,
             url: "https://example.invalid/runtime".into(),
         };
         let mut progress = QuietProgress;

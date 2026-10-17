@@ -115,6 +115,8 @@ pub fn install_java_runtime(
     }
 
     let mut installed_files = Vec::new();
+    #[cfg(windows)]
+    let mut windows_runtime_links = Vec::new();
     for (relative_name, file) in &platform_manifest.files {
         let relative = safe_relative_path(relative_name)?;
         let destination = install_root.join(&relative);
@@ -185,15 +187,20 @@ pub fn install_java_runtime(
                         ));
                     }
                 }
-                #[cfg(not(unix))]
+                #[cfg(windows)]
+                windows_runtime_links.push((relative.clone(), target.to_string()));
+                #[cfg(not(any(unix, windows)))]
                 return Err(format!(
-                    "El runtime Java requiere un enlace simbólico no disponible en esta plataforma: {relative_name}"
+                    "El runtime Java requiere enlaces de archivos no disponibles en esta plataforma: {relative_name}"
                 ));
             }
             Some(other) => return Err(format!("Tipo de archivo Java no reconocido: {other}")),
             None => {}
         }
     }
+
+    #[cfg(windows)]
+    create_runtime_hard_links(&canonical_install_root, &windows_runtime_links)?;
 
     for (relative_name, file) in &platform_manifest.files {
         if file.file_type.as_deref() == Some("link") {
@@ -376,6 +383,103 @@ fn ensure_runtime_directory_tree(root: &Path, path: &Path) -> Result<(), String>
         };
         current.push(part);
         ensure_normal_directory(&current)?;
+    }
+    Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn create_runtime_hard_links(root: &Path, links: &[(PathBuf, String)]) -> Result<(), String> {
+    let canonical_root = fs::canonicalize(root)
+        .map_err(|error| format!("No se pudo resolver la raíz del runtime Java: {error}"))?;
+    let mut pending = links.to_vec();
+
+    while !pending.is_empty() {
+        let mut unresolved = Vec::new();
+        let mut created_or_verified = false;
+        for (relative_link, target) in pending {
+            let relative_link_name = relative_link.to_string_lossy();
+            let relative_link = safe_relative_path(&relative_link_name)?;
+            validate_link_target(&relative_link, &target)?;
+            let link = canonical_root.join(&relative_link);
+            let target_path = link
+                .parent()
+                .unwrap_or(&canonical_root)
+                .join(&target);
+            let canonical_target = match fs::canonicalize(&target_path) {
+                Ok(path) => path,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    unresolved.push((relative_link, target));
+                    continue;
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "No se pudo resolver el destino del enlace Java {}: {error}",
+                        target_path.display()
+                    ));
+                }
+            };
+            if !canonical_target.starts_with(&canonical_root) {
+                return Err(format!("El destino del enlace Java sale del runtime: {target}"));
+            }
+            let target_metadata = fs::metadata(&canonical_target).map_err(|error| {
+                format!(
+                    "No se pudo inspeccionar el destino del enlace Java {}: {error}",
+                    canonical_target.display()
+                )
+            })?;
+            if !target_metadata.is_file() {
+                return Err(format!("El enlace Java de Windows no apunta a un archivo: {target}"));
+            }
+
+            match fs::symlink_metadata(&link) {
+                Ok(metadata) if metadata.file_type().is_file() => {
+                    if !same_file::is_same_file(&link, &canonical_target).map_err(|error| {
+                        format!("No se pudo validar el hard link Java {}: {error}", link.display())
+                    })? {
+                        return Err(format!(
+                            "La ruta del enlace Java ya existe y no apunta al archivo esperado: {}",
+                            link.display()
+                        ));
+                    }
+                }
+                Ok(_) => {
+                    return Err(format!(
+                        "La ruta del enlace Java ya existe y no es un archivo normal: {}",
+                        link.display()
+                    ));
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    fs::hard_link(&canonical_target, &link).map_err(|error| {
+                        format!(
+                            "No se pudo crear el hard link Java {}: {error}",
+                            link.display()
+                        )
+                    })?;
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "No se pudo inspeccionar el enlace Java {}: {error}",
+                        link.display()
+                    ));
+                }
+            }
+            created_or_verified = true;
+        }
+        if unresolved.is_empty() {
+            return Ok(());
+        }
+        if !created_or_verified {
+            let unresolved_names = unresolved
+                .iter()
+                .map(|(path, _)| path.display().to_string())
+                .take(5)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "El manifiesto Java contiene destinos de enlace ausentes: {unresolved_names}"
+            ));
+        }
+        pending = unresolved;
     }
     Ok(())
 }
@@ -673,6 +777,8 @@ fn set_executable(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{decode_lzma, safe_relative_path, validate_link_target};
+    #[cfg(any(windows, test))]
+    use super::create_runtime_hard_links;
     use mc_launcher_core::progress::{ProgressEvent, ProgressReporter};
     #[cfg(unix)]
     use super::{
@@ -739,6 +845,43 @@ mod tests {
         )
         .is_ok());
         assert!(validate_link_target(Path::new("bin/java"), "../../outside").is_err());
+    }
+
+    #[test]
+    fn windows_runtime_links_are_safe_idempotent_hard_links() {
+        let root = std::env::temp_dir().join(format!(
+            "eternalcraft-runtime-hardlink-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        let target = root.join("bin/java.exe");
+        std::fs::write(&target, b"java runtime target").unwrap();
+        let canonical_root = std::fs::canonicalize(&root).unwrap();
+        let links = vec![(std::path::PathBuf::from("bin/java"), "java.exe".to_string())];
+
+        create_runtime_hard_links(&canonical_root, &links).unwrap();
+        let link = root.join("bin/java");
+        assert!(same_file::is_same_file(&link, &target).unwrap());
+        create_runtime_hard_links(&canonical_root, &links).unwrap();
+        assert!(same_file::is_same_file(&link, &target).unwrap());
+
+        let outside = std::env::temp_dir().join(format!(
+            "eternalcraft-runtime-hardlink-outside-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&outside, b"outside").unwrap();
+        let traversal = vec![(std::path::PathBuf::from("bin/escape"), "../../outside".to_string())];
+        assert!(create_runtime_hard_links(&canonical_root, &traversal).is_err());
+        std::fs::remove_file(outside).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

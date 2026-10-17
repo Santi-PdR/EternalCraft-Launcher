@@ -138,6 +138,48 @@ struct AuthSession(std::sync::Mutex<Option<AuthenticatedAccount>>);
 struct MinecraftProcess(std::sync::Mutex<MinecraftProcessState>);
 
 #[derive(Default)]
+struct ForgeInstallerProcess(std::sync::Mutex<Option<std::process::Child>>);
+
+fn terminate_registered_forge_installer(process: &ForgeInstallerProcess) -> bool {
+    let Ok(mut active) = process.0.lock() else {
+        return false;
+    };
+    let Some(mut child) = active.take() else {
+        return false;
+    };
+    let _ = child.kill();
+    child.wait().is_ok()
+}
+
+fn stop_forge_installer(app: &AppHandle) {
+    let process = app.state::<ForgeInstallerProcess>();
+    let _ = terminate_registered_forge_installer(&process);
+}
+
+fn wait_for_forge_installer(app: &AppHandle) -> Result<std::process::ExitStatus, String> {
+    loop {
+        let process = app.state::<ForgeInstallerProcess>();
+        let mut active = process
+            .0
+            .lock()
+            .map_err(|_| "El estado del instalador Forge quedó bloqueado".to_string())?;
+        let Some(child) = active.as_mut() else {
+            return Err("La instalación de Forge se detuvo al cerrar el launcher".into());
+        };
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                *active = None;
+                return Ok(status);
+            }
+            Ok(None) => {}
+            Err(error) => return Err(format!("No se pudo consultar el instalador Forge: {error}")),
+        }
+        drop(active);
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[derive(Default)]
 struct MinecraftProcessState {
     active: Option<RunningMinecraft>,
     last_status: MinecraftStatus,
@@ -1193,6 +1235,7 @@ fn install_forge_profile(
     java_executable: Option<PathBuf>,
     game_dir: PathBuf,
 ) -> Result<(), String> {
+    let installer_app = app.clone();
     fs::create_dir_all(&game_dir)
         .map_err(|error| format!("No se pudo preparar la instancia: {error}"))?;
     let mut progress = AppInstallProgress::new(app, series_id);
@@ -1284,17 +1327,29 @@ fn install_forge_profile(
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("No se pudo iniciar el instalador Forge: {error}"))?;
+        let stdout = child.stdout.take().expect("Forge stdout was piped");
+        let stderr = child.stderr.take().expect("Forge stderr was piped");
+        {
+            let process = installer_app.state::<ForgeInstallerProcess>();
+            let mut active = match process.0.lock() {
+                Ok(active) => active,
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("El estado del instalador Forge quedó bloqueado".into());
+                }
+            };
+            if active.is_some() {
+                drop(active);
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("Ya hay otra instalación de Forge en curso".into());
+            }
+            *active = Some(child);
+        }
         let (sender, receiver) = mpsc::sync_channel(32);
-        let stdout_reader = forward_forge_output(
-            child.stdout.take().expect("Forge stdout was piped"),
-            "stdout",
-            sender.clone(),
-        );
-        let stderr_reader = forward_forge_output(
-            child.stderr.take().expect("Forge stderr was piped"),
-            "stderr",
-            sender,
-        );
+        let stdout_reader = forward_forge_output(stdout, "stdout", sender.clone());
+        let stderr_reader = forward_forge_output(stderr, "stderr", sender);
         let mut recent_output = VecDeque::with_capacity(20);
         let mut last_report = None;
         for line in receiver {
@@ -1308,11 +1363,9 @@ fn install_forge_profile(
                 last_report = Some(now);
             }
         }
-        let status = child
-            .wait()
-            .map_err(|error| format!("No se pudo esperar al instalador Forge: {error}"))?;
         let _ = stdout_reader.join();
         let _ = stderr_reader.join();
+        let status = wait_for_forge_installer(&installer_app)?;
         if !status.success() {
             for line in &recent_output {
                 progress.emit(line);
@@ -3352,6 +3405,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AuthSession::default())
         .manage(MinecraftProcess::default())
+        .manage(ForgeInstallerProcess::default())
         .manage(developer::GitHubDeveloper::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -3390,7 +3444,13 @@ pub fn run() {
             reset_memory_limit,
             launch_minecraft
         ])
-        .run(tauri::generate_context!())
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                // Tauri termina el proceso con std::process::exit; los destructores
+                // no son un lugar fiable para detener el hijo Forge.
+                stop_forge_installer(app);
+            }
+        })
         .expect("error while running EternalCraft Launcher");
 }
 
@@ -3501,6 +3561,31 @@ mod tests {
             ..running
         };
         assert!(super::ensure_series_status_not_running(&stopped, "siege").is_ok());
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture for forge_installer_is_killed_on_launcher_exit"]
+    fn forge_installer_child_waits_for_shutdown() {
+        thread::sleep(Duration::from_secs(60));
+    }
+
+    #[test]
+    fn forge_installer_is_killed_on_launcher_exit() {
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::forge_installer_child_waits_for_shutdown",
+                "--ignored",
+                "--nocapture",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the long-running fixture");
+        let process = ForgeInstallerProcess(std::sync::Mutex::new(Some(child)));
+        assert!(super::terminate_registered_forge_installer(&process));
+        assert!(process.0.lock().unwrap().is_none());
     }
 
     #[test]

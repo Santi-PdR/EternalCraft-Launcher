@@ -599,8 +599,8 @@ fn game_directories_overlap(left: &Path, right: &Path) -> bool {
     {
         // Windows normalmente resuelve rutas sin distinguir mayúsculas. Normalizar
         // antes de comparar evita asignar la misma instancia dos veces con casing distinto.
-        let left = left.to_string_lossy().replace('/', "\\\\").to_lowercase();
-        let right = right.to_string_lossy().replace('/', "\\\\").to_lowercase();
+        let left = left.to_string_lossy().replace('/', "\\").to_lowercase();
+        let right = right.to_string_lossy().replace('/', "\\").to_lowercase();
         let left = Path::new(&left);
         let right = Path::new(&right);
         left.starts_with(right) || right.starts_with(left)

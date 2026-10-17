@@ -2942,7 +2942,13 @@ fn accept_microsoft_callback(
 }
 
 #[tauri::command]
-fn login_microsoft(app: AppHandle) -> Result<Bootstrap, String> {
+async fn login_microsoft(app: AppHandle) -> Result<Bootstrap, String> {
+    tauri::async_runtime::spawn_blocking(move || login_microsoft_sync(app))
+        .await
+        .map_err(|error| format!("Falló la tarea de inicio Microsoft: {error}"))?
+}
+
+fn login_microsoft_sync(app: AppHandle) -> Result<Bootstrap, String> {
     let client_id = configured_microsoft_client_id()
         .ok_or_else(|| "El inicio de sesión Microsoft no está habilitado en esta compilación.".to_string())?;
     let (listener, ipv6_listener) = bind_microsoft_callback_listeners()?;

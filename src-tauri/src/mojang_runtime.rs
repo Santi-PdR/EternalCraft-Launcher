@@ -449,12 +449,14 @@ fn create_runtime_hard_links(root: &Path, links: &[(PathBuf, String)]) -> Result
                     ));
                 }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    fs::hard_link(&canonical_target, &link).map_err(|error| {
-                        format!(
-                            "No se pudo crear el hard link Java {}: {error}",
-                            link.display()
-                        )
-                    })?;
+                    if let Err(link_error) = fs::hard_link(&canonical_target, &link) {
+                        fs::copy(&canonical_target, &link).map_err(|copy_error| {
+                            format!(
+                                "No se pudo crear el enlace Java {} (hard link: {link_error}; copia: {copy_error})",
+                                link.display()
+                            )
+                        })?;
+                    }
                 }
                 Err(error) => {
                     return Err(format!(

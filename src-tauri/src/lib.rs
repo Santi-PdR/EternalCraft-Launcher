@@ -1341,7 +1341,7 @@ fn copy_file_create_new_limited(
         .create_new(true)
         .open(destination)?;
     let result = (|| {
-        let copied = io::copy(&mut input.by_ref().take(max_bytes.saturating_add(1)), &mut output)?;
+        let copied = io::copy(&mut Read::by_ref(&mut input).take(max_bytes.saturating_add(1)), &mut output)?;
         if copied > max_bytes {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

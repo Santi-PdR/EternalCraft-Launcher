@@ -1,18 +1,21 @@
 use atomic_write_file::AtomicWriteFile;
 use mc_launcher_core::progress::{ProgressEvent, ProgressReporter};
-use serde::Deserialize;
+use serde::{de::DeserializeOwned, Deserialize};
 use sha1::{Digest, Sha1};
 use std::{
     collections::HashMap,
     env, fs,
     io::{self, Read, Write},
     path::{Component, Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use xz2::{read::XzDecoder, stream::Stream};
 
 const JVM_MANIFEST_URL: &str = "https://launchermeta.mojang.com/v1/products/java-runtime/2ec0cc96c44e5a76b9c8b7c39df7210883d12871/all.json";
 const LZMA_MEMORY_LIMIT: u64 = 256 * 1024 * 1024;
+const MAX_RUNTIME_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
+const MAX_RUNTIME_FILE_BYTES: u64 = 512 * 1024 * 1024;
+const RUNTIME_REQUEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Deserialize)]
 struct RuntimeManifest {
@@ -48,6 +51,7 @@ struct RuntimeFile {
 #[derive(Deserialize)]
 struct RuntimeDownload {
     sha1: String,
+    size: u64,
     url: String,
 }
 
@@ -65,26 +69,29 @@ pub fn install_java_runtime(
     }
     let client = reqwest::blocking::Client::builder()
         .user_agent(concat!("EternalCraft Launcher/", env!("CARGO_PKG_VERSION")))
+        .https_only(true)
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(RUNTIME_REQUEST_TIMEOUT)
         .build()
         .map_err(|error| format!("No se pudo preparar la conexión con Mojang: {error}"))?;
-    let manifest: RuntimeManifest = client
-        .get(JVM_MANIFEST_URL)
-        .send()
-        .and_then(reqwest::blocking::Response::error_for_status)
-        .and_then(|response| response.json::<RuntimeManifest>())
-        .map_err(|error| format!("No se pudo consultar el catálogo Java de Mojang: {error}"))?;
+    let manifest: RuntimeManifest = fetch_json(
+        &client,
+        JVM_MANIFEST_URL,
+        MAX_RUNTIME_MANIFEST_BYTES,
+        "el catálogo Java de Mojang",
+    )?;
     let entry = manifest
         .platforms
         .get(&platform)
         .and_then(|components| components.get(component))
         .and_then(|entries| entries.first())
         .ok_or_else(|| format!("Mojang no publica el runtime {component} para {platform}"))?;
-    let platform_manifest: PlatformManifest = client
-        .get(&entry.manifest.url)
-        .send()
-        .and_then(reqwest::blocking::Response::error_for_status)
-        .and_then(|response| response.json::<PlatformManifest>())
-        .map_err(|error| format!("No se pudo leer el manifiesto Java de Mojang: {error}"))?;
+    let platform_manifest: PlatformManifest = fetch_json(
+        &client,
+        &entry.manifest.url,
+        MAX_RUNTIME_MANIFEST_BYTES,
+        "el manifiesto Java de Mojang",
+    )?;
 
     let canonical_game_dir = fs::canonicalize(minecraft_dir)
         .map_err(|error| format!("No se pudo resolver el directorio de juego: {error}"))?;
@@ -214,6 +221,58 @@ pub fn install_java_runtime(
         &runtime_root.join(format!("{component}.sha1")),
         sha1_index.as_bytes(),
     )?;
+    Ok(())
+}
+
+fn read_bounded_runtime_body(mut reader: impl Read, max_bytes: usize) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(max_bytes.min(16 * 1024));
+    reader
+        .take(max_bytes as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("response body exceeds {max_bytes} bytes"),
+        ));
+    }
+    Ok(bytes)
+}
+
+fn fetch_json<T: DeserializeOwned>(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    max_bytes: usize,
+    description: &str,
+) -> Result<T, String> {
+    let response = client
+        .get(url)
+        .send()
+        .and_then(reqwest::blocking::Response::error_for_status)
+        .map_err(|error| format!("No se pudo descargar {description}: {error}"))?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        return Err(format!("{description} supera el límite de 16 MiB"));
+    }
+    let bytes = read_bounded_runtime_body(response, max_bytes)
+        .map_err(|error| format!("No se pudo leer {description}: {error}"))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| format!("{description} no es válido: {error}"))
+}
+
+fn validate_runtime_download(download: &RuntimeDownload, label: &str) -> Result<(), String> {
+    if download.size > MAX_RUNTIME_FILE_BYTES {
+        return Err(format!("{label} supera el límite de 512 MiB"));
+    }
+    if download.sha1.len() != 40
+        || !download.sha1.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(format!("Mojang devolvió un SHA-1 inválido para {label}"));
+    }
+    if !download.url.starts_with("https://") {
+        return Err(format!("Mojang devolvió una URL no segura para {label}"));
+    }
     Ok(())
 }
 
@@ -375,6 +434,10 @@ fn install_runtime_file(
     runtime_root: &Path,
     progress: &mut impl ProgressReporter,
 ) -> Result<(), String> {
+    validate_runtime_download(raw, &format!("el archivo {}", destination.display()))?;
+    if let Some(compressed) = compressed {
+        validate_runtime_download(compressed, &format!("el archivo comprimido {}", destination.display()))?;
+    }
     match fs::symlink_metadata(destination) {
         Ok(metadata) if metadata.file_type().is_file() => {
             if sha1_file(destination)? == raw.sha1 {
@@ -395,6 +458,7 @@ fn install_runtime_file(
             ));
         }
     }
+    let expected_download_size = compressed.map_or(raw.size, |download| download.size);
     let parent = destination
         .parent()
         .ok_or_else(|| "El archivo Java no tiene directorio padre".to_string())?;
@@ -422,6 +486,15 @@ fn install_runtime_file(
             .send()
             .and_then(reqwest::blocking::Response::error_for_status)
             .map_err(|error| format!("No se pudo descargar {}: {error}", destination.display()))?;
+        if response
+            .content_length()
+            .is_some_and(|length| length != expected_download_size)
+        {
+            return Err(format!(
+                "El tamaño descargado para {} no coincide con Mojang",
+                destination.display()
+            ));
+        }
         let label = destination
             .strip_prefix(runtime_root)
             .unwrap_or(destination)
@@ -446,17 +519,41 @@ fn install_runtime_file(
             .open(&temp_path)
             .map_err(|error| format!("No se pudo guardar {}: {error}", destination.display()))?;
         if compressed.is_some() {
-            decode_lzma(response, &mut output).map_err(|error| {
-                format!("No se pudo descomprimir {}: {error}", destination.display())
-            })?;
+            let bounded_input = response.take(expected_download_size + 1);
+            let decoded_bytes = decode_lzma_bounded(bounded_input, &mut output, raw.size)
+                .map_err(|error| {
+                    format!("No se pudo descomprimir {}: {error}", destination.display())
+                })?;
+            if decoded_bytes != raw.size {
+                return Err(format!(
+                    "El tamaño descomprimido para {} no coincide con Mojang",
+                    destination.display()
+                ));
+            }
         } else {
-            io::copy(&mut response, &mut output)
+            let downloaded_bytes = io::copy(&mut response.take(raw.size + 1), &mut output)
                 .map_err(|error| format!("No se pudo escribir {}: {error}", destination.display()))?;
+            if downloaded_bytes != raw.size {
+                return Err(format!(
+                    "El tamaño descargado para {} no coincide con Mojang",
+                    destination.display()
+                ));
+            }
         }
         output.flush().map_err(|error| {
             format!("No se pudo terminar de guardar {}: {error}", destination.display())
         })?;
         drop(output);
+        if fs::metadata(&temp_path)
+            .map_err(|error| format!("No se pudo revisar {}: {error}", destination.display()))?
+            .len()
+            != raw.size
+        {
+            return Err(format!(
+                "El tamaño verificado para {} no coincide con Mojang",
+                destination.display()
+            ));
+        }
         if sha1_file(&temp_path)? != raw.sha1 {
             return Err(format!(
                 "El SHA-1 del archivo Java {} no coincide con Mojang",
@@ -523,6 +620,23 @@ fn decode_lzma(input: impl Read, output: impl Write) -> Result<(), String> {
     io::copy(&mut decoder, &mut output)
         .map_err(|error| format!("No se pudo descomprimir el archivo LZMA: {error}"))?;
     Ok(())
+}
+
+fn decode_lzma_bounded(
+    input: impl Read,
+    output: impl Write,
+    max_output_bytes: u64,
+) -> Result<u64, String> {
+    let stream = Stream::new_lzma_decoder(LZMA_MEMORY_LIMIT)
+        .map_err(|error| format!("No se pudo inicializar el decodificador LZMA: {error}"))?;
+    let mut decoder = XzDecoder::new_stream(input, stream);
+    let mut output = output;
+    let decoded_bytes = io::copy(&mut decoder.by_ref().take(max_output_bytes + 1), &mut output)
+        .map_err(|error| format!("No se pudo descomprimir el archivo LZMA: {error}"))?;
+    if decoded_bytes > max_output_bytes {
+        return Err("El archivo Java descomprimido supera el tamaño publicado por Mojang".into());
+    }
+    Ok(decoded_bytes)
 }
 
 fn sha1_file(path: &Path) -> Result<String, String> {
@@ -625,6 +739,33 @@ mod tests {
         )
         .is_ok());
         assert!(validate_link_target(Path::new("bin/java"), "../../outside").is_err());
+    }
+
+    #[test]
+    fn runtime_manifest_responses_are_bounded() {
+        let accepted =
+            super::read_bounded_runtime_body(Cursor::new(b"{\"ok\":true}"), 11).unwrap();
+        assert_eq!(accepted, b"{\"ok\":true}");
+        let rejected = super::read_bounded_runtime_body(Cursor::new(b"12345"), 4);
+        assert!(rejected.is_err());
+    }
+
+    #[test]
+    fn lzma_runtime_expansion_cannot_exceed_the_published_file_size() {
+        let compressed = [
+            93, 0, 0, 128, 0, 255, 255, 255, 255, 255, 255, 255, 255, 0, 38, 155, 201, 70,
+            36, 25, 35, 215, 1, 87, 21, 105, 204, 240, 218, 37, 175, 236, 157, 30, 63, 17,
+            6, 201, 45, 239, 247, 159, 105, 16, 123, 82, 90, 216, 104, 226, 245, 207, 205,
+            162, 125, 61, 196, 67, 255, 248, 20, 192, 0,
+        ];
+        let mut output = Vec::new();
+        let result = super::decode_lzma_bounded(
+            Cursor::new(compressed),
+            &mut output,
+            b"Mojang runtime uses LZMA-alone, not XZ.".len() as u64 - 1,
+        );
+        assert!(result.is_err());
+        assert_eq!(output.len(), b"Mojang runtime uses LZMA-alone, not XZ.".len() - 1);
     }
 
     #[test]

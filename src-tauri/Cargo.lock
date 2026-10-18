@@ -968,7 +968,7 @@ dependencies = [
 
 [[package]]
 name = "eternalcraft-launcher"
-version = "0.1.31"
+version = "0.1.32"
 dependencies = [
  "atomic-write-file",
  "base64 0.22.1",
@@ -989,6 +989,7 @@ dependencies = [
  "toml 1.1.7+spec-1.1.0",
  "xz2",
  "zip 2.4.2",
+ "zeroize",
 ]
 
 [[package]]

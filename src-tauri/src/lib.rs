@@ -39,6 +39,7 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
+use zeroize::Zeroize;
 
 mod pack;
 mod developer;
@@ -132,6 +133,13 @@ struct AuthenticatedAccount {
     profile: MicrosoftProfile,
     access_token: String,
     refresh_token: String,
+}
+
+impl Drop for AuthenticatedAccount {
+    fn drop(&mut self) {
+        self.access_token.zeroize();
+        self.refresh_token.zeroize();
+    }
 }
 
 #[derive(Default)]
@@ -4981,4 +4989,3 @@ mod forge_mod_archive_directory_tests {
         assert!(check_forge_mod_archive_directory(&mut Cursor::new(b"PK\x05\x06".to_vec())).is_err());
     }
 }
-

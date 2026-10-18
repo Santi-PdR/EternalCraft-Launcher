@@ -1655,7 +1655,7 @@ fn validate_personal_mod_size(size_bytes: u64, limit_bytes: u64) -> Result<(), S
 }
 
 fn check_forge_mod_archive_directory(reader: &mut (impl Read + Seek)) -> Result<(), String> {
-    const EOCD_SIGNATURE: &[u8; 4] = b"PK\\x05\\x06";
+    const EOCD_SIGNATURE: &[u8; 4] = b"PK\x05\x06";
     const EOCD_FIXED_BYTES: usize = 22;
     const MAX_EOCD_TAIL_BYTES: u64 = EOCD_FIXED_BYTES as u64 + u16::MAX as u64;
 
@@ -4942,7 +4942,7 @@ mod forge_mod_archive_directory_tests {
     use std::io::Cursor;
 
     fn eocd(entries: u16, directory_bytes: u32) -> Cursor<Vec<u8>> {
-        let mut bytes = b"PK\\x05\\x06".to_vec();
+        let mut bytes = b"PK\x05\x06".to_vec();
         bytes.extend_from_slice(&[0; 4]); // disk numbers
         bytes.extend_from_slice(&entries.to_le_bytes());
         bytes.extend_from_slice(&entries.to_le_bytes());
@@ -4978,7 +4978,7 @@ mod forge_mod_archive_directory_tests {
     #[test]
     fn rejects_zip64_and_incomplete_directories_before_zip_parsing() {
         assert!(check_forge_mod_archive_directory(&mut eocd(u16::MAX, 0)).is_err());
-        assert!(check_forge_mod_archive_directory(&mut Cursor::new(b"PK\\x05\\x06".to_vec())).is_err());
+        assert!(check_forge_mod_archive_directory(&mut Cursor::new(b"PK\x05\x06".to_vec())).is_err());
     }
 }
 

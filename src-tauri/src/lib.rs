@@ -164,20 +164,22 @@ fn microsoft_credential_entry() -> Result<CredentialEntry, String> {
         .map_err(|_| "No se pudo abrir el almacén seguro de credenciales del sistema".to_string())
 }
 
-fn save_microsoft_refresh_token(refresh_token: &str) -> Result<(), String> {
-    let _guard = MICROSOFT_CREDENTIAL_LOCK
-        .lock()
-        .map_err(|_| "El acceso al almacén seguro quedó bloqueado".to_string())?;
-    microsoft_credential_entry()?
+fn save_refresh_token_with_entry(entry: &CredentialEntry, refresh_token: &str) -> Result<(), String> {
+    entry
         .set_password(refresh_token)
         .map_err(|_| "El almacén seguro del sistema rechazó la sesión Microsoft".to_string())
 }
 
-fn load_microsoft_refresh_token() -> Result<Option<Zeroizing<String>>, String> {
+fn save_microsoft_refresh_token(refresh_token: &str) -> Result<(), String> {
     let _guard = MICROSOFT_CREDENTIAL_LOCK
         .lock()
         .map_err(|_| "El acceso al almacén seguro quedó bloqueado".to_string())?;
-    let entry = microsoft_credential_entry()?;
+    save_refresh_token_with_entry(&microsoft_credential_entry()?, refresh_token)
+}
+
+fn load_refresh_token_with_entry(
+    entry: &CredentialEntry,
+) -> Result<Option<Zeroizing<String>>, String> {
     match entry.get_password() {
         Ok(token) => Ok(Some(Zeroizing::new(token))),
         Err(CredentialError::NoEntry) => Ok(None),
@@ -185,14 +187,25 @@ fn load_microsoft_refresh_token() -> Result<Option<Zeroizing<String>>, String> {
     }
 }
 
+fn load_microsoft_refresh_token() -> Result<Option<Zeroizing<String>>, String> {
+    let _guard = MICROSOFT_CREDENTIAL_LOCK
+        .lock()
+        .map_err(|_| "El acceso al almacén seguro quedó bloqueado".to_string())?;
+    load_refresh_token_with_entry(&microsoft_credential_entry()?)
+}
+
+fn delete_refresh_token_with_entry(entry: &CredentialEntry) -> Result<(), String> {
+    match entry.delete_credential() {
+        Ok(()) | Err(CredentialError::NoEntry) => Ok(()),
+        Err(_) => Err("No se pudo eliminar la sesión Microsoft del almacén seguro del sistema".into()),
+    }
+}
+
 fn delete_microsoft_refresh_token() -> Result<(), String> {
     let _guard = MICROSOFT_CREDENTIAL_LOCK
         .lock()
         .map_err(|_| "El acceso al almacén seguro quedó bloqueado".to_string())?;
-    match microsoft_credential_entry()?.delete_credential() {
-        Ok(()) | Err(CredentialError::NoEntry) => Ok(()),
-        Err(_) => Err("No se pudo eliminar la sesión Microsoft del almacén seguro del sistema".into()),
-    }
+    delete_refresh_token_with_entry(&microsoft_credential_entry()?)
 }
 
 fn set_microsoft_restore_status(app: &AppHandle, notice: Option<String>) -> Result<(), String> {
@@ -5160,9 +5173,9 @@ mod microsoft_credential_tests {
         let token = "test-refresh-token-never-used-for-auth";
         let entry = CredentialEntry::new(MICROSOFT_CREDENTIAL_SERVICE, MICROSOFT_CREDENTIAL_USER)
             .unwrap();
-        entry.set_password(token).unwrap();
-        assert_eq!(entry.get_password().unwrap(), token);
-        entry.delete_credential().unwrap();
-        assert!(matches!(entry.get_password(), Err(CredentialError::NoEntry)));
+        save_refresh_token_with_entry(&entry, token).unwrap();
+        assert_eq!(load_refresh_token_with_entry(&entry).unwrap().unwrap().as_str(), token);
+        delete_refresh_token_with_entry(&entry).unwrap();
+        assert!(load_refresh_token_with_entry(&entry).unwrap().is_none());
     }
 }

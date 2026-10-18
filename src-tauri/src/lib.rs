@@ -46,6 +46,8 @@ mod mojang_runtime;
 
 const CATALOG_JSON: &str = include_str!("../../resources/series/catalog.json");
 const MAX_FORGE_MOD_METADATA_BYTES: u64 = 256 * 1024;
+const MAX_FORGE_MOD_ARCHIVE_ENTRIES: u16 = 50_000;
+const MAX_FORGE_MOD_CENTRAL_DIRECTORY_BYTES: u32 = 32 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1652,9 +1654,70 @@ fn validate_personal_mod_size(size_bytes: u64, limit_bytes: u64) -> Result<(), S
     Ok(())
 }
 
+fn check_forge_mod_archive_directory(reader: &mut (impl Read + Seek)) -> Result<(), String> {
+    const EOCD_SIGNATURE: &[u8; 4] = b"PK\\x05\\x06";
+    const EOCD_FIXED_BYTES: usize = 22;
+    const MAX_EOCD_TAIL_BYTES: u64 = EOCD_FIXED_BYTES as u64 + u16::MAX as u64;
+
+    let file_len = reader
+        .seek(SeekFrom::End(0))
+        .map_err(|error| format!("No se pudo revisar el directorio ZIP: {error}"))?;
+    let tail_start = file_len.saturating_sub(MAX_EOCD_TAIL_BYTES);
+    reader
+        .seek(SeekFrom::Start(tail_start))
+        .map_err(|error| format!("No se pudo revisar el directorio ZIP: {error}"))?;
+    let mut tail = Vec::with_capacity((file_len - tail_start) as usize);
+    reader
+        .read_to_end(&mut tail)
+        .map_err(|error| format!("No se pudo revisar el directorio ZIP: {error}"))?;
+
+    if tail.len() < EOCD_FIXED_BYTES {
+        return Err("El JAR no contiene un directorio ZIP completo".into());
+    }
+    let eocd = (0..=tail.len() - EOCD_FIXED_BYTES)
+        .rev()
+        .find(|&offset| {
+            tail.get(offset..offset + 4) == Some(EOCD_SIGNATURE.as_slice())
+                && offset + EOCD_FIXED_BYTES
+                    + u16::from_le_bytes([tail[offset + 20], tail[offset + 21]]) as usize
+                    == tail.len()
+        })
+        .ok_or_else(|| "El JAR no contiene un cierre ZIP válido".to_string())?;
+
+    let disk_number = u16::from_le_bytes([tail[eocd + 4], tail[eocd + 5]]);
+    let directory_disk = u16::from_le_bytes([tail[eocd + 6], tail[eocd + 7]]);
+    let disk_entries = u16::from_le_bytes([tail[eocd + 8], tail[eocd + 9]]);
+    let total_entries = u16::from_le_bytes([tail[eocd + 10], tail[eocd + 11]]);
+    let directory_bytes = u32::from_le_bytes([
+        tail[eocd + 12],
+        tail[eocd + 13],
+        tail[eocd + 14],
+        tail[eocd + 15],
+    ]);
+
+    if disk_number != 0 || directory_disk != 0 || disk_entries != total_entries {
+        return Err("Los JAR multidisco no son compatibles".into());
+    }
+    if total_entries == u16::MAX || directory_bytes == u32::MAX {
+        return Err("El JAR ZIP64 supera los límites seguros del validador".into());
+    }
+    if total_entries > MAX_FORGE_MOD_ARCHIVE_ENTRIES {
+        return Err(format!(
+            "El JAR contiene más de {MAX_FORGE_MOD_ARCHIVE_ENTRIES} entradas"
+        ));
+    }
+    if directory_bytes > MAX_FORGE_MOD_CENTRAL_DIRECTORY_BYTES {
+        return Err("El directorio central del JAR supera los 32 MiB permitidos".into());
+    }
+    Ok(())
+}
+
 fn validate_forge_mod_archive(path: &Path) -> Result<(), String> {
-    let file = fs::File::open(path)
+    let mut file = fs::File::open(path)
         .map_err(|error| format!("No se pudo abrir el JAR {}: {error}", path.display()))?;
+    check_forge_mod_archive_directory(&mut file)?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| format!("No se pudo revisar el JAR {}: {error}", path.display()))?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|error| format!("El archivo seleccionado no es un JAR válido: {error}"))?;
     let metadata_index = {
@@ -4872,3 +4935,50 @@ mod tests {
         fs::remove_dir_all(fixture).unwrap();
     }
 }
+
+#[cfg(test)]
+mod forge_mod_archive_directory_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn eocd(entries: u16, directory_bytes: u32) -> Cursor<Vec<u8>> {
+        let mut bytes = b"PK\\x05\\x06".to_vec();
+        bytes.extend_from_slice(&[0; 4]); // disk numbers
+        bytes.extend_from_slice(&entries.to_le_bytes());
+        bytes.extend_from_slice(&entries.to_le_bytes());
+        bytes.extend_from_slice(&directory_bytes.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        Cursor::new(bytes)
+    }
+
+    #[test]
+    fn accepts_a_normal_forge_mod_archive() {
+        use std::io::Write;
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file("META-INF/mods.toml", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"modLoader = \"javafml\"").unwrap();
+        let mut archive = writer.finish().unwrap();
+        assert!(check_forge_mod_archive_directory(&mut archive).is_ok());
+    }
+
+    #[test]
+    fn accepts_archives_within_entry_and_directory_limits() {
+        assert!(check_forge_mod_archive_directory(&mut eocd(50_000, 32 * 1024 * 1024)).is_ok());
+    }
+
+    #[test]
+    fn rejects_archive_entry_and_central_directory_bombs_before_zip_parsing() {
+        assert!(check_forge_mod_archive_directory(&mut eocd(50_001, 0)).is_err());
+        assert!(check_forge_mod_archive_directory(&mut eocd(1, 32 * 1024 * 1024 + 1)).is_err());
+    }
+
+    #[test]
+    fn rejects_zip64_and_incomplete_directories_before_zip_parsing() {
+        assert!(check_forge_mod_archive_directory(&mut eocd(u16::MAX, 0)).is_err());
+        assert!(check_forge_mod_archive_directory(&mut Cursor::new(b"PK\\x05\\x06".to_vec())).is_err());
+    }
+}
+

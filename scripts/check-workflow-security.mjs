@@ -16,6 +16,11 @@ for (const name of workflowNames) {
   }
 }
 
+const ciWorkflow = await readWorkflow('ci.yml');
+if (!/^  native-build:\n(?:(?!^  [a-z-]+:)[\s\S])*?^    timeout-minutes: 45$/m.test(ciWorkflow)) {
+  failures.push('ci.yml: el job native-build debe tener un límite de 45 minutos');
+}
+
 const releaseWorkflow = await readWorkflow('launcher-release.yml');
 if (!/^permissions:\n  contents: read$/m.test(releaseWorkflow)) {
   failures.push('launcher-release.yml: los permisos globales deben ser de solo lectura');

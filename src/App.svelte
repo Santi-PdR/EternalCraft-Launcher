@@ -66,7 +66,7 @@
     siege: {
       label: 'SIEGE · Referencia de asedio Minecraft',
       url: 'https://static.planetminecraft.com/files/image/minecraft/project/2024/336/18293725_l.jpg',
-      source: 'https://www.planetminecraft.com/project/siege-the-castle/'
+      source: 'https://www.planetminecraft.com/project/very-epic-siege-castle/'
     },
     'ghouls-outbreak': {
       label: 'Ghouls · Apocalipsis',

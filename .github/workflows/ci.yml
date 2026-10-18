@@ -67,7 +67,7 @@ jobs:
       - if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf libfuse2 rpm xvfb
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libdbus-1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libfuse2 rpm xvfb
       - run: npm ci
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
       - name: Install official Minecraft, Java 17 and Forge without launching the game

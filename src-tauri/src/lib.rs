@@ -39,7 +39,8 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
-use zeroize::Zeroize;
+use keyring::{Entry as CredentialEntry, Error as CredentialError};
+use zeroize::{Zeroize, Zeroizing};
 
 mod pack;
 mod developer;
@@ -144,6 +145,132 @@ impl Drop for AuthenticatedAccount {
 
 #[derive(Default)]
 struct AuthSession(std::sync::Mutex<Option<AuthenticatedAccount>>);
+
+#[derive(Default)]
+struct MicrosoftSessionStatus(std::sync::Mutex<MicrosoftSessionStatusData>);
+
+#[derive(Default)]
+struct MicrosoftSessionStatusData {
+    restore_attempted: bool,
+    notice: Option<String>,
+}
+
+const MICROSOFT_CREDENTIAL_SERVICE: &str = "com.eternalcraft.launcher";
+const MICROSOFT_CREDENTIAL_USER: &str = "minecraft-refresh-token";
+static MICROSOFT_CREDENTIAL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn microsoft_credential_entry() -> Result<CredentialEntry, String> {
+    CredentialEntry::new(MICROSOFT_CREDENTIAL_SERVICE, MICROSOFT_CREDENTIAL_USER)
+        .map_err(|_| "No se pudo abrir el almacén seguro de credenciales del sistema".to_string())
+}
+
+fn save_microsoft_refresh_token(refresh_token: &str) -> Result<(), String> {
+    let _guard = MICROSOFT_CREDENTIAL_LOCK
+        .lock()
+        .map_err(|_| "El acceso al almacén seguro quedó bloqueado".to_string())?;
+    microsoft_credential_entry()?
+        .set_password(refresh_token)
+        .map_err(|_| "El almacén seguro del sistema rechazó la sesión Microsoft".to_string())
+}
+
+fn load_microsoft_refresh_token() -> Result<Option<Zeroizing<String>>, String> {
+    let _guard = MICROSOFT_CREDENTIAL_LOCK
+        .lock()
+        .map_err(|_| "El acceso al almacén seguro quedó bloqueado".to_string())?;
+    let entry = microsoft_credential_entry()?;
+    match entry.get_password() {
+        Ok(token) => Ok(Some(Zeroizing::new(token))),
+        Err(CredentialError::NoEntry) => Ok(None),
+        Err(_) => Err("No se pudo leer la sesión guardada del almacén seguro del sistema".into()),
+    }
+}
+
+fn delete_microsoft_refresh_token() -> Result<(), String> {
+    let _guard = MICROSOFT_CREDENTIAL_LOCK
+        .lock()
+        .map_err(|_| "El acceso al almacén seguro quedó bloqueado".to_string())?;
+    match microsoft_credential_entry()?.delete_credential() {
+        Ok(()) | Err(CredentialError::NoEntry) => Ok(()),
+        Err(_) => Err("No se pudo eliminar la sesión Microsoft del almacén seguro del sistema".into()),
+    }
+}
+
+fn set_microsoft_restore_status(app: &AppHandle, notice: Option<String>) -> Result<(), String> {
+    let state = app.state::<MicrosoftSessionStatus>();
+    let mut status = state
+        .0
+        .lock()
+        .map_err(|_| "El estado de la sesión Microsoft quedó bloqueado".to_string())?;
+    status.restore_attempted = true;
+    status.notice = notice;
+    Ok(())
+}
+
+fn restore_microsoft_session(app: &AppHandle) -> Option<String> {
+    let settings = match read_settings(app) {
+        Ok(settings) => settings,
+        Err(_) => return Some("No se pudo leer la configuración para restaurar la sesión Microsoft".into()),
+    };
+    if settings.account_mode != Some(AccountMode::Microsoft) {
+        return None;
+    }
+    let refresh_token = match load_microsoft_refresh_token() {
+        Ok(Some(token)) => token,
+        Ok(None) => {
+            if update_settings(app, |settings| {
+                if settings.account_mode == Some(AccountMode::Microsoft) {
+                    settings.account_mode = None;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            })
+            .is_err()
+            {
+                return Some("No se encontró la sesión Microsoft guardada y no se pudo reparar el perfil".into());
+            }
+            return Some("No se encontró una sesión Microsoft guardada. Inicia sesión otra vez o elige un nick offline.".into());
+        }
+        Err(error) => return Some(error),
+    };
+    let Some(client_id) = configured_microsoft_client_id() else {
+        return Some("La sesión Microsoft está guardada, pero esta compilación no tiene habilitado el inicio de sesión".into());
+    };
+    let account = match complete_refresh(client_id, None, &refresh_token) {
+        Ok(account) => account,
+        Err(_) => return Some("No se pudo renovar la sesión Microsoft guardada. Inicia sesión otra vez.".into()),
+    };
+    let persistence_notice = save_microsoft_refresh_token(&account.refresh_token)
+        .err()
+        .map(|_| "La sesión se recuperó, pero no se pudo guardar el token renovado; quizá debas iniciar sesión otra vez al reiniciar.".to_string());
+    let session = AuthenticatedAccount {
+        profile: MicrosoftProfile {
+            username: account.name,
+            uuid: account.id,
+        },
+        access_token: account.access_token,
+        refresh_token: account.refresh_token,
+    };
+    match app.state::<AuthSession>().0.lock() {
+        Ok(mut current) => *current = Some(session),
+        Err(_) => return Some("La sesión Microsoft se recuperó, pero el estado interno quedó bloqueado".into()),
+    }
+    persistence_notice
+}
+
+fn restore_microsoft_session_once(app: &AppHandle) -> Result<(), String> {
+    let state = app.state::<MicrosoftSessionStatus>();
+    let mut state = state
+        .0
+        .lock()
+        .map_err(|_| "El estado de la sesión Microsoft quedó bloqueado".to_string())?;
+    if state.restore_attempted {
+        return Ok(());
+    }
+    state.restore_attempted = true;
+    state.notice = restore_microsoft_session(app);
+    Ok(())
+}
 
 #[derive(Default)]
 struct MinecraftProcess(std::sync::Mutex<MinecraftProcessState>);
@@ -252,6 +379,7 @@ struct Bootstrap {
     managed_game_directories: BTreeMap<String, String>,
     installed_profiles: BTreeMap<String, String>,
     microsoft_login_available: bool,
+    microsoft_session_notice: Option<String>,
     github_developer_enabled: bool,
     developer_github_user: Option<String>,
     microsoft_profile: Option<MicrosoftProfile>,
@@ -2658,6 +2786,13 @@ fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
         .map_err(|_| "La sesión Microsoft quedó bloqueada".to_string())?
         .as_ref()
         .map(|session| session.profile.clone());
+    let microsoft_session_notice = app
+        .state::<MicrosoftSessionStatus>()
+        .0
+        .lock()
+        .map_err(|_| "El estado de la sesión Microsoft quedó bloqueado".to_string())?
+        .notice
+        .clone();
     let java_manually_selected = settings.java_executable.is_some();
     let java = if let Some(path) = settings.java_executable.as_deref() {
         inspect_java(Path::new(path))
@@ -2708,6 +2843,7 @@ fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
         managed_game_directories,
         installed_profiles,
         microsoft_login_available: configured_microsoft_client_id().is_some(),
+        microsoft_session_notice,
         github_developer_enabled: developer::github_app_client_id_configured(),
         developer_github_user: app.state::<developer::GitHubDeveloper>().username(),
         microsoft_profile,
@@ -2757,6 +2893,10 @@ async fn get_bootstrap(app: AppHandle) -> Result<Bootstrap, String> {
         refresh_runtime_catalog(&cache_path)
     })
     .await;
+    let restore_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || restore_microsoft_session_once(&restore_app))
+        .await
+        .map_err(|error| format!("Falló la restauración de la sesión Microsoft: {error}"))??;
     make_bootstrap(&app)
 }
 
@@ -3062,19 +3202,29 @@ fn login_microsoft_sync(app: AppHandle) -> Result<Bootstrap, String> {
         access_token: account.access_token,
         refresh_token: account.refresh_token,
     };
+    let persistence_notice = save_microsoft_refresh_token(&session.refresh_token)
+        .err()
+        .map(|_| "Sesión iniciada, pero el sistema no pudo guardar la credencial; tendrás que iniciar sesión otra vez al reiniciar.".to_string());
+    if let Err(error) = update_settings(&app, |settings| {
+        settings.account_mode = Some(AccountMode::Microsoft);
+        Ok(true)
+    }) {
+        if persistence_notice.is_none() {
+            let _ = delete_microsoft_refresh_token();
+        }
+        return Err(error);
+    }
     *app.state::<AuthSession>()
         .0
         .lock()
         .map_err(|_| "La sesión Microsoft quedó bloqueada".to_string())? = Some(session);
-    update_settings(&app, |settings| {
-        settings.account_mode = Some(AccountMode::Microsoft);
-        Ok(true)
-    })?;
+    set_microsoft_restore_status(&app, persistence_notice)?;
     make_bootstrap(&app)
 }
 
 #[tauri::command]
 fn logout_microsoft(app: AppHandle) -> Result<Bootstrap, String> {
+    delete_microsoft_refresh_token()?;
     *app.state::<AuthSession>()
         .0
         .lock()
@@ -3087,6 +3237,7 @@ fn logout_microsoft(app: AppHandle) -> Result<Bootstrap, String> {
             Ok(false)
         }
     })?;
+    set_microsoft_restore_status(&app, None)?;
     make_bootstrap(&app)
 }
 
@@ -3121,6 +3272,9 @@ fn login_offline(app: AppHandle, username: String) -> Result<Bootstrap, String> 
     if !valid_offline_username(username) {
         return Err("El nombre local debe tener entre 3 y 16 caracteres: letras ASCII, números o guion bajo".into());
     }
+    let credential_cleanup_notice = delete_microsoft_refresh_token()
+        .err()
+        .map(|_| "Perfil offline activado; la sesión Microsoft guardada no pudo eliminarse del llavero, pero no se restaurará mientras uses el perfil offline.".to_string());
     update_settings(&app, |settings| {
         let offline_uuid = offline_uuid_for_profile(
             username,
@@ -3136,6 +3290,7 @@ fn login_offline(app: AppHandle, username: String) -> Result<Bootstrap, String> 
         .0
         .lock()
         .map_err(|_| "La sesión Microsoft quedó bloqueada".to_string())? = None;
+    set_microsoft_restore_status(&app, credential_cleanup_notice)?;
     make_bootstrap(&app)
 }
 
@@ -3269,6 +3424,9 @@ fn launch_minecraft_sync(app: AppHandle, series_id: String) -> Result<MinecraftS
             .ok_or_else(|| "El inicio de sesión Microsoft no está habilitado en esta compilación.".to_string())?;
         let account = complete_refresh(client_id, None, &session.refresh_token)
             .map_err(|error| format!("La sesión Microsoft necesita renovarse. Vuelve a iniciar sesión: {error}"))?;
+        let persistence_notice = save_microsoft_refresh_token(&account.refresh_token)
+            .err()
+            .map(|_| "La sesión Microsoft sigue activa, pero no se pudo guardar el token renovado; quizá debas iniciar sesión otra vez al reiniciar.".to_string());
         session.profile = MicrosoftProfile {
             username: account.name.clone(),
             uuid: account.id.clone(),
@@ -3279,6 +3437,7 @@ fn launch_minecraft_sync(app: AppHandle, series_id: String) -> Result<MinecraftS
             .0
             .lock()
             .map_err(|_| "La sesión Microsoft quedó bloqueada".to_string())? = Some(session);
+        set_microsoft_restore_status(&app, persistence_notice)?;
         Account::Microsoft {
             username: account.name,
             uuid: account.id,
@@ -3690,6 +3849,7 @@ fn link_detected_directory(app: AppHandle, series_id: String) -> Result<Bootstra
 pub fn run() {
     tauri::Builder::default()
         .manage(AuthSession::default())
+        .manage(MicrosoftSessionStatus::default())
         .manage(MinecraftProcess::default())
         .manage(ForgeInstallerProcess::default())
         .manage(developer::GitHubDeveloper::default())
@@ -4987,5 +5147,22 @@ mod forge_mod_archive_directory_tests {
     fn rejects_zip64_and_incomplete_directories_before_zip_parsing() {
         assert!(check_forge_mod_archive_directory(&mut eocd(u16::MAX, 0)).is_err());
         assert!(check_forge_mod_archive_directory(&mut Cursor::new(b"PK\x05\x06".to_vec())).is_err());
+    }
+}
+
+#[cfg(test)]
+mod microsoft_credential_tests {
+    use super::*;
+
+    #[test]
+    fn microsoft_refresh_token_can_be_saved_loaded_and_deleted() {
+        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
+        let token = "test-refresh-token-never-used-for-auth";
+        let entry = CredentialEntry::new(MICROSOFT_CREDENTIAL_SERVICE, MICROSOFT_CREDENTIAL_USER)
+            .unwrap();
+        entry.set_password(token).unwrap();
+        assert_eq!(entry.get_password().unwrap(), token);
+        entry.delete_credential().unwrap();
+        assert!(matches!(entry.get_password(), Err(CredentialError::NoEntry)));
     }
 }

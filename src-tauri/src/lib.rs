@@ -4920,16 +4920,26 @@ mod tests {
     fn java_version_probe_stops_a_hung_executable() {
         use std::os::unix::fs::PermissionsExt;
 
-        let directory = tempfile::tempdir().unwrap();
-        let executable = directory.path().join("java-hangs");
-        fs::write(&executable, "#!/bin/sh\nexec sleep 30\n").unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let directory = std::env::temp_dir().join(format!(
+            "eternalcraft-java-probe-hangs-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let executable = directory.join("java-hangs");
+        std::fs::write(&executable, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let started = Instant::now();
-        let error = java_version_output(&executable, Duration::from_millis(100)).unwrap_err();
+        let started = std::time::Instant::now();
+        let error = super::java_version_output(&executable, std::time::Duration::from_millis(100))
+            .unwrap_err();
 
         assert!(error.contains("superó el límite"));
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[cfg(unix)]
@@ -4937,22 +4947,32 @@ mod tests {
     fn java_version_probe_captures_the_version_from_stderr() {
         use std::os::unix::fs::PermissionsExt;
 
-        let directory = tempfile::tempdir().unwrap();
-        let executable = directory.path().join("java-stub");
-        fs::write(
+        let directory = std::env::temp_dir().join(format!(
+            "eternalcraft-java-probe-output-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let executable = directory.join("java-stub");
+        std::fs::write(
             &executable,
             "#!/bin/sh\nprintf 'openjdk version \\\"17.0.15\\\"\\n' >&2\n",
         )
         .unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let output = java_version_output(&executable, Duration::from_secs(1)).unwrap();
+        let output =
+            super::java_version_output(&executable, std::time::Duration::from_secs(1)).unwrap();
 
         assert!(output.status.success());
         assert_eq!(
-            parse_java_major(&String::from_utf8_lossy(&output.stderr)),
+            super::parse_java_major(&String::from_utf8_lossy(&output.stderr)),
             Some(("17.0.15".into(), 17))
         );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[cfg(unix)]

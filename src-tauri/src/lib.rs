@@ -4959,7 +4959,7 @@ mod tests {
         let executable = directory.join("java-stub");
         std::fs::write(
             &executable,
-            "#!/bin/sh\nprintf 'openjdk version \\\"17.0.15\\\"\\n' >&2\n",
+            "#!/bin/sh\necho 'openjdk version \"17.0.15\"' >&2\n",
         )
         .unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();

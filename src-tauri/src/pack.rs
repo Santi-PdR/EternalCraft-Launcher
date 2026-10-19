@@ -469,6 +469,17 @@ fn is_launcher_staging_directory(name: &str) -> bool {
             && nonce.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
+fn create_pack_staging_directory(
+    game_dir: &Path,
+    process_id: u32,
+    nonce: u128,
+) -> Result<PathBuf, String> {
+    let staging = game_dir.join(format!(".eternalcraft-pack-{process_id}-{nonce}"));
+    fs::create_dir(&staging)
+        .map_err(|error| format!("No se pudo preparar la actualización: {error}"))?;
+    Ok(staging)
+}
+
 fn is_stale_staging_directory(
     modified: SystemTime,
     now: SystemTime,
@@ -1173,9 +1184,7 @@ pub(super) fn sync_pack_locked(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let staging = game_dir.join(format!(".eternalcraft-pack-{}-{nonce}", std::process::id()));
-    fs::create_dir_all(&staging)
-        .map_err(|error| format!("No se pudo preparar la actualización: {error}"))?;
+    let staging = create_pack_staging_directory(game_dir, std::process::id(), nonce)?;
     let mut preserve_staging = false;
     let result = (|| {
         let download_refs = downloads.iter().collect::<Vec<_>>();
@@ -1342,6 +1351,38 @@ mod tests {
         assert!(game.join(unrelated_name).exists());
         assert!(game.join(recovery_name).join(ROLLBACK_FAILED_MARKER).is_file());
         fs::remove_dir_all(game).unwrap();
+    }
+
+    #[test]
+    fn pack_staging_never_reuses_an_existing_directory() {
+        let game = temp_dir();
+        let staging = game.join(".eternalcraft-pack-42-123");
+        fs::create_dir(&staging).unwrap();
+        let marker = staging.join("do-not-reuse.jar");
+        fs::write(&marker, b"existing staging data").unwrap();
+
+        let error = create_pack_staging_directory(&game, 42, 123).unwrap_err();
+
+        assert!(error.contains("No se pudo preparar la actualización"));
+        assert_eq!(fs::read(&marker).unwrap(), b"existing staging data");
+        fs::remove_dir_all(game).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pack_staging_rejects_a_preexisting_symlink() {
+        let game = temp_dir();
+        let target = temp_dir();
+        let marker = target.join("preserve.txt");
+        fs::write(&marker, b"outside staging target").unwrap();
+        let staging = game.join(".eternalcraft-pack-42-123");
+        std::os::unix::fs::symlink(&target, &staging).unwrap();
+
+        assert!(create_pack_staging_directory(&game, 42, 123).is_err());
+        assert_eq!(fs::read(&marker).unwrap(), b"outside staging target");
+        fs::remove_file(&staging).unwrap();
+        fs::remove_dir_all(game).unwrap();
+        fs::remove_dir_all(target).unwrap();
     }
 
     #[test]

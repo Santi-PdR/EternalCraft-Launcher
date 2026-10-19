@@ -9,6 +9,7 @@
   import type { Bootstrap, DeveloperLoginStatus, InstallProgress, MinecraftStatus, ModInventory, PackPublishProgress, PackSourcePreview, PackSyncProgress, PackSyncResult, Series } from './lib/types';
 
   let bootstrap = $state<Bootstrap | null>(null);
+  let pendingCatalogUpdate: Bootstrap | null = null;
   let selected = $derived.by(() => {
     const current = bootstrap;
     return current?.series.find((series) => series.id === current.activeSeriesId);
@@ -177,6 +178,21 @@
         else unlisteners.push(stop);
       });
     };
+    void listen<Bootstrap>('catalog-updated', ({ payload }) => {
+      if (!bootstrap) {
+        pendingCatalogUpdate = payload;
+        return;
+      }
+      void applyCatalogRefresh(payload, JSON.stringify(bootstrap.series));
+    }).then((stop) => {
+      if (disposed) stop();
+      else {
+        unlisteners.push(stop);
+        void refresh();
+      }
+    }).catch(() => {
+      if (!disposed) void refresh();
+    });
     subscribe<InstallProgress>('forge-install-progress', (payload) => {
       if (payload.seriesId === installingSeries) {
         const completed = payload.completedFiles > 0 ? ` · ${payload.completedFiles} archivos procesados` : '';
@@ -426,6 +442,11 @@
     error = '';
     try {
       bootstrap = await invoke<Bootstrap>('get_bootstrap');
+      if (pendingCatalogUpdate) {
+        const updated = pendingCatalogUpdate;
+        pendingCatalogUpdate = null;
+        await applyCatalogRefresh(updated, JSON.stringify(bootstrap.series));
+      }
       if (bootstrap.microsoftSessionNotice) notice = bootstrap.microsoftSessionNotice;
       const hasAccount = Boolean(bootstrap.microsoftProfile || bootstrap.accountMode === 'offline');
       if (hasAccount) localStorage.setItem('eternalcraft-welcome-v2', 'done');
@@ -867,7 +888,6 @@
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   }
 
-  refresh();
 </script>
 
 <svelte:head>

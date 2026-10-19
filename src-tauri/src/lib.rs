@@ -600,6 +600,17 @@ fn read_catalog_cache(path: &Path) -> Option<Catalog> {
     validate_catalog(catalog).ok()
 }
 
+fn load_runtime_catalog_cache(cache_path: &Path) -> Result<(), String> {
+    let runtime_catalog = RUNTIME_CATALOG.get_or_init(|| RwLock::new(None));
+    let mut cached_catalog = runtime_catalog
+        .write()
+        .map_err(|_| "El catálogo local quedó bloqueado".to_string())?;
+    if cached_catalog.is_none() {
+        *cached_catalog = read_catalog_cache(cache_path);
+    }
+    Ok(())
+}
+
 fn write_catalog_cache(path: &Path, catalog: &Catalog) -> Result<(), String> {
     let parent = path
         .parent()
@@ -625,14 +636,11 @@ fn refresh_runtime_catalog(cache_path: &Path) -> Result<(), String> {
         .lock()
         .map_err(|_| "El estado de actualización del catálogo quedó bloqueado".to_string())?;
     let runtime_catalog = RUNTIME_CATALOG.get_or_init(|| RwLock::new(None));
-    let mut cached_catalog = runtime_catalog
-        .write()
-        .map_err(|_| "El catálogo local quedó bloqueado".to_string())?;
-    if cached_catalog.is_none() {
-        *cached_catalog = read_catalog_cache(cache_path);
-    }
-    let has_cached_catalog = cached_catalog.is_some();
-    drop(cached_catalog);
+    load_runtime_catalog_cache(cache_path)?;
+    let has_cached_catalog = runtime_catalog
+        .read()
+        .map_err(|_| "El catálogo local quedó bloqueado".to_string())?
+        .is_some();
     let now = Instant::now();
     let currently_online = RUNTIME_CATALOG_ONLINE.load(std::sync::atomic::Ordering::Relaxed);
     if !catalog_refresh_due(now, *last_attempt, has_cached_catalog, currently_online) {
@@ -2902,15 +2910,25 @@ async fn get_bootstrap(app: AppHandle) -> Result<Bootstrap, String> {
         .app_config_dir()
         .map_err(|error| error.to_string())?
         .join("series-catalog.json");
-    let _ = tauri::async_runtime::spawn_blocking(move || {
-        refresh_runtime_catalog(&cache_path)
-    })
-    .await;
+    let initial_cache_path = cache_path.clone();
     let restore_app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || restore_microsoft_session_once(&restore_app))
+    tauri::async_runtime::spawn_blocking(move || {
+        load_runtime_catalog_cache(&initial_cache_path)?;
+        restore_microsoft_session_once(&restore_app)
+    })
         .await
         .map_err(|error| format!("Falló la restauración de la sesión Microsoft: {error}"))??;
-    make_bootstrap(&app)
+    let bootstrap = make_bootstrap(&app)?;
+
+    let refresh_app = app.clone();
+    let _refresh_task = tauri::async_runtime::spawn_blocking(move || {
+        if refresh_runtime_catalog(&cache_path).is_ok() {
+            if let Ok(updated) = make_bootstrap(&refresh_app) {
+                let _ = refresh_app.emit("catalog-updated", updated);
+            }
+        }
+    });
+    Ok(bootstrap)
 }
 
 #[tauri::command]

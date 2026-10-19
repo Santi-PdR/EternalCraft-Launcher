@@ -375,7 +375,7 @@ struct MinecraftStatus {
     exit_success: Option<bool>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Bootstrap {
     series: Vec<Series>,

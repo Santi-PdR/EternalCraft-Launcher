@@ -25,6 +25,7 @@ export interface Bootstrap {
   managedGameDirectories: Record<string, string>;
   installedProfiles: Record<string, string>;
   microsoftLoginAvailable: boolean;
+  sessionRestoreComplete: boolean;
   microsoftSessionNotice: string | null;
   githubDeveloperEnabled: boolean;
   developerGithubUser: string | null;

@@ -10,6 +10,7 @@
 
   let bootstrap = $state<Bootstrap | null>(null);
   let pendingCatalogUpdate: Bootstrap | null = null;
+  let pendingSessionUpdate: Bootstrap | null = null;
   let selected = $derived.by(() => {
     const current = bootstrap;
     return current?.series.find((series) => series.id === current.activeSeriesId);
@@ -178,21 +179,37 @@
         else unlisteners.push(stop);
       });
     };
-    void listen<Bootstrap>('catalog-updated', ({ payload }) => {
-      if (!bootstrap) {
-        pendingCatalogUpdate = payload;
-        return;
+    void (async () => {
+      let stopCatalog: (() => void) | undefined;
+      let stopSession: (() => void) | undefined;
+      try {
+        stopCatalog = await listen<Bootstrap>('catalog-updated', ({ payload }) => {
+          if (!bootstrap) {
+            pendingCatalogUpdate = payload;
+            return;
+          }
+          void applyCatalogRefresh(payload, JSON.stringify(bootstrap.series));
+        });
+        stopSession = await listen<Bootstrap>('session-updated', ({ payload }) => {
+          if (!bootstrap) {
+            pendingSessionUpdate = payload;
+            return;
+          }
+          applySessionRefresh(payload);
+        });
+        if (disposed) {
+          stopCatalog();
+          stopSession();
+        } else {
+          unlisteners.push(stopCatalog, stopSession);
+          void refresh();
+        }
+      } catch {
+        stopCatalog?.();
+        stopSession?.();
+        if (!disposed) void refresh();
       }
-      void applyCatalogRefresh(payload, JSON.stringify(bootstrap.series));
-    }).then((stop) => {
-      if (disposed) stop();
-      else {
-        unlisteners.push(stop);
-        void refresh();
-      }
-    }).catch(() => {
-      if (!disposed) void refresh();
-    });
+    })();
     subscribe<InstallProgress>('forge-install-progress', (payload) => {
       if (payload.seriesId === installingSeries) {
         const completed = payload.completedFiles > 0 ? ` · ${payload.completedFiles} archivos procesados` : '';
@@ -292,6 +309,25 @@
     };
     if (activeSeriesId !== previousSeriesId) await loadMods(activeSeriesId);
     return catalogChanged;
+  }
+
+  function applySessionRefresh(updated: Bootstrap) {
+    if (!bootstrap) return;
+    bootstrap = {
+      ...bootstrap,
+      sessionRestoreComplete: updated.sessionRestoreComplete,
+      microsoftSessionNotice: updated.microsoftSessionNotice,
+      microsoftProfile: updated.microsoftProfile,
+      accountMode: updated.accountMode,
+      offlineUsername: updated.offlineUsername
+    };
+    if (updated.microsoftSessionNotice) notice = updated.microsoftSessionNotice;
+    if (updated.microsoftProfile || updated.accountMode === 'offline') {
+      localStorage.setItem('eternalcraft-welcome-v2', 'done');
+      welcomeOpen = false;
+    } else if (updated.sessionRestoreComplete && !localStorage.getItem('eternalcraft-welcome-v2')) {
+      welcomeOpen = true;
+    }
   }
 
   async function loadMods(seriesId: string | undefined) {
@@ -447,10 +483,15 @@
         pendingCatalogUpdate = null;
         await applyCatalogRefresh(updated, JSON.stringify(bootstrap.series));
       }
+      if (pendingSessionUpdate) {
+        const updated = pendingSessionUpdate;
+        pendingSessionUpdate = null;
+        applySessionRefresh(updated);
+      }
       if (bootstrap.microsoftSessionNotice) notice = bootstrap.microsoftSessionNotice;
       const hasAccount = Boolean(bootstrap.microsoftProfile || bootstrap.accountMode === 'offline');
       if (hasAccount) localStorage.setItem('eternalcraft-welcome-v2', 'done');
-      else if (!localStorage.getItem('eternalcraft-welcome-v2')) welcomeOpen = true;
+      else if (bootstrap.sessionRestoreComplete && !localStorage.getItem('eternalcraft-welcome-v2')) welcomeOpen = true;
       offlineUsernameDraft = bootstrap.offlineUsername ?? '';
       memoryDraft = bootstrap.memory.selectedMb;
       developerLoginStatus = await invoke<DeveloperLoginStatus>('github_developer_status');

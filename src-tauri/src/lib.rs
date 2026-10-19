@@ -151,6 +151,7 @@ struct MicrosoftSessionStatus(std::sync::Mutex<MicrosoftSessionStatusData>);
 
 #[derive(Default)]
 struct MicrosoftSessionStatusData {
+    restore_started: bool,
     restore_attempted: bool,
     notice: Option<String>,
 }
@@ -214,6 +215,7 @@ fn set_microsoft_restore_status(app: &AppHandle, notice: Option<String>) -> Resu
         .0
         .lock()
         .map_err(|_| "El estado de la sesión Microsoft quedó bloqueado".to_string())?;
+    status.restore_started = false;
     status.restore_attempted = true;
     status.notice = notice;
     Ok(())
@@ -271,18 +273,27 @@ fn restore_microsoft_session(app: &AppHandle) -> Option<String> {
     persistence_notice
 }
 
-fn restore_microsoft_session_once(app: &AppHandle) -> Result<(), String> {
+fn restore_microsoft_session_once(app: &AppHandle) -> Result<bool, String> {
     let state = app.state::<MicrosoftSessionStatus>();
-    let mut state = state
+    {
+        let mut status = state
+            .0
+            .lock()
+            .map_err(|_| "El estado de la sesión Microsoft quedó bloqueado".to_string())?;
+        if status.restore_started || status.restore_attempted {
+            return Ok(false);
+        }
+        status.restore_started = true;
+    }
+    let notice = restore_microsoft_session(app);
+    let mut status = state
         .0
         .lock()
         .map_err(|_| "El estado de la sesión Microsoft quedó bloqueado".to_string())?;
-    if state.restore_attempted {
-        return Ok(());
-    }
-    state.restore_attempted = true;
-    state.notice = restore_microsoft_session(app);
-    Ok(())
+    status.restore_started = false;
+    status.restore_attempted = true;
+    status.notice = notice;
+    Ok(true)
 }
 
 #[derive(Default)]
@@ -392,6 +403,7 @@ struct Bootstrap {
     managed_game_directories: BTreeMap<String, String>,
     installed_profiles: BTreeMap<String, String>,
     microsoft_login_available: bool,
+    session_restore_complete: bool,
     microsoft_session_notice: Option<String>,
     github_developer_enabled: bool,
     developer_github_user: Option<String>,
@@ -2807,13 +2819,14 @@ fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
         .map_err(|_| "La sesión Microsoft quedó bloqueada".to_string())?
         .as_ref()
         .map(|session| session.profile.clone());
-    let microsoft_session_notice = app
-        .state::<MicrosoftSessionStatus>()
-        .0
-        .lock()
-        .map_err(|_| "El estado de la sesión Microsoft quedó bloqueado".to_string())?
-        .notice
-        .clone();
+    let (session_restore_complete, microsoft_session_notice) = {
+        let session_status = app
+            .state::<MicrosoftSessionStatus>()
+            .0
+            .lock()
+            .map_err(|_| "El estado de la sesión Microsoft quedó bloqueado".to_string())?;
+        (session_status.restore_attempted, session_status.notice.clone())
+    };
     let java_manually_selected = settings.java_executable.is_some();
     let java = if let Some(path) = settings.java_executable.as_deref() {
         inspect_java(Path::new(path))
@@ -2864,6 +2877,7 @@ fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
         managed_game_directories,
         installed_profiles,
         microsoft_login_available: configured_microsoft_client_id().is_some(),
+        session_restore_complete,
         microsoft_session_notice,
         github_developer_enabled: developer::github_app_client_id_configured(),
         developer_github_user: app.state::<developer::GitHubDeveloper>().username(),
@@ -2911,14 +2925,21 @@ async fn get_bootstrap(app: AppHandle) -> Result<Bootstrap, String> {
         .map_err(|error| error.to_string())?
         .join("series-catalog.json");
     let initial_cache_path = cache_path.clone();
-    let restore_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        load_runtime_catalog_cache(&initial_cache_path)?;
-        restore_microsoft_session_once(&restore_app)
+        load_runtime_catalog_cache(&initial_cache_path)
     })
         .await
-        .map_err(|error| format!("Falló la restauración de la sesión Microsoft: {error}"))??;
+        .map_err(|error| format!("Falló la lectura de la caché del catálogo: {error}"))??;
     let bootstrap = make_bootstrap(&app)?;
+
+    let restore_app = app.clone();
+    let _session_restore_task = tauri::async_runtime::spawn_blocking(move || {
+        if restore_microsoft_session_once(&restore_app).unwrap_or(false) {
+            if let Ok(updated) = make_bootstrap(&restore_app) {
+                let _ = restore_app.emit("session-updated", updated);
+            }
+        }
+    });
 
     let refresh_app = app.clone();
     let _refresh_task = tauri::async_runtime::spawn_blocking(move || {

@@ -2479,36 +2479,69 @@ const MAX_JAVA_VERSION_OUTPUT_BYTES: usize = 16 * 1024;
 
 fn read_java_version_pipe<R: Read + Send + 'static>(
     reader: R,
-) -> thread::JoinHandle<io::Result<Vec<u8>>> {
-    thread::spawn(move || {
+) -> (mpsc::Receiver<io::Result<Vec<u8>>>, thread::JoinHandle<()>) {
+    let (sender, receiver) = mpsc::channel();
+    let handle = thread::spawn(move || {
         let mut bytes = Vec::new();
-        reader
+        let result = reader
             .take((MAX_JAVA_VERSION_OUTPUT_BYTES + 1) as u64)
-            .read_to_end(&mut bytes)?;
-        if bytes.len() > MAX_JAVA_VERSION_OUTPUT_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Java devolvió más datos de versión de los permitidos",
-            ));
-        }
-        Ok(bytes)
-    })
+            .read_to_end(&mut bytes)
+            .and_then(|_| {
+                if bytes.len() > MAX_JAVA_VERSION_OUTPUT_BYTES {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Java devolvió más datos de versión de los permitidos",
+                    ))
+                } else {
+                    Ok(bytes)
+                }
+            });
+        let _ = sender.send(result);
+    });
+    (receiver, handle)
 }
 
 fn finish_java_version_pipe(
-    reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+    receiver: mpsc::Receiver<io::Result<Vec<u8>>>,
+    reader: thread::JoinHandle<()>,
+    timeout: Duration,
 ) -> Result<Vec<u8>, String> {
+    let result = receiver.recv_timeout(timeout).map_err(|error| match error {
+        mpsc::RecvTimeoutError::Timeout => {
+            "Java dejó abierta su salida después de terminar la comprobación".to_string()
+        }
+        mpsc::RecvTimeoutError::Disconnected => {
+            "Falló la lectura de la salida de Java".to_string()
+        }
+    })?;
     reader
         .join()
-        .map_err(|_| "Falló la lectura de la salida de Java".to_string())?
-        .map_err(|error| format!("No se pudo leer la salida de Java: {error}"))
+        .map_err(|_| "Falló la lectura de la salida de Java".to_string())?;
+    result.map_err(|error| format!("No se pudo leer la salida de Java: {error}"))
+}
+
+#[cfg(unix)]
+fn terminate_java_probe_group(process_id: u32) {
+    // The probe is placed in its own process group before spawn. If a wrapper
+    // exits while a child still owns stdout/stderr, kill that orphaned child
+    // so the pipe readers can finish as well.
+    unsafe {
+        libc::kill(-(process_id as libc::pid_t), libc::SIGKILL);
+    }
 }
 
 fn java_version_output(path: &Path, timeout: Duration) -> Result<std::process::Output, String> {
-    let mut child = Command::new(path)
+    let mut command = Command::new(path);
+    command
         .arg("-version")
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command
         .spawn()
         .map_err(|error| format!("No se pudo ejecutar Java: {error}"))?;
     let stdout = child
@@ -2519,35 +2552,69 @@ fn java_version_output(path: &Path, timeout: Duration) -> Result<std::process::O
         .stderr
         .take()
         .ok_or_else(|| "No se pudo capturar los errores de Java".to_string())?;
-    let stdout_reader = read_java_version_pipe(stdout);
-    let stderr_reader = read_java_version_pipe(stderr);
+    let (stdout_receiver, stdout_reader) = read_java_version_pipe(stdout);
+    let (stderr_receiver, stderr_reader) = read_java_version_pipe(stderr);
     let deadline = Instant::now() + timeout;
 
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                let stdout = finish_java_version_pipe(
+                    stdout_receiver,
+                    stdout_reader,
+                    deadline.saturating_duration_since(Instant::now()),
+                );
+                let stderr = finish_java_version_pipe(
+                    stderr_receiver,
+                    stderr_reader,
+                    deadline.saturating_duration_since(Instant::now()),
+                );
+                if stdout.is_err() || stderr.is_err() {
+                    #[cfg(unix)]
+                    terminate_java_probe_group(child.id());
+                }
                 return Ok(std::process::Output {
                     status,
-                    stdout: finish_java_version_pipe(stdout_reader)?,
-                    stderr: finish_java_version_pipe(stderr_reader)?,
+                    stdout: stdout?,
+                    stderr: stderr?,
                 });
             }
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
             Ok(None) => {
+                #[cfg(unix)]
+                terminate_java_probe_group(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = finish_java_version_pipe(stdout_reader);
-                let _ = finish_java_version_pipe(stderr_reader);
+                let _ = finish_java_version_pipe(
+                    stdout_receiver,
+                    stdout_reader,
+                    Duration::from_millis(100),
+                );
+                let _ = finish_java_version_pipe(
+                    stderr_receiver,
+                    stderr_reader,
+                    Duration::from_millis(100),
+                );
                 return Err(format!(
                     "La comprobación de Java superó el límite de {} segundos",
                     timeout.as_secs_f32()
                 ));
             }
             Err(error) => {
+                #[cfg(unix)]
+                terminate_java_probe_group(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = finish_java_version_pipe(stdout_reader);
-                let _ = finish_java_version_pipe(stderr_reader);
+                let _ = finish_java_version_pipe(
+                    stdout_receiver,
+                    stdout_reader,
+                    Duration::from_millis(100),
+                );
+                let _ = finish_java_version_pipe(
+                    stderr_receiver,
+                    stderr_reader,
+                    Duration::from_millis(100),
+                );
                 return Err(format!("No se pudo consultar el proceso Java: {error}"));
             }
         }
@@ -4938,6 +5005,37 @@ mod tests {
             .unwrap_err();
 
         assert!(error.contains("superó el límite"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn java_version_probe_does_not_wait_for_orphaned_pipe_holders() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = std::env::temp_dir().join(format!(
+            "eternalcraft-java-probe-orphan-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let executable = directory.join("java-orphan");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nsleep 30 &\necho 'openjdk version \"17.0.15\"' >&2\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let started = std::time::Instant::now();
+        let error = super::java_version_output(&executable, std::time::Duration::from_millis(100))
+            .unwrap_err();
+
+        assert!(error.contains("dejó abierta su salida"));
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
         std::fs::remove_dir_all(directory).unwrap();
     }

@@ -2819,9 +2819,9 @@ fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
         .map_err(|_| "La sesión Microsoft quedó bloqueada".to_string())?
         .as_ref()
         .map(|session| session.profile.clone());
+    let session_state = app.state::<MicrosoftSessionStatus>();
     let (session_restore_complete, microsoft_session_notice) = {
-        let session_status = app
-            .state::<MicrosoftSessionStatus>()
+        let session_status = session_state
             .0
             .lock()
             .map_err(|_| "El estado de la sesión Microsoft quedó bloqueado".to_string())?;

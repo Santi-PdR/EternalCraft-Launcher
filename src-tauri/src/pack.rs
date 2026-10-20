@@ -81,19 +81,35 @@ pub(super) struct PackProgress {
     pub message: String,
 }
 
+#[derive(Debug)]
+enum CopyDownloadError {
+    Read(std::io::Error),
+    Write(std::io::Error),
+}
+
+impl std::fmt::Display for CopyDownloadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Read(error) | Self::Write(error) => std::fmt::Display::fmt(error, formatter),
+        }
+    }
+}
+
 fn copy_download_with_progress<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
     mut report_bytes: impl FnMut(u64),
-) -> std::io::Result<u64> {
+) -> Result<u64, CopyDownloadError> {
     let mut buffer = [0_u8; 64 * 1024];
     let mut copied = 0_u64;
     loop {
-        let read = reader.read(&mut buffer)?;
+        let read = reader.read(&mut buffer).map_err(CopyDownloadError::Read)?;
         if read == 0 {
             break;
         }
-        writer.write_all(&buffer[..read])?;
+        writer
+            .write_all(&buffer[..read])
+            .map_err(CopyDownloadError::Write)?;
         copied += read as u64;
         report_bytes(copied);
     }
@@ -843,6 +859,19 @@ fn retryable_pack_io_error(error: &std::io::Error) -> bool {
     )
 }
 
+fn retryable_pack_body_read_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::UnexpectedEof
+            // reqwest maps some transport/body failures to Other on Windows.
+            | std::io::ErrorKind::Other
+    )
+}
+
 fn pack_download_retry_delay(attempt: usize, retry_after: Option<&str>) -> Duration {
     let seconds = retry_after
         .and_then(|value| value.trim().parse::<u64>().ok())
@@ -982,15 +1011,22 @@ fn download_pack_file(
             &mut report_progress,
         ) {
             Ok(copied) => copied,
-            Err(error) => {
+            Err(CopyDownloadError::Read(error)) => {
                 drop(output);
                 let _ = fs::remove_file(staged);
                 last_error = format!("La descarga de {name} falló: {error}");
-                if !retryable_pack_io_error(&error) || attempt == MAX_PACK_DOWNLOAD_ATTEMPTS {
+                if !retryable_pack_body_read_error(&error)
+                    || attempt == MAX_PACK_DOWNLOAD_ATTEMPTS
+                {
                     return Err(last_error);
                 }
                 retry_pack_download_after(attempt, None);
                 continue;
+            }
+            Err(CopyDownloadError::Write(error)) => {
+                drop(output);
+                let _ = fs::remove_file(staged);
+                return Err(format!("No se pudo guardar la descarga de {name}: {error}"));
             }
         };
         if let Err(error) = output.sync_all() {
@@ -1497,6 +1533,37 @@ mod tests {
     }
 
     #[test]
+    fn download_copy_keeps_network_read_errors_separate_from_disk_write_errors() {
+        struct FailedReader;
+        impl Read for FailedReader {
+            fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("request or response body error"))
+            }
+        }
+
+        struct FailedWriter;
+        impl Write for FailedWriter {
+            fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        assert!(matches!(
+            copy_download_with_progress(&mut FailedReader, &mut Vec::new(), |_| {}),
+            Err(CopyDownloadError::Read(error)) if error.kind() == std::io::ErrorKind::Other
+        ));
+
+        assert!(matches!(
+            copy_download_with_progress(&mut std::io::Cursor::new([1_u8]), &mut FailedWriter, |_| {}),
+            Err(CopyDownloadError::Write(error)) if error.kind() == std::io::ErrorKind::PermissionDenied
+        ));
+    }
+
+    #[test]
     fn pack_download_retries_only_transient_network_failures() {
         assert!(retryable_pack_http_status(reqwest::StatusCode::REQUEST_TIMEOUT));
         assert!(retryable_pack_http_status(reqwest::StatusCode::TOO_MANY_REQUESTS));
@@ -1510,6 +1577,12 @@ mod tests {
         )));
         assert!(retryable_pack_io_error(&std::io::Error::from(
             std::io::ErrorKind::UnexpectedEof
+        )));
+        assert!(retryable_pack_body_read_error(&std::io::Error::other(
+            "request or response body error"
+        )));
+        assert!(!retryable_pack_body_read_error(&std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied
         )));
         assert!(!retryable_pack_io_error(&std::io::Error::from(
             std::io::ErrorKind::PermissionDenied
@@ -1659,47 +1732,59 @@ mod tests {
         let server_active = Arc::clone(&active);
         let server_peak = Arc::clone(&peak_active);
         let server_contents = contents.clone();
+        let (stop_server, server_should_stop) = mpsc::channel();
         let server = std::thread::spawn(move || {
-            let workers = (0..file_count)
-                .map(|_| {
-                    let (mut stream, _) = listener.accept().unwrap();
-                    let active = Arc::clone(&server_active);
-                    let peak = Arc::clone(&server_peak);
-                    let contents = server_contents.clone();
-                    std::thread::spawn(move || {
-                        let mut reader = BufReader::new(stream.try_clone().unwrap());
-                        let mut request = String::new();
-                        reader.read_line(&mut request).unwrap();
-                        let file_index = request
-                            .split_whitespace()
-                            .nth(1)
-                            .unwrap()
-                            .trim_start_matches("/mods/mod-")
-                            .trim_end_matches(".jar")
-                            .parse::<usize>()
-                            .unwrap();
-                        let mut line = String::new();
-                        loop {
-                            line.clear();
-                            reader.read_line(&mut line).unwrap();
-                            if line == "\r\n" || line.is_empty() {
-                                break;
+            listener.set_nonblocking(true).unwrap();
+            let mut workers = Vec::new();
+            loop {
+                match server_should_stop.try_recv() {
+                    Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
+                    Err(mpsc::TryRecvError::Empty) => {}
+                }
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let active = Arc::clone(&server_active);
+                        let peak = Arc::clone(&server_peak);
+                        let contents = server_contents.clone();
+                        workers.push(std::thread::spawn(move || {
+                            let mut reader = BufReader::new(stream.try_clone().unwrap());
+                            let mut request = String::new();
+                            reader.read_line(&mut request).unwrap();
+                            let file_index = request
+                                .split_whitespace()
+                                .nth(1)
+                                .unwrap()
+                                .trim_start_matches("/mods/mod-")
+                                .trim_end_matches(".jar")
+                                .parse::<usize>()
+                                .unwrap();
+                            let mut line = String::new();
+                            loop {
+                                line.clear();
+                                reader.read_line(&mut line).unwrap();
+                                if line == "\r\n" || line.is_empty() {
+                                    break;
+                                }
                             }
-                        }
-                        let now_active = active.fetch_add(1, Ordering::SeqCst) + 1;
-                        peak.fetch_max(now_active, Ordering::SeqCst);
-                        std::thread::sleep(Duration::from_millis(150));
-                        write!(
-                            stream,
-                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                            contents[file_index].len()
-                        )
-                        .unwrap();
-                        stream.write_all(&contents[file_index]).unwrap();
-                        active.fetch_sub(1, Ordering::SeqCst);
-                    })
-                })
-                .collect::<Vec<_>>();
+                            let now_active = active.fetch_add(1, Ordering::SeqCst) + 1;
+                            peak.fetch_max(now_active, Ordering::SeqCst);
+                            std::thread::sleep(Duration::from_millis(150));
+                            write!(
+                                stream,
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                contents[file_index].len()
+                            )
+                            .unwrap();
+                            stream.write_all(&contents[file_index]).unwrap();
+                            active.fetch_sub(1, Ordering::SeqCst);
+                        }));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("local download test server failed: {error}"),
+                }
+            }
             for worker in workers {
                 worker.join().unwrap();
             }
@@ -1733,6 +1818,7 @@ mod tests {
             |event| progress.push(event),
         )
         .unwrap();
+        stop_server.send(()).unwrap();
         server.join().unwrap();
 
         assert!(peak_active.load(Ordering::SeqCst) > 1);

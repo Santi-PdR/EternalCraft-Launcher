@@ -816,6 +816,40 @@ fn publish_pack_release_sync(
     if source.source_fingerprint != confirmed_source_fingerprint {
         return Err("La carpeta o sus JAR cambiaron desde la revisión de licencias. Vuelve a verificar la fuente y confirma otra vez.".into());
     }
+    let github_asset_count = source.files.len();
+    if github_asset_count > MAX_GITHUB_ASSETS_PER_RELEASE {
+        return Err(format!("La publicación necesita {github_asset_count} assets de GitHub; el límite es {MAX_GITHUB_ASSETS_PER_RELEASE}"));
+    }
+    let tag = format!("{series_id}-v{version}");
+    let manifest = Manifest {
+        schema_version: 1,
+        series_id: series_id.clone(),
+        version: version.clone(),
+        minecraft_version: series.minecraft_version.clone(),
+        loader: series.loader.clone(),
+        loader_version: series.loader_version.clone(),
+        files: source
+            .files
+            .iter()
+            .map(|file| ManifestFile {
+                path: format!("mods/{}", file.published_name),
+                url: format!("https://github.com/{PUBLISH_REPOSITORY}/releases/download/{tag}/{}", encode_path_component(&file.published_name)),
+                size_bytes: file.size_bytes,
+                sha256: file.sha256.clone(),
+            })
+            .collect(),
+    };
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+        .map_err(|error| format!("No se pudo generar el manifiesto: {error}"))?;
+    let manifest_path = format!("packs/{series_id}/manifest.json");
+    let current_manifest = get_repository_file(&access_token, &manifest_path)?
+        .map(|file| file.content.ok_or_else(|| format!("GitHub no devolvió el manifiesto {manifest_path}")))
+        .transpose()?
+        .map(|content| base64_decode(&content))
+        .transpose()?;
+    // Reject a repeated, stale, or malformed version before creating the GitHub draft
+    // or uploading any assets, so an invalid publication does not leave orphan data.
+    should_advance_manifest_pointer(current_manifest.as_deref(), &manifest_bytes)?;
     emit_publish_progress(
         &app,
         &series_id,
@@ -823,11 +857,6 @@ fn publish_pack_release_sync(
         source.files.len(),
         "Preparando mods oficiales desde la carpeta seleccionada",
     );
-    let github_asset_count = source.files.len();
-    if github_asset_count > MAX_GITHUB_ASSETS_PER_RELEASE {
-        return Err(format!("La publicación necesita {github_asset_count} assets de GitHub; el límite es {MAX_GITHUB_ASSETS_PER_RELEASE}"));
-    }
-    let tag = format!("{series_id}-v{version}");
     let release = get_or_create_draft_release(&access_token, &tag, &series.name)?;
     let assets = list_release_assets(&access_token, release.id)?;
     let github_files = source.files.clone();
@@ -973,27 +1002,15 @@ fn publish_pack_release_sync(
         }
     }
 
-    let manifest = Manifest {
-        schema_version: 1,
-        series_id: series_id.clone(),
-        version: version.clone(),
-        minecraft_version: series.minecraft_version.clone(),
-        loader: series.loader.clone(),
-        loader_version: series.loader_version.clone(),
-        files: source
-            .files
-            .iter()
-            .map(|file| ManifestFile {
-                path: format!("mods/{}", file.published_name),
-                url: format!("https://github.com/{PUBLISH_REPOSITORY}/releases/download/{tag}/{}", encode_path_component(&file.published_name)),
-                size_bytes: file.size_bytes,
-                sha256: file.sha256.clone(),
-            })
-            .collect(),
-    };
-    let manifest_bytes = serde_json::to_vec_pretty(&manifest)
-        .map_err(|error| format!("No se pudo generar el manifiesto: {error}"))?;
     if release.draft {
+        let latest_manifest = get_repository_file(&access_token, &manifest_path)?
+            .map(|file| file.content.ok_or_else(|| format!("GitHub no devolvió el manifiesto {manifest_path}")))
+            .transpose()?
+            .map(|content| base64_decode(&content))
+            .transpose()?;
+        // Another launcher may have advanced the series while this draft uploaded.
+        // Recheck before making its release public.
+        should_advance_manifest_pointer(latest_manifest.as_deref(), &manifest_bytes)?;
         publish_github_release(&access_token, release.id, &series.name, &version)?;
     }
 

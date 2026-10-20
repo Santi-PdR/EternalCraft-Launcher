@@ -73,7 +73,7 @@ struct PendingDeviceAuthorization {
 
 struct GitHubSession {
     username: String,
-    access_token: String,
+    access_token: Zeroizing<String>,
     expires_at: Option<Instant>,
 }
 
@@ -203,6 +203,14 @@ struct TokenResponse {
     error_description: Option<String>,
 }
 
+impl Drop for TokenResponse {
+    fn drop(&mut self) {
+        if let Some(access_token) = &mut self.access_token {
+            access_token.zeroize();
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct GitHubUser {
     login: String,
@@ -255,7 +263,7 @@ impl GitHubDeveloper {
             })
     }
 
-    fn access_token(&self) -> Result<String, String> {
+    fn access_token(&self) -> Result<Zeroizing<String>, String> {
         let state = self
             .0
             .lock()
@@ -267,7 +275,7 @@ impl GitHubDeveloper {
         if session.expires_at.is_some_and(|deadline| Instant::now() >= deadline) {
             return Err("La sesión de GitHub expiró. Vuelve a autorizar el launcher".into());
         }
-        Ok(session.access_token.clone())
+        Ok(Zeroizing::new(session.access_token.to_string()))
     }
 }
 
@@ -407,7 +415,7 @@ pub(super) fn poll_github_developer_login(
         ])
         .send()
         .map_err(|error| format!("No se pudo consultar la autorización GitHub: {error}"))?;
-    let token: TokenResponse = github_json(response, "Consultar autorización GitHub")?;
+    let mut token: TokenResponse = github_json(response, "Consultar autorización GitHub")?;
 
     let mut state = developer
         .0
@@ -453,16 +461,19 @@ pub(super) fn poll_github_developer_login(
         }
         None => {}
     }
-    let access_token = token
-        .access_token
-        .ok_or_else(|| "GitHub no devolvió un token de acceso".to_string())?;
+    let access_token = Zeroizing::new(
+        token
+            .access_token
+            .take()
+            .ok_or_else(|| "GitHub no devolvió un token de acceso".to_string())?,
+    );
     let expires_at = token
         .expires_in
         .map(|seconds| Instant::now() + Duration::from_secs(seconds));
     drop(state);
 
-    let user = match get_github_user(&access_token)
-        .and_then(|user| ensure_repository_write_access(&access_token).map(|()| user))
+    let user = match get_github_user(access_token.as_str())
+        .and_then(|user| ensure_repository_write_access(access_token.as_str()).map(|()| user))
     {
         Ok(user) => user,
         Err(message) => {
@@ -2202,7 +2213,7 @@ mod tests {
         let state = DeveloperState {
             session: Some(GitHubSession {
                 username: "Santi-PdR".into(),
-                access_token: "token".into(),
+                access_token: Zeroizing::new("token".into()),
                 expires_at: None,
             }),
             ..DeveloperState::default()
@@ -2214,12 +2225,27 @@ mod tests {
         let state = DeveloperState {
             session: Some(GitHubSession {
                 username: "expired-user".into(),
-                access_token: "token".into(),
+                access_token: Zeroizing::new("token".into()),
                 expires_at: Some(Instant::now() - Duration::from_secs(1)),
             }),
             ..DeveloperState::default()
         };
         assert_eq!(current_authorization_status(&state).status, "signedOut");
+    }
+
+    #[test]
+    fn github_access_token_copies_use_zeroizing_storage() {
+        let developer = GitHubDeveloper(std::sync::Mutex::new(DeveloperState {
+            session: Some(GitHubSession {
+                username: "Santi-PdR".into(),
+                access_token: Zeroizing::new("sensitive-token".into()),
+                expires_at: None,
+            }),
+            ..DeveloperState::default()
+        }));
+
+        let token = developer.access_token().unwrap();
+        assert_eq!(token.as_str(), "sensitive-token");
     }
 
     #[test]

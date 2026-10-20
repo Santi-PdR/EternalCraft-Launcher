@@ -64,7 +64,9 @@
   let publishingPack = $state(false);
   let packPublishMessage = $state('');
   let packPublishProgress = $state<PackPublishProgress | null>(null);
-  let publishVersion = $state('1.0.0');
+  const publishVersionsStorageKey = 'eternalcraft-developer-pack-versions-v1';
+  let publishVersionsBySeries = $state<Record<string, string>>({});
+  let publishVersion = $derived(publishVersionsBySeries[selected?.id ?? ''] ?? '1.0.0');
   const backgroundPresets: Record<string, { label: string; url: string; source: string }> = {
     siege: {
       label: 'SIEGE · Referencia de asedio Minecraft',
@@ -106,6 +108,24 @@
   });
   let themeAccent = $derived(selectedTheme.accent);
 
+  function setPublishVersion(value: string) {
+    if (!selected) return;
+    publishVersionsBySeries = { ...publishVersionsBySeries, [selected.id]: value };
+    try {
+      localStorage.setItem(publishVersionsStorageKey, JSON.stringify(publishVersionsBySeries));
+    } catch {
+      // Publishing remains available when browser storage is disabled or full.
+    }
+  }
+
+  function nextPatchVersion(version: string) {
+    const match = /^(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})$/.exec(version);
+    if (!match) return version;
+    const patch = Number(match[3]);
+    if (patch >= 999999) return version;
+    return `${match[1]}.${match[2]}.${patch + 1}`;
+  }
+
   onMount(() => {
     let disposed = false;
     let minecraftStatusRefreshBusy = false;
@@ -115,6 +135,21 @@
     let developerTimer: number | undefined;
     let launcherUpdateTimer: number | undefined;
     const unlisteners: Array<() => void> = [];
+    try {
+      const storedVersions: unknown = JSON.parse(localStorage.getItem(publishVersionsStorageKey) ?? '{}');
+      if (storedVersions && typeof storedVersions === 'object' && !Array.isArray(storedVersions)) {
+        const restored: Record<string, string> = {};
+        for (const [seriesId, version] of Object.entries(storedVersions)) {
+          if (
+            typeof version === 'string'
+            && /^(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})$/.test(version)
+          ) restored[seriesId] = version;
+        }
+        publishVersionsBySeries = restored;
+      }
+    } catch {
+      publishVersionsBySeries = {};
+    }
     void defaultWindowIcon().then((icon) => icon ? getCurrentWindow().setIcon(icon) : undefined).catch(() => undefined);
     const refreshMinecraftStatus = async () => {
       if (disposed || minecraftStatusRefreshBusy) return;
@@ -879,17 +914,19 @@
 
   async function publishPack() {
     if (!selected || !developerLoginStatus.username || publishingPack || packSourceBusy || packSourcePreview?.seriesId !== selected.id) return;
+    const version = publishVersion.trim();
     if (licenseReviewFingerprint !== packSourcePreview.sourceFingerprint) {
       error = 'Revisa las licencias y confirma que tienes permiso para redistribuir todos los JAR incluidos.';
       return;
     }
-    if (!window.confirm(`Publicar ${selected.name} ${publishVersion} en GitHub? Esta versión quedará disponible para todos los usuarios del launcher.\n\nSolo se usarán los JAR de la carpeta que acabas de revisar. Se subirán al release oficial de EternalCraft; no se consultan Modrinth, CurseForge ni catálogos de mods.`)) return;
+    if (!window.confirm(`Publicar ${selected.name} ${version} en GitHub? Esta versión quedará disponible para todos los usuarios del launcher.\n\nSolo se usarán los JAR de la carpeta que acabas de revisar. Se subirán al release oficial de EternalCraft; no se consultan Modrinth, CurseForge ni catálogos de mods.`)) return;
     publishingPack = true;
     packPublishMessage = 'Preparando release borrador…';
     packPublishProgress = null;
     error = '';
     try {
-      notice = await invoke<string>('publish_pack_release', { seriesId: selected.id, version: publishVersion.trim(), confirmedSourceFingerprint: licenseReviewFingerprint });
+      notice = await invoke<string>('publish_pack_release', { seriesId: selected.id, version, confirmedSourceFingerprint: licenseReviewFingerprint });
+      setPublishVersion(nextPatchVersion(version));
       bootstrap = await invoke<Bootstrap>('get_bootstrap');
       packSourcePreview = null;
       licenseReviewFingerprint = '';
@@ -1159,7 +1196,7 @@
               <div class="inventory-warning"><b>Revisión antes de publicar:</b> {permissionRequiredCount} JAR tienen condiciones restrictivas, {unknownLicenseCount} tienen licencia desconocida, {incompatibleMinecraftCount} declaran incompatibilidad con Minecraft {selected.minecraftVersion}, {unknownMinecraftCount} requieren revisar su metadato de Minecraft, {incompatibleForgeCount} declaran incompatibilidad con Forge {selected.loaderVersion} y {unknownForgeCount} requieren revisar su metadato de Forge. Los mods mantienen sus propias condiciones de licencia.
                 <label class="license-confirm"><input type="checkbox" checked={licenseReviewFingerprint === sourceFingerprint} onchange={(event) => (licenseReviewFingerprint = event.currentTarget.checked ? sourceFingerprint : '')} /> Confirmo que revisé las licencias y los derechos de distribución; los enlaces directos permanecen en sus plataformas y los JAR alojados por EternalCraft están autorizados.</label>
               </div>
-              <div class="publish-controls"><label>Versión de esta serie<input class="text-input" value={publishVersion} oninput={(event) => (publishVersion = event.currentTarget.value)} placeholder="1.0.0" maxlength="20" /></label><button class="button primary" onclick={publishPack} disabled={publishingPack || packSourceBusy || incompatibleMinecraftCount > 0 || incompatibleForgeCount > 0 || licenseReviewFingerprint !== sourceFingerprint || !/^(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})$/.test(publishVersion.trim())}>{publishingPack ? 'Publicando…' : `Publicar ${selected.name}`}</button></div>
+              <div class="publish-controls"><label>Versión de esta serie<input class="text-input" value={publishVersion} oninput={(event) => setPublishVersion(event.currentTarget.value)} placeholder="1.0.0" maxlength="20" /></label><button class="button primary" onclick={publishPack} disabled={publishingPack || packSourceBusy || incompatibleMinecraftCount > 0 || incompatibleForgeCount > 0 || licenseReviewFingerprint !== sourceFingerprint || !/^(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})$/.test(publishVersion.trim())}>{publishingPack ? 'Publicando…' : `Publicar ${selected.name}`}</button></div>
               {#if publishingPack}<div class="install-progress" role="status" aria-live="polite"><span class="spinner"></span><div class="pack-progress-copy"><strong>{packPublishMessage}</strong>{#if packPublishProgress?.totalBytes && packPublishProgress.totalBytes > 0}<div class="pack-progress-track" role="progressbar" aria-label="Progreso de subida del modpack" aria-valuemin="0" aria-valuemax={packPublishProgress.totalBytes} aria-valuenow={Math.min(packPublishProgress.uploadedBytes ?? 0, packPublishProgress.totalBytes)}><span style:width={`${Math.min(100, (packPublishProgress.uploadedBytes ?? 0) / packPublishProgress.totalBytes * 100)}%`}></span></div><small>{formatBytes(packPublishProgress.uploadedBytes ?? 0)} / {formatBytes(packPublishProgress.totalBytes)}</small>{/if}<p>La publicación se puede reintentar si falla; el release conserva los assets verificados.</p></div></div>{/if}
             {/if}
             <p class="privacy-note">Se suben solo los mods JAR de la carpeta revisada. Los archivos de configuración, otras carpetas y datos personales no se incluyen.</p></div>{/if}</section>

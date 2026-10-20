@@ -1164,6 +1164,56 @@ fn read_log_tail(path: &Path, max_bytes: u64) -> Result<Option<String>, String> 
     Ok(Some(text.to_string()))
 }
 
+fn read_latest_crash_report(game_directory: &Path) -> Result<Option<(String, String)>, String> {
+    const CRASH_REPORT_DISPLAY_LIMIT: u64 = 128 * 1024;
+    let crash_directory = game_directory.join("crash-reports");
+    match fs::symlink_metadata(&crash_directory) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => return Err("La carpeta de informes de Minecraft no es un directorio normal".into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("No se pudo revisar los informes de Minecraft: {error}")),
+    }
+
+    let entries = fs::read_dir(&crash_directory)
+        .map_err(|error| format!("No se pudieron listar los informes de Minecraft: {error}"))?;
+    let mut latest: Option<(std::time::SystemTime, String, PathBuf)> = None;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("No se pudo leer un informe de Minecraft: {error}"))?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !name.starts_with("crash-") || !name.ends_with(".txt") {
+            continue;
+        }
+        if !entry
+            .file_type()
+            .map_err(|error| format!("No se pudo revisar el informe {name}: {error}"))?
+            .is_file()
+        {
+            continue;
+        }
+        let metadata = entry
+            .metadata()
+            .map_err(|error| format!("No se pudo revisar el informe {name}: {error}"))?;
+        let modified = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
+        let path = entry.path();
+        let candidate = (modified, name, path);
+        if latest.as_ref().is_none_or(|current| {
+            candidate.0 > current.0 || (candidate.0 == current.0 && candidate.1 > current.1)
+        }) {
+            latest = Some(candidate);
+        }
+    }
+
+    let Some((_, name, path)) = latest else {
+        return Ok(None);
+    };
+    let Some(contents) = read_log_tail(&path, CRASH_REPORT_DISPLAY_LIMIT)? else {
+        return Ok(None);
+    };
+    Ok(Some((name, contents)))
+}
+
 #[cfg(test)]
 mod settings_recovery_tests {
     use super::*;
@@ -1345,6 +1395,62 @@ mod log_tests {
         assert_eq!(read_log_tail(&path, 7).unwrap().as_deref(), Some("abcdef\n"));
         assert_eq!(read_log_tail(&path, 8).unwrap().as_deref(), Some("abcdef\n"));
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn support_selects_only_the_latest_regular_minecraft_crash_report() {
+        let fixture = std::env::temp_dir().join(format!(
+            "eternalcraft-crash-report-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let crash_directory = fixture.join("crash-reports");
+        fs::create_dir_all(&crash_directory).unwrap();
+        fs::write(
+            crash_directory.join("crash-2026-10-19_10.00.00-client.txt"),
+            "older report",
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        fs::write(
+            crash_directory.join("crash-2026-10-20_10.00.00-client.txt"),
+            "latest report",
+        )
+        .unwrap();
+        fs::write(crash_directory.join("notes.txt"), "not a Minecraft crash report").unwrap();
+
+        let (name, contents) = read_latest_crash_report(&fixture).unwrap().unwrap();
+        assert_eq!(name, "crash-2026-10-20_10.00.00-client.txt");
+        assert_eq!(contents, "latest report");
+        fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
+    fn support_ignores_a_symlinked_crash_report() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let fixture = std::env::temp_dir().join(format!(
+                "eternalcraft-crash-report-symlink-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let crash_directory = fixture.join("crash-reports");
+            fs::create_dir_all(&crash_directory).unwrap();
+            let outside = fixture.join("outside.txt");
+            fs::write(&outside, "must not be read").unwrap();
+            symlink(&outside, crash_directory.join("crash-2026-10-20_10.00.00-client.txt"))
+                .unwrap();
+
+            assert!(read_latest_crash_report(&fixture).unwrap().is_none());
+            fs::remove_dir_all(fixture).unwrap();
+        }
     }
 
     #[test]
@@ -3200,17 +3306,17 @@ fn get_launcher_logs(app: AppHandle, series_id: String) -> Result<String, String
         .join("logs")
         .join("launcher.log");
     let launcher_log = read_install_log_at(&path)?;
-    let Some(game_directory) = resolve_series_game_directory(&app, &series_id)? else {
-        return Ok(launcher_log);
-    };
-    let game_log_path = game_directory.join("logs").join("latest.log");
-    let Some(game_log) = read_log_tail(&game_log_path, 256 * 1024)? else {
-        return Ok(launcher_log);
-    };
-    Ok(format!(
-        "=== EternalCraft Launcher ===\n{launcher_log}\n=== Minecraft · {} ===\n{}",
-        series_id, game_log
-    ))
+    let mut sections = vec![format!("=== EternalCraft Launcher ===\n{launcher_log}")];
+    if let Some(game_directory) = resolve_series_game_directory(&app, &series_id)? {
+        let game_log_path = game_directory.join("logs").join("latest.log");
+        if let Some(game_log) = read_log_tail(&game_log_path, 256 * 1024)? {
+            sections.push(format!("=== Minecraft · {series_id} ===\n{game_log}"));
+        }
+        if let Some((name, report)) = read_latest_crash_report(&game_directory)? {
+            sections.push(format!("=== Informe de cierre · {name} ===\n{report}"));
+        }
+    }
+    Ok(sections.join("\n\n"))
 }
 
 #[tauri::command]

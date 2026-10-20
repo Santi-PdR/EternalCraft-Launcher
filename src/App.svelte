@@ -908,11 +908,19 @@
     packPublishProgress = null;
     error = '';
     try {
-      notice = await invoke<string>('publish_pack_release', { seriesId: selected.id, version, confirmedSourceFingerprint: licenseReviewFingerprint });
+      const publishNotice = await invoke<string>('publish_pack_release', { seriesId: selected.id, version, confirmedSourceFingerprint: licenseReviewFingerprint });
+      // The release and manifest are already public at this point. Commit the local
+      // success state before refreshing bootstrap so a refresh error cannot make a
+      // completed publication look failed or leave the version draft stale.
+      notice = publishNotice;
       setPublishVersion(nextPatchVersion(version));
-      bootstrap = await invoke<Bootstrap>('get_bootstrap');
       packSourcePreview = null;
       licenseReviewFingerprint = '';
+      try {
+        bootstrap = await invoke<Bootstrap>('get_bootstrap');
+      } catch (reason) {
+        error = `La publicación se completó, pero no se pudo actualizar el estado del launcher: ${String(reason)}`;
+      }
     } catch (reason) {
       error = String(reason);
     } finally {

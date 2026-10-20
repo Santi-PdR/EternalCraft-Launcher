@@ -64,7 +64,7 @@ impl Drop for PublishLease {
 
 struct PendingDeviceAuthorization {
     client_id: String,
-    device_code: String,
+    device_code: Zeroizing<String>,
     user_code: String,
     interval: Duration,
     expires_at: Instant,
@@ -195,6 +195,12 @@ struct DeviceCodeResponse {
     interval: Option<u64>,
 }
 
+impl Drop for DeviceCodeResponse {
+    fn drop(&mut self) {
+        self.device_code.zeroize();
+    }
+}
+
 #[derive(Deserialize)]
 struct TokenResponse {
     access_token: Option<String>,
@@ -307,7 +313,7 @@ pub(super) fn begin_github_developer_login(app: AppHandle) -> Result<DeveloperLo
         .form(&[("client_id", client_id.to_string())])
         .send()
         .map_err(|error| format!("No se pudo solicitar autorización a GitHub: {error}"))?;
-    let device: DeviceCodeResponse =
+    let mut device: DeviceCodeResponse =
         github_json(response, "Solicitar código de inicio de sesión")?;
     if device.device_code.is_empty()
         || device.user_code.is_empty()
@@ -326,17 +332,17 @@ pub(super) fn begin_github_developer_login(app: AppHandle) -> Result<DeveloperLo
         .map_err(|_| "El estado de autorización GitHub quedó bloqueado".to_string())?
         .pending = Some(PendingDeviceAuthorization {
             client_id: client_id.to_string(),
-            device_code: device.device_code,
+            device_code: Zeroizing::new(std::mem::take(&mut device.device_code)),
             user_code: device.user_code.clone(),
-        interval,
-        expires_at,
-        next_poll_at: now + interval,
+            interval,
+            expires_at,
+            next_poll_at: now + interval,
     });
     let _ = open_system_browser(GITHUB_DEVICE_VERIFICATION_URL);
     Ok(DeveloperLoginStatus {
         status: "pending".into(),
         username: None,
-        user_code: Some(device.user_code),
+        user_code: Some(device.user_code.clone()),
         verification_uri: Some(GITHUB_DEVICE_VERIFICATION_URL.into()),
         expires_in_seconds: Some(device.expires_in),
         interval_seconds: Some(interval.as_secs()),
@@ -348,7 +354,7 @@ fn pending_device_code_matches(
     pending: Option<&PendingDeviceAuthorization>,
     expected_code: &str,
 ) -> bool {
-    pending.is_some_and(|pending| pending.device_code == expected_code)
+    pending.is_some_and(|pending| pending.device_code.as_str() == expected_code)
 }
 
 fn current_authorization_status(state: &DeveloperState) -> DeveloperLoginStatus {
@@ -421,7 +427,7 @@ pub(super) fn poll_github_developer_login(
         .0
         .lock()
         .map_err(|_| "El estado de autorización GitHub quedó bloqueado".to_string())?;
-    if !pending_device_code_matches(state.pending.as_ref(), &device_code) {
+    if !pending_device_code_matches(state.pending.as_ref(), device_code.as_str()) {
         return Ok(current_authorization_status(&state));
     }
     match token.error.as_deref() {
@@ -481,7 +487,7 @@ pub(super) fn poll_github_developer_login(
                 .0
                 .lock()
                 .map_err(|_| "El estado de autorización GitHub quedó bloqueado".to_string())?;
-            if !pending_device_code_matches(state.pending.as_ref(), &device_code) {
+            if !pending_device_code_matches(state.pending.as_ref(), device_code.as_str()) {
                 return Ok(current_authorization_status(&state));
             }
             state.pending = None;
@@ -492,7 +498,7 @@ pub(super) fn poll_github_developer_login(
         .0
         .lock()
         .map_err(|_| "El estado de autorización GitHub quedó bloqueado".to_string())?;
-    if !pending_device_code_matches(state.pending.as_ref(), &device_code) {
+    if !pending_device_code_matches(state.pending.as_ref(), device_code.as_str()) {
         return Ok(current_authorization_status(&state));
     }
     state.pending = None;
@@ -2175,7 +2181,7 @@ mod tests {
     fn stale_device_authorization_responses_cannot_replace_a_new_flow() {
         let pending = PendingDeviceAuthorization {
             client_id: "client-id".into(),
-            device_code: "new-device-code".into(),
+            device_code: Zeroizing::new("new-device-code".into()),
             user_code: "ABCD-1234".into(),
             interval: Duration::from_secs(5),
             expires_at: Instant::now() + Duration::from_secs(60),
@@ -2196,7 +2202,7 @@ mod tests {
     fn stale_authorization_poll_reports_the_current_pending_or_valid_session() {
         let pending = PendingDeviceAuthorization {
             client_id: "client-id".into(),
-            device_code: "new-device-code".into(),
+            device_code: Zeroizing::new("new-device-code".into()),
             user_code: "ABCD-1234".into(),
             interval: Duration::from_secs(5),
             expires_at: Instant::now() + Duration::from_secs(60),

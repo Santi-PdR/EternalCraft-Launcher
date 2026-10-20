@@ -842,10 +842,16 @@ fn publish_pack_release_sync(
     let manifest_bytes = serde_json::to_vec_pretty(&manifest)
         .map_err(|error| format!("No se pudo generar el manifiesto: {error}"))?;
     let manifest_path = format!("packs/{series_id}/manifest.json");
-    let current_manifest = get_repository_file(&access_token, &manifest_path)?
-        .map(|file| file.content.ok_or_else(|| format!("GitHub no devolvió el manifiesto {manifest_path}")))
-        .transpose()?
-        .map(|content| base64_decode(&content))
+    let current_manifest_file = get_repository_file(&access_token, &manifest_path)?;
+    let current_manifest = current_manifest_file
+        .as_ref()
+        .map(|file| {
+            let content = file
+                .content
+                .as_deref()
+                .ok_or_else(|| format!("GitHub no devolvió el manifiesto {manifest_path}"))?;
+            base64_decode(content)
+        })
         .transpose()?;
     // Reject a repeated, stale, or malformed version before creating the GitHub draft
     // or uploading any assets, so an invalid publication does not leave orphan data.
@@ -1017,13 +1023,25 @@ fn publish_pack_release_sync(
     // Publish the release assets before advancing the manifest pointer. Existing clients
     // keep resolving the previous complete version while the new assets are not yet public.
     let manifest_path = format!("packs/{series_id}/manifest.json");
-    let current_manifest = get_repository_file(&access_token, &manifest_path)?
-        .map(|file| file.content.ok_or_else(|| format!("GitHub no devolvió el manifiesto {manifest_path}")))
-        .transpose()?
-        .map(|content| base64_decode(&content))
+    let current_manifest_file = get_repository_file(&access_token, &manifest_path)?;
+    let current_manifest = current_manifest_file
+        .as_ref()
+        .map(|file| {
+            let content = file
+                .content
+                .as_deref()
+                .ok_or_else(|| format!("GitHub no devolvió el manifiesto {manifest_path}"))?;
+            base64_decode(content)
+        })
         .transpose()?;
     if should_advance_manifest_pointer(current_manifest.as_deref(), &manifest_bytes)? {
-        put_repository_file(&access_token, &manifest_path, &manifest_bytes, &format!("Publish {} {version} manifest", series.name))?;
+        put_repository_file(
+            &access_token,
+            &manifest_path,
+            &manifest_bytes,
+            &format!("Publish {} {version} manifest", series.name),
+            current_manifest_file.as_ref().map(|file| file.sha.as_str()),
+        )?;
     }
     update_catalog_status(&access_token, &series_id)?;
     super::mark_runtime_series_available(&series_id)?;
@@ -1614,13 +1632,31 @@ fn publish_github_release(token: &str, release_id: u64, series_name: &str, versi
     Ok(())
 }
 
-fn put_repository_file(token: &str, path: &str, bytes: &[u8], message: &str) -> Result<(), String> {
+fn repository_file_put_body(
+    bytes: &[u8],
+    message: &str,
+    expected_sha: Option<&str>,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "message": message,
+        "content": base64_encode(bytes),
+    });
+    if let Some(sha) = expected_sha {
+        body["sha"] = serde_json::Value::String(sha.to_string());
+    }
+    body
+}
+
+fn put_repository_file(
+    token: &str,
+    path: &str,
+    bytes: &[u8],
+    message: &str,
+    expected_sha: Option<&str>,
+) -> Result<(), String> {
     let endpoint = format!("{GITHUB_API}/repos/{PUBLISH_REPOSITORY}/contents/{path}");
-    let current = get_repository_file(token, path)?;
-    let sha = current.map(|content| content.sha);
     let client = http::client().map_err(|error| error.to_string())?;
-    let mut body = serde_json::json!({"message": message, "content": base64_encode(bytes)});
-    if let Some(sha) = sha { body["sha"] = serde_json::Value::String(sha); }
+    let body = repository_file_put_body(bytes, message, expected_sha);
     let response = client.put(endpoint).bearer_auth(token).header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28").header("User-Agent", "EternalCraft-Launcher")
         .json(&body).send().map_err(|error| format!("No se pudo guardar {path} en GitHub: {error}"))?;
@@ -1651,12 +1687,8 @@ fn get_repository_file(token: &str, path: &str) -> Result<Option<GitHubContentRe
 
 fn update_catalog_status(token: &str, series_id: &str) -> Result<(), String> {
     let path = "resources/series/catalog.json";
-    let client = http::client().map_err(|error| error.to_string())?;
-    let response = client.get(format!("{GITHUB_API}/repos/{PUBLISH_REPOSITORY}/contents/{path}"))
-        .bearer_auth(token).header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28").header("User-Agent", "EternalCraft-Launcher")
-        .send().map_err(|error| format!("No se pudo leer el catálogo remoto: {error}"))?;
-    let encoded: GitHubContentResponse = github_json(response, "Cargar catálogo remoto")?;
+    let encoded = get_repository_file(token, path)?
+        .ok_or_else(|| "GitHub no encontró el catálogo remoto".to_string())?;
     let decoded = base64_decode(encoded.content.as_deref().ok_or_else(|| "GitHub no devolvió el catálogo codificado".to_string())?)?;
     let mut catalog: serde_json::Value = serde_json::from_slice(&decoded).map_err(|error| format!("El catálogo remoto no es JSON válido: {error}"))?;
     let series = catalog["series"].as_array_mut().ok_or_else(|| "El catálogo remoto no tiene una lista de series".to_string())?;
@@ -1664,7 +1696,13 @@ fn update_catalog_status(token: &str, series_id: &str) -> Result<(), String> {
         .ok_or_else(|| format!("La serie {series_id} ya no existe en el catálogo remoto"))?;
     entry["packStatus"] = serde_json::Value::String("available".into());
     let bytes = serde_json::to_vec_pretty(&catalog).map_err(|error| error.to_string())?;
-    put_repository_file(token, path, &bytes, &format!("Enable {series_id} official pack"))?;
+    put_repository_file(
+        token,
+        path,
+        &bytes,
+        &format!("Enable {series_id} official pack"),
+        Some(&encoded.sha),
+    )?;
     Ok(())
 }
 
@@ -2429,6 +2467,18 @@ mod tests {
         assert!(should_advance_manifest_pointer(Some(same_version_changed), expected).is_err());
         assert!(should_advance_manifest_pointer(Some(newer), expected).is_err());
         assert!(should_advance_manifest_pointer(Some(b"not json"), expected).is_err());
+    }
+
+    #[test]
+    fn repository_file_updates_use_the_sha_from_the_content_snapshot() {
+        let existing_sha = "snapshot-sha";
+        let body = repository_file_put_body(b"updated", "update catalog", Some(existing_sha));
+        assert_eq!(body["sha"].as_str(), Some(existing_sha));
+        let expected_content = base64_encode(b"updated");
+        assert_eq!(body["content"].as_str(), Some(expected_content.as_str()));
+
+        let create_body = repository_file_put_body(b"new", "create manifest", None);
+        assert!(create_body.get("sha").is_none());
     }
 
     #[test]

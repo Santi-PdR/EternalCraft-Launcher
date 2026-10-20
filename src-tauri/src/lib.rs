@@ -1214,6 +1214,34 @@ fn read_latest_crash_report(game_directory: &Path) -> Result<Option<(String, Str
     Ok(Some((name, contents)))
 }
 
+
+fn read_latest_jvm_fatal_log(game_directory: &Path) -> Result<Option<(String, String)>, String> {
+    const JVM_FATAL_LOG_DISPLAY_LIMIT: u64 = 128 * 1024;
+    let entries = match fs::read_dir(game_directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("No se pudieron revisar los registros fatales de Java: {error}")),
+    };
+    let mut latest: Option<(std::time::SystemTime, String, PathBuf)> = None;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("No se pudo leer un registro fatal de Java: {error}"))?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else { continue; };
+        if !name.starts_with("hs_err_pid") || !name.ends_with(".log") { continue; }
+        if !entry.file_type().map_err(|error| format!("No se pudo revisar el registro {name}: {error}"))?.is_file() {
+            continue;
+        }
+        let metadata = entry.metadata().map_err(|error| format!("No se pudo revisar el registro {name}: {error}"))?;
+        let modified = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
+        let candidate = (modified, name, entry.path());
+        if latest.as_ref().is_none_or(|current| candidate.0 > current.0 || (candidate.0 == current.0 && candidate.1 > current.1)) {
+            latest = Some(candidate);
+        }
+    }
+    let Some((_, name, path)) = latest else { return Ok(None); };
+    let Some(contents) = read_log_tail(&path, JVM_FATAL_LOG_DISPLAY_LIMIT)? else { return Ok(None); };
+    Ok(Some((name, contents)))
+}
+
 #[cfg(test)]
 mod settings_recovery_tests {
     use super::*;
@@ -1449,6 +1477,36 @@ mod log_tests {
                 .unwrap();
 
             assert!(read_latest_crash_report(&fixture).unwrap().is_none());
+            fs::remove_dir_all(fixture).unwrap();
+        }
+    }
+
+    #[test]
+    fn support_selects_only_the_latest_jvm_fatal_log() {
+        let fixture = std::env::temp_dir().join(format!("eternalcraft-jvm-fatal-log-{}-{}",
+            std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&fixture).unwrap();
+        fs::write(fixture.join("hs_err_pid100.log"), "older fatal log").unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        fs::write(fixture.join("hs_err_pid200.log"), "latest fatal log").unwrap();
+        fs::write(fixture.join("notes.log"), "not a JVM fatal log").unwrap();
+        let (name, contents) = read_latest_jvm_fatal_log(&fixture).unwrap().unwrap();
+        assert_eq!(name, "hs_err_pid200.log");
+        assert_eq!(contents, "latest fatal log");
+        fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
+    fn support_ignores_a_symlinked_jvm_fatal_log() {
+        #[cfg(unix)] {
+            use std::os::unix::fs::symlink;
+            let fixture = std::env::temp_dir().join(format!("eternalcraft-jvm-fatal-symlink-{}-{}",
+                std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            fs::create_dir_all(&fixture).unwrap();
+            let outside = fixture.join("outside.log");
+            fs::write(&outside, "must not be read").unwrap();
+            symlink(&outside, fixture.join("hs_err_pid200.log")).unwrap();
+            assert!(read_latest_jvm_fatal_log(&fixture).unwrap().is_none());
             fs::remove_dir_all(fixture).unwrap();
         }
     }
@@ -3314,6 +3372,9 @@ fn get_launcher_logs(app: AppHandle, series_id: String) -> Result<String, String
         }
         if let Some((name, report)) = read_latest_crash_report(&game_directory)? {
             sections.push(format!("=== Informe de cierre · {name} ===\n{report}"));
+        }
+        if let Some((name, report)) = read_latest_jvm_fatal_log(&game_directory)? {
+            sections.push(format!("=== Error fatal de Java · {name} ===\n{report}"));
         }
     }
     Ok(sections.join("\n\n"))

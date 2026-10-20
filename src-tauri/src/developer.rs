@@ -1735,12 +1735,15 @@ fn scan_pack_source(
         let file_type = entry
             .file_type()
             .map_err(|error| format!("No se pudo inspeccionar un elemento de la fuente: {error}"))?;
-        if !file_type.is_file() {
-            continue;
-        }
         let file_name = entry.file_name();
         let Some(name) = file_name.to_str() else { continue };
         if !name.to_ascii_lowercase().ends_with(".jar") {
+            continue;
+        }
+        if file_type.is_symlink() {
+            return Err(format!("No se puede publicar {name}: los mods deben ser archivos JAR normales, no enlaces simbólicos"));
+        }
+        if !file_type.is_file() {
             continue;
         }
         if !valid_official_asset_name(name) {
@@ -2724,5 +2727,24 @@ mod tests {
 
         assert!(scan_pack_source(&personal, "siege", "1.20.1", "47.4.10").is_err());
         fs::remove_dir_all(source).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pack_source_rejects_symbolic_link_mods_instead_of_silently_omitting_them() {
+        use std::os::unix::fs::symlink;
+
+        let root = temporary_directory("developer-pack-symlink");
+        let source = root.join("mods");
+        fs::create_dir(&source).unwrap();
+        write_forge_jar(&source.join("Official.jar"));
+        let outside = root.join("External.jar");
+        write_forge_jar(&outside);
+        symlink(&outside, source.join("Linked Mod.jar")).unwrap();
+
+        let result = scan_pack_source(&source, "siege", "1.20.1", "47.4.10");
+        assert!(result.unwrap_err().contains("enlaces simbólicos"));
+
+        fs::remove_dir_all(root).unwrap();
     }
 }

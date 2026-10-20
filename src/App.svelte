@@ -40,6 +40,7 @@
   let installMessage = $state('');
   let launcherLogs = $state('Todavía no hay registros de instalación.');
   let logsLoading = $state(false);
+  let supportLogRequestId = 0;
   let launcherVersion = $state('');
   let launcherUpdateState = $state<'idle' | 'checking' | 'current' | 'available' | 'manual' | 'installing' | 'error'>('idle');
   let launcherUpdateVersion = $state('');
@@ -652,6 +653,7 @@
     try {
       bootstrap = await invoke<Bootstrap>('set_active_series', { seriesId: id });
       await loadMods(id);
+      if (activePage === 'support') await refreshSupportLogs(id);
       notice = 'Serie activa guardada. La instancia se descargará cuando elijas Jugar o Actualizar pack.';
     } catch (reason) {
       error = String(reason);
@@ -902,15 +904,21 @@
 
   async function openSupport() {
     activePage = 'support';
+    const seriesId = bootstrap?.activeSeriesId;
+    if (seriesId) await refreshSupportLogs(seriesId);
+  }
+
+  async function refreshSupportLogs(seriesId: string) {
+    const requestId = ++supportLogRequestId;
     logsLoading = true;
     error = '';
     try {
-      const seriesId = bootstrap?.activeSeriesId;
-      launcherLogs = await invoke<string>('get_launcher_logs', { seriesId });
+      const logs = await invoke<string>('get_launcher_logs', { seriesId });
+      if (requestId === supportLogRequestId) launcherLogs = logs;
     } catch (reason) {
-      error = String(reason);
+      if (requestId === supportLogRequestId) error = String(reason);
     } finally {
-      logsLoading = false;
+      if (requestId === supportLogRequestId) logsLoading = false;
     }
   }
 

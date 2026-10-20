@@ -50,6 +50,7 @@ const CATALOG_JSON: &str = include_str!("../../resources/series/catalog.json");
 const MAX_FORGE_MOD_METADATA_BYTES: u64 = 256 * 1024;
 const MAX_FORGE_MOD_ARCHIVE_ENTRIES: u16 = 50_000;
 const MAX_FORGE_MOD_CENTRAL_DIRECTORY_BYTES: u32 = 32 * 1024 * 1024;
+const FORGE_INSTALL_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -329,8 +330,37 @@ fn terminate_registered_forge_installer(process: &ForgeInstallerProcess) -> bool
     let Some(mut child) = child else {
         return false;
     };
-    let _ = child.kill();
+    terminate_forge_child(&mut child);
     child.wait().is_ok()
+}
+
+fn terminate_registered_forge_installer_after_timeout(process: &ForgeInstallerProcess) -> bool {
+    let child = {
+        let Ok(mut state) = process.0.lock() else {
+            return false;
+        };
+        state.active.take()
+    };
+    let Some(mut child) = child else {
+        return false;
+    };
+    terminate_forge_child(&mut child);
+    child.wait().is_ok()
+}
+
+fn terminate_forge_child(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    unsafe {
+        // Forge is started in a dedicated process group so Java wrappers and
+        // descendants cannot keep the piped output alive after a timeout.
+        libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+    }
+    #[cfg(not(unix))]
+    let _ = child.kill();
+}
+
+fn forge_install_timeout_expired(started: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(started) >= FORGE_INSTALL_TIMEOUT
 }
 
 fn stop_forge_installer(app: &AppHandle) {
@@ -338,7 +368,10 @@ fn stop_forge_installer(app: &AppHandle) {
     let _ = terminate_registered_forge_installer(&process);
 }
 
-fn wait_for_forge_installer(app: &AppHandle) -> Result<std::process::ExitStatus, String> {
+fn wait_for_forge_installer(
+    app: &AppHandle,
+    deadline: Instant,
+) -> Result<std::process::ExitStatus, String> {
     loop {
         let process = app.state::<ForgeInstallerProcess>();
         let mut state = process
@@ -347,6 +380,14 @@ fn wait_for_forge_installer(app: &AppHandle) -> Result<std::process::ExitStatus,
             .map_err(|_| "El estado del instalador Forge quedó bloqueado".to_string())?;
         if state.shutting_down {
             return Err("La instalación de Forge se detuvo al cerrar el launcher".into());
+        }
+        if Instant::now() >= deadline {
+            drop(state);
+            terminate_registered_forge_installer_after_timeout(&process);
+            return Err(format!(
+                "La instalación de Forge superó el límite de {} minutos y fue cancelada. Revisa el log de instalación y vuelve a intentarlo.",
+                FORGE_INSTALL_TIMEOUT.as_secs() / 60
+            ));
         }
         let Some(child) = state.active.as_mut() else {
             return Err("La instalación de Forge se detuvo al cerrar el launcher".into());
@@ -1527,7 +1568,13 @@ fn install_forge_profile(
             .args(installer_command_args(&invocation))
             .current_dir(&game_dir)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            child.process_group(0);
+        }
+        let mut child = child
             .spawn()
             .map_err(|error| format!("No se pudo iniciar el instalador Forge: {error}"))?;
         let Some(stdout) = child.stdout.take() else {
@@ -1547,20 +1594,64 @@ fn install_forge_profile(
         let stderr_reader = forward_forge_output(stderr, "stderr", sender);
         let mut recent_output = VecDeque::with_capacity(20);
         let mut last_report = None;
-        for line in receiver {
-            if recent_output.len() == 20 {
-                recent_output.pop_front();
-            }
-            recent_output.push_back(line.clone());
-            let now = Instant::now();
-            if progress_update_due(last_report, now, Duration::from_millis(500), false) {
-                progress.emit(&line);
-                last_report = Some(now);
+        let started = Instant::now();
+        let deadline = started + FORGE_INSTALL_TIMEOUT;
+        let mut timed_out = false;
+        loop {
+            match receiver.recv_timeout(Duration::from_millis(250)) {
+                Ok(line) => {
+                    if recent_output.len() == 20 {
+                        recent_output.pop_front();
+                    }
+                    recent_output.push_back(line.clone());
+                    let now = Instant::now();
+                    if progress_update_due(last_report, now, Duration::from_millis(500), false) {
+                        progress.emit(&line);
+                        last_report = Some(now);
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout)
+                    if !timed_out && forge_install_timeout_expired(started, Instant::now()) =>
+                {
+                    timed_out = true;
+                    let process = installer_app.state::<ForgeInstallerProcess>();
+                    terminate_registered_forge_installer_after_timeout(&process);
+                    let timeout_message = format!(
+                        "El instalador Forge superó el límite de {} minutos y fue cancelado.",
+                        FORGE_INSTALL_TIMEOUT.as_secs() / 60
+                    );
+                    let _ = append_install_log(
+                        &progress.app,
+                        &progress.series_id,
+                        "Forge",
+                        &timeout_message,
+                    );
+                    progress.emit("Forge tardó demasiado; se canceló la instalación y puedes volver a intentarlo.");
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
         let _ = stdout_reader.join();
         let _ = stderr_reader.join();
-        let status = wait_for_forge_installer(&installer_app)?;
+        if timed_out {
+            return Err(format!("La instalación de Forge superó el límite de {} minutos y fue cancelada. Revisa el log de instalación y vuelve a intentarlo.", FORGE_INSTALL_TIMEOUT.as_secs() / 60));
+        }
+        let status = match wait_for_forge_installer(&installer_app, deadline) {
+            Ok(status) => status,
+            Err(error) => {
+                if error.contains("superó el límite") {
+                    let _ = append_install_log(
+                        &progress.app,
+                        &progress.series_id,
+                        "Forge",
+                        &error,
+                    );
+                    progress.emit("Forge tardó demasiado; se canceló la instalación y puedes volver a intentarlo.");
+                }
+                return Err(error);
+            }
+        };
         if !status.success() {
             for line in &recent_output {
                 progress.emit(line);
@@ -4220,8 +4311,8 @@ mod tests {
         use std::process::{Command, Stdio};
         use super::{ForgeInstallerProcess, ForgeInstallerState};
 
-        let child = Command::new(std::env::current_exe().unwrap())
-            .args([
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.args([
                 "--exact",
                 "tests::forge_installer_child_waits_for_shutdown",
                 "--ignored",
@@ -4229,8 +4320,13 @@ mod tests {
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let child = command.spawn()
             .expect("spawn the long-running fixture");
         let process = ForgeInstallerProcess(std::sync::Mutex::new(ForgeInstallerState {
             active: Some(child),
@@ -4241,6 +4337,55 @@ mod tests {
         assert!(state.active.is_none());
         assert!(state.shutting_down);
         assert!(super::ensure_forge_installer_can_start(&state).is_err());
+    }
+
+    #[test]
+    fn forge_installer_timeout_cancels_child_without_blocking_a_retry() {
+        use std::process::{Command, Stdio};
+        use super::{ForgeInstallerProcess, ForgeInstallerState};
+
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "tests::forge_installer_child_waits_for_shutdown",
+                "--ignored",
+                "--nocapture",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let child = command.spawn().expect("spawn the long-running fixture");
+        let process = ForgeInstallerProcess(std::sync::Mutex::new(ForgeInstallerState {
+            active: Some(child),
+            shutting_down: false,
+        }));
+
+        assert!(super::terminate_registered_forge_installer_after_timeout(&process));
+        let state = process.0.lock().unwrap();
+        assert!(state.active.is_none());
+        assert!(!state.shutting_down);
+        assert!(super::ensure_forge_installer_can_start(&state).is_ok());
+    }
+
+    #[test]
+    fn forge_installer_deadline_is_bounded_to_twenty_minutes() {
+        use std::time::{Duration, Instant};
+
+        let started = Instant::now();
+        assert!(!super::forge_install_timeout_expired(
+            started,
+            started + Duration::from_secs(20 * 60 - 1)
+        ));
+        assert!(super::forge_install_timeout_expired(
+            started,
+            started + Duration::from_secs(20 * 60)
+        ));
     }
 
     #[test]

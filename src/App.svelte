@@ -41,7 +41,7 @@
   let launcherLogs = $state('Todavía no hay registros de instalación.');
   let logsLoading = $state(false);
   let launcherVersion = $state('');
-  let launcherUpdateState = $state<'idle' | 'checking' | 'unsupported' | 'current' | 'available' | 'installing' | 'error'>('idle');
+  let launcherUpdateState = $state<'idle' | 'checking' | 'current' | 'available' | 'manual' | 'installing' | 'error'>('idle');
   let launcherUpdateVersion = $state('');
   let launcherUpdateMessage = $state('');
   let launcherUpdateNotes = $state('');
@@ -398,6 +398,7 @@
   function canCheckLauncherUpdateAutomatically() {
     return launcherUpdateState === 'idle'
       || launcherUpdateState === 'current'
+      || launcherUpdateState === 'manual'
       || launcherUpdateState === 'error';
   }
 
@@ -409,13 +410,9 @@
     launcherUpdateNotes = '';
     launcherUpdateVersion = '';
     launcherUpdateDownloaded = 0;
+    let supported: boolean;
     try {
-      const supported = await invoke<boolean>('launcher_updater_supported');
-      if (!supported) {
-        launcherUpdateState = 'unsupported';
-        launcherUpdateMessage = 'La actualización integrada requiere AppImage en Linux. Este paquete se actualiza instalando el RPM/DEB más reciente.';
-        return;
-      }
+      supported = await invoke<boolean>('launcher_updater_supported');
     } catch (reason) {
       launcherUpdateState = 'error';
       launcherUpdateMessage = `No se pudo detectar el tipo de instalación: ${String(reason)}`;
@@ -431,11 +428,25 @@
       }
       launcherUpdateVersion = update.version;
       launcherUpdateNotes = update.body ?? '';
+      if (!supported) {
+        launcherUpdateState = 'manual';
+        launcherUpdateMessage = `EternalCraft ${update.version} está disponible. Descarga e instala el paquete de Linux desde las descargas oficiales.`;
+        return;
+      }
       launcherUpdateState = 'available';
       launcherUpdateMessage = `Nueva versión ${update.version} disponible. La firma se comprobará antes de instalar.`;
     } catch (reason) {
       launcherUpdateState = 'error';
       launcherUpdateMessage = `No se pudo comprobar la actualización: ${String(reason)}`;
+    }
+  }
+
+  async function openLauncherDownloads() {
+    try {
+      await invoke('open_launcher_releases');
+    } catch (reason) {
+      launcherUpdateState = 'error';
+      launcherUpdateMessage = `No se pudo abrir la página de descargas: ${String(reason)}`;
     }
   }
 
@@ -991,7 +1002,7 @@
     {:else if error && !bootstrap}
       <div class="center-state error-state"><span class="state-icon">!</span><h1>No se pudo iniciar</h1><p>{error}</p><button class="button primary" onclick={refresh}>Reintentar</button></div>
     {:else if bootstrap && selected}
-      {#if error || notice || launcherUpdateState === 'available' || launcherUpdateState === 'installing' || launcherUpdateState === 'error'}<div class="toast-stack">{#if error}<div class="toast error-toast" role="alert">{error}</div>{/if}{#if notice}<div class="toast" role="status">{notice}</div>{/if}{#if launcherUpdateState === 'available' || launcherUpdateState === 'installing' || launcherUpdateState === 'error'}<div class:error-toast={launcherUpdateState === 'error'} class="toast launcher-update-toast" role={launcherUpdateState === 'error' ? 'alert' : 'status'} aria-live={launcherUpdateState === 'error' ? 'assertive' : 'polite'}><div class="launcher-update-copy"><strong>{launcherUpdateState === 'available' ? `EternalCraft ${launcherUpdateVersion} está listo` : launcherUpdateMessage}</strong>{#if launcherUpdateState === 'installing'}{#if launcherUpdateSize && launcherUpdateSize > 0}<div class="pack-progress-track" role="progressbar" aria-label="Progreso de actualización del launcher" aria-valuemin="0" aria-valuemax={launcherUpdateSize} aria-valuenow={Math.min(launcherUpdateDownloaded, launcherUpdateSize)}><span style:width={`${Math.min(100, launcherUpdateDownloaded / launcherUpdateSize * 100)}%`}></span></div><small>{formatBytes(launcherUpdateDownloaded)} / {formatBytes(launcherUpdateSize)}</small>{:else}<small>{formatBytes(launcherUpdateDownloaded)} descargados</small>{/if}{/if}</div>{#if launcherUpdateState === 'available'}<button class="button primary" onclick={installLauncherUpdate}>Actualizar</button>{:else if launcherUpdateState === 'error'}<button class="button secondary" onclick={checkLauncherUpdate}>Reintentar</button>{/if}</div>{/if}</div>{/if}
+      {#if error || notice || launcherUpdateState === 'available' || launcherUpdateState === 'manual' || launcherUpdateState === 'installing' || launcherUpdateState === 'error'}<div class="toast-stack">{#if error}<div class="toast error-toast" role="alert">{error}</div>{/if}{#if notice}<div class="toast" role="status">{notice}</div>{/if}{#if launcherUpdateState === 'available' || launcherUpdateState === 'manual' || launcherUpdateState === 'installing' || launcherUpdateState === 'error'}<div class:error-toast={launcherUpdateState === 'error'} class="toast launcher-update-toast" role={launcherUpdateState === 'error' ? 'alert' : 'status'} aria-live={launcherUpdateState === 'error' ? 'assertive' : 'polite'}><div class="launcher-update-copy"><strong>{launcherUpdateState === 'available' ? `EternalCraft ${launcherUpdateVersion} está listo` : launcherUpdateMessage}</strong>{#if launcherUpdateState === 'installing'}{#if launcherUpdateSize && launcherUpdateSize > 0}<div class="pack-progress-track" role="progressbar" aria-label="Progreso de actualización del launcher" aria-valuemin="0" aria-valuemax={launcherUpdateSize} aria-valuenow={Math.min(launcherUpdateDownloaded, launcherUpdateSize)}><span style:width={`${Math.min(100, launcherUpdateDownloaded / launcherUpdateSize * 100)}%`}></span></div><small>{formatBytes(launcherUpdateDownloaded)} / {formatBytes(launcherUpdateSize)}</small>{:else}<small>{formatBytes(launcherUpdateDownloaded)} descargados</small>{/if}{/if}</div>{#if launcherUpdateState === 'available'}<button class="button primary" onclick={installLauncherUpdate}>Actualizar</button>{:else if launcherUpdateState === 'manual'}<button class="button primary" onclick={openLauncherDownloads}>Descargas oficiales</button>{:else if launcherUpdateState === 'error'}<button class="button secondary" onclick={checkLauncherUpdate}>Reintentar</button>{/if}</div>{/if}</div>{/if}
 
       {#if welcomeOpen}
         <div class="welcome-backdrop" role="presentation">

@@ -3025,6 +3025,14 @@ fn launcher_updater_supported() -> bool {
     )
 }
 
+const LAUNCHER_RELEASES_URL: &str = "https://github.com/Santi-PdR/EternalCraft-Launcher/releases/latest";
+
+#[tauri::command]
+fn open_launcher_releases() -> Result<(), String> {
+    open_system_browser(LAUNCHER_RELEASES_URL)
+        .map_err(|error| format!("No se pudo abrir las descargas oficiales: {error}"))
+}
+
 fn memory_bounds(total_mb: u32) -> (u32, u32) {
     let min_mb = if total_mb < 1024 {
         (total_mb / 512 * 512).max(512)
@@ -4344,6 +4352,7 @@ pub fn run() {
             developer::publish_pack_release,
             get_minecraft_status,
             launcher_updater_supported,
+            open_launcher_releases,
             set_memory_limit,
             reset_memory_limit,
             launch_minecraft

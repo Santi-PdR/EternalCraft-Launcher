@@ -1,7 +1,7 @@
 {
   "name": "eternalcraft-launcher",
   "private": true,
-  "version": "0.1.55",
+  "version": "0.1.56",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
@@ -16,6 +16,7 @@
     "test:updater-manifest": "node scripts/test-updater-manifest.mjs",
     "test:release-packs": "node scripts/check-release-packs.test.mjs",
     "test:published-pack-assets": "node scripts/check-published-pack-assets.test.mjs",
+    "test:publish-version": "node scripts/test-publish-version.mjs",
     "test:updater-signature": "node scripts/test-updater-signature.mjs",
     "tauri": "tauri",
     "test:tauri-release-config": "node scripts/test-tauri-release-config.mjs"

@@ -7,6 +7,7 @@
   import { relaunch } from '@tauri-apps/plugin-process';
   import { onMount } from 'svelte';
   import type { Bootstrap, DeveloperLoginStatus, InstallProgress, MinecraftStatus, ModInventory, PackPublishProgress, PackSourcePreview, PackSyncProgress, PackSyncResult, Series } from './lib/types';
+  import { isValidPackVersion, nextPatchVersion, parsePublishVersions } from './lib/publish-version.js';
 
   let bootstrap = $state<Bootstrap | null>(null);
   let pendingCatalogUpdate: Bootstrap | null = null;
@@ -118,14 +119,6 @@
     }
   }
 
-  function nextPatchVersion(version: string) {
-    const match = /^(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})$/.exec(version);
-    if (!match) return version;
-    const patch = Number(match[3]);
-    if (patch >= 999999) return version;
-    return `${match[1]}.${match[2]}.${patch + 1}`;
-  }
-
   onMount(() => {
     let disposed = false;
     let minecraftStatusRefreshBusy = false;
@@ -136,17 +129,7 @@
     let launcherUpdateTimer: number | undefined;
     const unlisteners: Array<() => void> = [];
     try {
-      const storedVersions: unknown = JSON.parse(localStorage.getItem(publishVersionsStorageKey) ?? '{}');
-      if (storedVersions && typeof storedVersions === 'object' && !Array.isArray(storedVersions)) {
-        const restored: Record<string, string> = {};
-        for (const [seriesId, version] of Object.entries(storedVersions)) {
-          if (
-            typeof version === 'string'
-            && /^(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})$/.test(version)
-          ) restored[seriesId] = version;
-        }
-        publishVersionsBySeries = restored;
-      }
+      publishVersionsBySeries = parsePublishVersions(localStorage.getItem(publishVersionsStorageKey));
     } catch {
       publishVersionsBySeries = {};
     }
@@ -1196,7 +1179,7 @@
               <div class="inventory-warning"><b>Revisión antes de publicar:</b> {permissionRequiredCount} JAR tienen condiciones restrictivas, {unknownLicenseCount} tienen licencia desconocida, {incompatibleMinecraftCount} declaran incompatibilidad con Minecraft {selected.minecraftVersion}, {unknownMinecraftCount} requieren revisar su metadato de Minecraft, {incompatibleForgeCount} declaran incompatibilidad con Forge {selected.loaderVersion} y {unknownForgeCount} requieren revisar su metadato de Forge. Los mods mantienen sus propias condiciones de licencia.
                 <label class="license-confirm"><input type="checkbox" checked={licenseReviewFingerprint === sourceFingerprint} onchange={(event) => (licenseReviewFingerprint = event.currentTarget.checked ? sourceFingerprint : '')} /> Confirmo que revisé las licencias y los derechos de distribución; los enlaces directos permanecen en sus plataformas y los JAR alojados por EternalCraft están autorizados.</label>
               </div>
-              <div class="publish-controls"><label>Versión de esta serie<input class="text-input" value={publishVersion} oninput={(event) => setPublishVersion(event.currentTarget.value)} placeholder="1.0.0" maxlength="20" /></label><button class="button primary" onclick={publishPack} disabled={publishingPack || packSourceBusy || incompatibleMinecraftCount > 0 || incompatibleForgeCount > 0 || licenseReviewFingerprint !== sourceFingerprint || !/^(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})$/.test(publishVersion.trim())}>{publishingPack ? 'Publicando…' : `Publicar ${selected.name}`}</button></div>
+              <div class="publish-controls"><label>Versión de esta serie<input class="text-input" value={publishVersion} oninput={(event) => setPublishVersion(event.currentTarget.value)} placeholder="1.0.0" maxlength="20" /></label><button class="button primary" onclick={publishPack} disabled={publishingPack || packSourceBusy || incompatibleMinecraftCount > 0 || incompatibleForgeCount > 0 || licenseReviewFingerprint !== sourceFingerprint || !isValidPackVersion(publishVersion.trim())}>{publishingPack ? 'Publicando…' : `Publicar ${selected.name}`}</button></div>
               {#if publishingPack}<div class="install-progress" role="status" aria-live="polite"><span class="spinner"></span><div class="pack-progress-copy"><strong>{packPublishMessage}</strong>{#if packPublishProgress?.totalBytes && packPublishProgress.totalBytes > 0}<div class="pack-progress-track" role="progressbar" aria-label="Progreso de subida del modpack" aria-valuemin="0" aria-valuemax={packPublishProgress.totalBytes} aria-valuenow={Math.min(packPublishProgress.uploadedBytes ?? 0, packPublishProgress.totalBytes)}><span style:width={`${Math.min(100, (packPublishProgress.uploadedBytes ?? 0) / packPublishProgress.totalBytes * 100)}%`}></span></div><small>{formatBytes(packPublishProgress.uploadedBytes ?? 0)} / {formatBytes(packPublishProgress.totalBytes)}</small>{/if}<p>La publicación se puede reintentar si falla; el release conserva los assets verificados.</p></div></div>{/if}
             {/if}
             <p class="privacy-note">Se suben solo los mods JAR de la carpeta revisada. Los archivos de configuración, otras carpetas y datos personales no se incluyen.</p></div>{/if}</section>

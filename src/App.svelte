@@ -988,7 +988,7 @@
       <button class:current={activePage === 'support'} onclick={openSupport}><span>?</span> Soporte</button>
     </nav>
 
-    <div class="sidebar-footer"><span class="status-light"></span> ETERNALCRAFT <small>LAUNCHER NATIVO · v{launcherVersion || '0.1.2'}</small></div>
+    <div class="sidebar-footer"><span class="status-light"></span> ETERNALCRAFT <small>{launcherVersion ? `LAUNCHER NATIVO · v${launcherVersion}` : 'LAUNCHER NATIVO'}</small></div>
   </aside>
 
   <main>

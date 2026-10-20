@@ -1564,7 +1564,8 @@ fn install_forge_profile(
             .lock()
             .map_err(|_| "El estado del instalador Forge quedó bloqueado".to_string())?;
         ensure_forge_installer_can_start(&installer_state)?;
-        let mut child = Command::new(&invocation.java_executable)
+        let mut command = Command::new(&invocation.java_executable);
+        command
             .args(installer_command_args(&invocation))
             .current_dir(&game_dir)
             .stdout(Stdio::piped())
@@ -1572,9 +1573,9 @@ fn install_forge_profile(
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
-            child.process_group(0);
+            command.process_group(0);
         }
-        let mut child = child
+        let mut child = command
             .spawn()
             .map_err(|error| format!("No se pudo iniciar el instalador Forge: {error}"))?;
         let Some(stdout) = child.stdout.take() else {

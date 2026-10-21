@@ -2487,7 +2487,8 @@ fn ensure_series_status_not_running(status: &MinecraftStatus, series_id: &str) -
 }
 
 fn add_personal_mod(source: &Path, mods_directory: &Path) -> Result<String, String> {
-    let _guard = pack::lock_pack_sync()?;
+    let lock_root = mods_directory.parent().unwrap_or(mods_directory);
+    let _guard = pack::lock_pack_sync(lock_root)?;
     add_personal_mod_inner(source, mods_directory)
 }
 
@@ -2571,7 +2572,8 @@ fn add_personal_mod_inner_with_limit(
 }
 
 fn remove_personal_mod(name: &str, mods_directory: &Path) -> Result<(), String> {
-    let _guard = pack::lock_pack_sync()?;
+    let lock_root = mods_directory.parent().unwrap_or(mods_directory);
+    let _guard = pack::lock_pack_sync(lock_root)?;
     remove_personal_mod_inner(name, mods_directory)
 }
 
@@ -2624,7 +2626,8 @@ fn remove_personal_mod_inner(name: &str, mods_directory: &Path) -> Result<(), St
 }
 
 fn activate_personal_mod(name: &str, mods_directory: &Path) -> Result<(), String> {
-    let _guard = pack::lock_pack_sync()?;
+    let lock_root = mods_directory.parent().unwrap_or(mods_directory);
+    let _guard = pack::lock_pack_sync(lock_root)?;
     activate_personal_mod_inner(name, mods_directory)
 }
 
@@ -3404,7 +3407,8 @@ async fn sync_official_pack(
     let progress_app = app.clone();
     let guard_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let _guard = pack::lock_pack_sync()?;
+        let lock_root = guard_app.path().app_data_dir().map_err(|error| error.to_string())?;
+        let _guard = pack::lock_pack_sync(&lock_root)?;
         ensure_series_not_running(&guard_app, &series_id)?;
         let game_dir = resolve_isolated_series_game_directory(&guard_app, &series_id)?
             .ok_or_else(|| "Primero instala o vincula una carpeta de juego para esta serie".to_string())?;
@@ -3940,7 +3944,8 @@ fn launch_minecraft_sync(app: AppHandle, series_id: String) -> Result<MinecraftS
     };
     // Hold the instance lock before resolving its configured directory. Folder
     // changes use the same lock, so this launch cannot keep a stale path snapshot.
-    let _pack_guard = pack::lock_pack_sync()?;
+    let lock_root = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    let _pack_guard = pack::lock_pack_sync(&lock_root)?;
     let game_dir = resolve_isolated_series_game_directory(&app, &series_id)?
         .ok_or_else(|| "Selecciona o instala la carpeta de juego de esta serie primero.".to_string())?;
     ensure_game_directory_not_running(&game_dir)?;
@@ -4067,7 +4072,8 @@ fn mod_inventory_for_path(path: Option<PathBuf>) -> Result<ModInventory, String>
 
 #[tauri::command]
 fn get_mod_inventory(app: AppHandle, series_id: String) -> Result<ModInventory, String> {
-    let _guard = pack::lock_pack_sync()?;
+    let lock_root = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    let _guard = pack::lock_pack_sync(&lock_root)?;
     let game_directory = resolve_isolated_series_game_directory(&app, &series_id)?;
     mod_inventory_for_path(game_directory)
 }
@@ -4088,7 +4094,8 @@ fn add_personal_mod_to_series(app: AppHandle, series_id: String) -> Result<ModIn
     let source = selected
         .into_path()
         .map_err(|error| format!("Ruta del mod no válida: {error}"))?;
-    let _guard = pack::lock_pack_sync()?;
+    let lock_root = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    let _guard = pack::lock_pack_sync(&lock_root)?;
     ensure_series_not_running(&app, &series_id)?;
     let game_directory = resolve_isolated_series_game_directory(&app, &series_id)?
         .ok_or_else(|| "La carpeta de juego de esta serie ya no está disponible".to_string())?;
@@ -4103,7 +4110,8 @@ fn activate_personal_mod_for_series(
     series_id: String,
     file_name: String,
 ) -> Result<ModInventory, String> {
-    let _guard = pack::lock_pack_sync()?;
+    let lock_root = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    let _guard = pack::lock_pack_sync(&lock_root)?;
     ensure_series_not_running(&app, &series_id)?;
     let game_directory = resolve_isolated_series_game_directory(&app, &series_id)?
         .ok_or_else(|| "No hay una carpeta de juego seleccionada para esta serie".to_string())?;
@@ -4118,7 +4126,8 @@ fn remove_personal_mod_from_series(
     series_id: String,
     file_name: String,
 ) -> Result<ModInventory, String> {
-    let _guard = pack::lock_pack_sync()?;
+    let lock_root = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    let _guard = pack::lock_pack_sync(&lock_root)?;
     ensure_series_not_running(&app, &series_id)?;
     let game_directory = resolve_isolated_series_game_directory(&app, &series_id)?
         .ok_or_else(|| "No hay una carpeta de juego seleccionada para esta serie".to_string())?;
@@ -4202,7 +4211,8 @@ async fn install_forge_base(app: AppHandle, series_id: String) -> Result<Bootstr
         let result: Result<(), String> = (|| -> Result<(), String> {
             // Forge comparte el directorio de la instancia con el pack y los mods.
             // El mismo bloqueo evita escrituras concurrentes y lanzar durante la instalación.
-            let _guard = pack::lock_pack_sync()?;
+            let lock_root = app_handle.path().app_data_dir().map_err(|error| error.to_string())?;
+            let _guard = pack::lock_pack_sync(&lock_root)?;
             ensure_series_not_running(&log_app, &log_series)?;
             ensure_game_directory_not_running(&game_dir)?;
             install_forge_profile(
@@ -4273,7 +4283,8 @@ async fn select_game_directory(app: AppHandle, series_id: String) -> Result<Boot
         .into_path()
         .map_err(|error| format!("Ruta de carpeta no válida: {error}"))?;
     let chosen = valid_game_dir(&chosen)?;
-    let _guard = pack::lock_pack_sync()?;
+    let lock_root = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    let _guard = pack::lock_pack_sync(&lock_root)?;
     ensure_series_not_running(&app, &series_id)?;
     ensure_game_directory_not_running(&chosen)?;
     update_settings(&app, |settings| {
@@ -4298,7 +4309,8 @@ fn link_detected_directory(app: AppHandle, series_id: String) -> Result<Bootstra
         .get(&series_id)
         .ok_or_else(|| "No se encontró una instancia compatible para esta serie".to_string())?;
     let path = valid_game_dir(Path::new(path))?;
-    let _guard = pack::lock_pack_sync()?;
+    let lock_root = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    let _guard = pack::lock_pack_sync(&lock_root)?;
     ensure_series_not_running(&app, &series_id)?;
     ensure_game_directory_not_running(&path)?;
     update_settings(&app, |settings| {

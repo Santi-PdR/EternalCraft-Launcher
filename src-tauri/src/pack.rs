@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
@@ -25,10 +25,34 @@ const PACK_DOWNLOAD_CONCURRENCY: usize = 4;
 const ROLLBACK_FAILED_MARKER: &str = "ROLLBACK_FAILED";
 static PACK_SYNC_LOCK: Mutex<()> = Mutex::new(());
 
-pub(super) fn lock_pack_sync() -> Result<MutexGuard<'static, ()>, String> {
-    PACK_SYNC_LOCK
+pub(super) struct PackSyncGuard {
+    _process_guard: MutexGuard<'static, ()>,
+    _system_lock: File,
+}
+
+pub(super) fn lock_pack_sync(lock_root: &Path) -> Result<PackSyncGuard, String> {
+    let process_guard = PACK_SYNC_LOCK
         .lock()
-        .map_err(|_| "El bloqueo de actualización del pack falló".to_string())
+        .map_err(|_| "El bloqueo de actualización del pack falló".to_string())?;
+    let system_lock = acquire_system_pack_lock(lock_root)
+        .map_err(|error| format!("No se pudo adquirir el bloqueo compartido del pack: {error}"))?;
+    Ok(PackSyncGuard {
+        _process_guard: process_guard,
+        _system_lock: system_lock,
+    })
+}
+
+fn acquire_system_pack_lock(lock_root: &Path) -> std::io::Result<File> {
+    let lock_path = lock_root.join("locks").join("pack-sync.lock");
+    fs::create_dir_all(lock_path.parent().expect("lock file has parent"))?;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    file.lock()?;
+    Ok(file)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -387,7 +411,7 @@ fn verify_installed_mod_pair(
 }
 
 pub(super) fn verify_installed_pack(game_dir: &Path, series_id: &str) -> Result<(), String> {
-    let _guard = lock_pack_sync()?;
+    let _guard = lock_pack_sync(game_dir)?;
     verify_installed_pack_locked(game_dir, series_id)
 }
 
@@ -1285,6 +1309,26 @@ mod tests {
         ));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn pack_sync_system_lock_blocks_another_file_handle_and_releases_on_drop() {
+        let root = temp_dir();
+        let first = acquire_system_pack_lock(&root).unwrap();
+        let second = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(root.join("locks/pack-sync.lock"))
+            .unwrap();
+
+        assert!(matches!(
+            second.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(first);
+        assert!(second.try_lock().is_ok());
+        drop(second);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

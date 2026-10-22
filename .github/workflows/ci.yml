@@ -31,6 +31,8 @@ jobs:
       - run: npm run check:versions
       - run: npm run check:theme-contrast
       - run: npm run check:background-csp
+      - if: runner.os == 'Linux'
+        run: npm run check:background-availability
       - run: npm run check:workflow-security
       - run: npm ci
       - run: npm run test:release-packs

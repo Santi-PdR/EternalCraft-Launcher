@@ -1,7 +1,7 @@
 {
   "name": "eternalcraft-launcher",
   "private": true,
-  "version": "0.1.61",
+  "version": "0.1.62",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
@@ -10,6 +10,7 @@
     "check:versions": "node scripts/check-versions.mjs",
     "check:theme-contrast": "node scripts/check-theme-contrast.mjs",
     "check:background-csp": "node scripts/check-background-csp.mjs",
+    "check:background-availability": "node scripts/check-background-availability.mjs",
     "check:workflow-security": "node scripts/check-workflow-security.mjs",
     "check:release-packs": "node scripts/check-release-packs.mjs",
     "check:published-pack-assets": "node scripts/check-published-pack-assets.mjs",

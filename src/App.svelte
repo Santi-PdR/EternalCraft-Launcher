@@ -70,9 +70,9 @@
   let publishVersion = $derived(publishVersionsBySeries[selected?.id ?? ''] ?? '1.0.0');
   const backgroundPresets: Record<string, { label: string; url: string; source: string }> = {
     siege: {
-      label: 'SIEGE · Referencia de asedio Minecraft',
-      url: 'https://static.planetminecraft.com/files/image/minecraft/project/2024/336/18293725_l.jpg',
-      source: 'https://www.planetminecraft.com/project/very-epic-siege-castle/'
+      label: 'SIEGE · Castle Siege PvP',
+      url: 'https://xforgeassets002.xboxlive.com/pf-namespace-b63a0803d3653643/6c6c07c6-0105-48a9-8d3b-166e3b5aa49e/CASTLE_SIEGE_PVP_panorama_0.jpg',
+      source: 'https://www.minecraft.net/en-us/marketplace/pdp/impress/castle-siege-pvp/ceb5f528-e848-4bb5-b4c4-5c51d2ccc6fb'
     },
     'ghouls-outbreak': {
       label: 'Ghouls · Apocalipsis',

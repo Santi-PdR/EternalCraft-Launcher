@@ -1853,6 +1853,7 @@ fn install_forge_profile(
             .map_err(|_| "El estado del instalador Forge quedó bloqueado".to_string())?;
         ensure_forge_installer_can_start(&installer_state)?;
         let mut command = Command::new(&invocation.java_executable);
+        hide_console_if_windows(&mut command);
         command
             .args(installer_command_args(&invocation))
             .current_dir(&game_dir)
@@ -2459,6 +2460,17 @@ fn java_process_name(name: &OsStr) -> bool {
     )
 }
 
+fn hide_console_if_windows(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = command;
+}
+
 fn game_directory_argument(args: &[OsString]) -> Option<PathBuf> {
     for (index, arg) in args.iter().enumerate() {
         if arg == OsStr::new("--gameDir") {
@@ -2915,6 +2927,7 @@ fn terminate_java_probe_group(process_id: u32) {
 
 fn java_version_output(path: &Path, timeout: Duration) -> Result<std::process::Output, String> {
     let mut command = Command::new(path);
+    hide_console_if_windows(&mut command);
     command
         .arg("-version")
         .stdout(Stdio::piped())
@@ -4146,7 +4159,9 @@ fn launch_minecraft_sync(app: AppHandle, series_id: String) -> Result<MinecraftS
         process_state.last_status = finished;
         let _ = append_install_log(&app, &previous_series, "Juego", &message);
     }
-    let child = Command::new(&command.executable)
+    let mut game_process = Command::new(&command.executable);
+    hide_console_if_windows(&mut game_process);
+    let child = game_process
         .args(&command.args)
         .current_dir(&command.working_dir)
         .spawn()
@@ -4729,6 +4744,32 @@ mod tests {
         assert!(super::java_process_name(OsStr::new("javaw.exe")));
         assert!(!super::java_process_name(OsStr::new("minecraft")));
         assert!(!super::java_process_name(OsStr::new("java-helper")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn java_child_process_has_no_console_and_keeps_captured_output() {
+        let script = concat!(
+            "Add-Type -TypeDefinition '",
+            "using System; using System.Runtime.InteropServices; ",
+            "public static class EternalCraftConsoleProbe { ",
+            "[DllImport(\"kernel32.dll\")] public static extern IntPtr GetConsoleWindow(); }'; ",
+            "if ([EternalCraftConsoleProbe]::GetConsoleWindow() -ne [IntPtr]::Zero) { exit 21 }; ",
+            "[Console]::Write('hidden')"
+        );
+        let mut command = Command::new("powershell.exe");
+        command
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        super::hide_console_if_windows(&mut command);
+        let output = command.output().expect("PowerShell probe should start");
+        assert!(
+            output.status.success(),
+            "PowerShell probe failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "hidden");
     }
 
     #[test]

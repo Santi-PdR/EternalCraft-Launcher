@@ -1050,9 +1050,22 @@ fn resolve_managed_instance_dir(
     }
 
     let legacy = legacy_roaming_app_data.join("instances").join(series_id);
-    if !legacy.is_dir() {
+    if legacy.is_dir() { Ok(legacy) } else { Ok(local) }
+}
+
+// Call only while holding the pack lock in the roaming app-data directory so
+// older launcher processes cannot write into the legacy instance mid-move.
+fn migrate_managed_instance_dir(
+    local_app_data: &Path,
+    legacy_roaming_app_data: &Path,
+    series_id: &str,
+) -> Result<PathBuf, String> {
+    let current = resolve_managed_instance_dir(local_app_data, legacy_roaming_app_data, series_id)?;
+    let local = local_app_data.join("instances").join(series_id);
+    if current == local {
         return Ok(local);
     }
+    let legacy = current;
     if find_running_minecraft_pid(&legacy).is_some() {
         return Ok(legacy);
     }
@@ -1072,6 +1085,21 @@ fn resolve_managed_instance_dir(
         Err(_) if legacy.is_dir() => Ok(legacy),
         Err(_) => Ok(local),
     }
+}
+
+fn migrate_managed_instance_for_series(
+    app: &AppHandle,
+    series_id: &str,
+) -> Result<PathBuf, String> {
+    let local_data = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| error.to_string())?;
+    let roaming_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    migrate_managed_instance_dir(&local_data, &roaming_data, series_id)
 }
 
 fn expected_profile_id(series: &Series) -> Option<String> {
@@ -3607,6 +3635,7 @@ async fn sync_official_pack(
         let lock_root = guard_app.path().app_data_dir().map_err(|error| error.to_string())?;
         let _guard = pack::lock_pack_sync(&lock_root)?;
         ensure_series_not_running(&guard_app, &series_id)?;
+        migrate_managed_instance_for_series(&guard_app, &series_id)?;
         let game_dir = resolve_isolated_series_game_directory(&guard_app, &series_id)?
             .ok_or_else(|| "Primero instala o vincula una carpeta de juego para esta serie".to_string())?;
         verify_forge_profile(&game_dir, &series)?;
@@ -4143,6 +4172,8 @@ fn launch_minecraft_sync(app: AppHandle, series_id: String) -> Result<MinecraftS
     // changes use the same lock, so this launch cannot keep a stale path snapshot.
     let lock_root = app.path().app_data_dir().map_err(|error| error.to_string())?;
     let _pack_guard = pack::lock_pack_sync(&lock_root)?;
+    ensure_series_not_running(&app, &series_id)?;
+    migrate_managed_instance_for_series(&app, &series_id)?;
     let game_dir = resolve_isolated_series_game_directory(&app, &series_id)?
         .ok_or_else(|| "Selecciona o instala la carpeta de juego de esta serie primero.".to_string())?;
     ensure_game_directory_not_running(&game_dir)?;
@@ -4289,6 +4320,7 @@ fn add_personal_mod_to_series(app: AppHandle, series_id: String) -> Result<ModIn
     let lock_root = app.path().app_data_dir().map_err(|error| error.to_string())?;
     let _guard = pack::lock_pack_sync(&lock_root)?;
     ensure_series_not_running(&app, &series_id)?;
+    migrate_managed_instance_for_series(&app, &series_id)?;
     let game_directory = resolve_isolated_series_game_directory(&app, &series_id)?
         .ok_or_else(|| "La carpeta de juego de esta serie ya no está disponible".to_string())?;
     add_personal_mod_inner(&source, &game_directory.join("mods"))?;
@@ -4305,6 +4337,7 @@ fn activate_personal_mod_for_series(
     let lock_root = app.path().app_data_dir().map_err(|error| error.to_string())?;
     let _guard = pack::lock_pack_sync(&lock_root)?;
     ensure_series_not_running(&app, &series_id)?;
+    migrate_managed_instance_for_series(&app, &series_id)?;
     let game_directory = resolve_isolated_series_game_directory(&app, &series_id)?
         .ok_or_else(|| "No hay una carpeta de juego seleccionada para esta serie".to_string())?;
     activate_personal_mod_inner(&file_name, &game_directory.join("mods"))?;
@@ -4321,6 +4354,7 @@ fn remove_personal_mod_from_series(
     let lock_root = app.path().app_data_dir().map_err(|error| error.to_string())?;
     let _guard = pack::lock_pack_sync(&lock_root)?;
     ensure_series_not_running(&app, &series_id)?;
+    migrate_managed_instance_for_series(&app, &series_id)?;
     let game_directory = resolve_isolated_series_game_directory(&app, &series_id)?
         .ok_or_else(|| "No hay una carpeta de juego seleccionada para esta serie".to_string())?;
     remove_personal_mod_inner(&file_name, &game_directory.join("mods"))?;
@@ -4381,7 +4415,6 @@ async fn install_forge_base(app: AppHandle, series_id: String) -> Result<Bootstr
     }
     let bootstrap = make_bootstrap(&app)?;
     let java = java_for_forge_install(&bootstrap.java, bootstrap.java_manually_selected)?;
-    let game_dir = managed_game_dir(&app, &series.id)?;
     let managed_series_id = series.id.clone();
     let installed_profile_id = expected_profile_id(&series)
         .ok_or_else(|| "No se pudo identificar el perfil Forge instalado".to_string())?;
@@ -4406,6 +4439,7 @@ async fn install_forge_base(app: AppHandle, series_id: String) -> Result<Bootstr
             let lock_root = app_handle.path().app_data_dir().map_err(|error| error.to_string())?;
             let _guard = pack::lock_pack_sync(&lock_root)?;
             ensure_series_not_running(&log_app, &log_series)?;
+            let game_dir = migrate_managed_instance_for_series(&log_app, &log_series)?;
             ensure_game_directory_not_running(&game_dir)?;
             install_forge_profile(
                 app_handle,
@@ -5407,7 +5441,7 @@ mod tests {
         fs::create_dir_all(legacy_instance.join("mods/personales")).unwrap();
         fs::write(legacy_instance.join("mods/personales/custom.jar"), b"user mod").unwrap();
 
-        let resolved = super::resolve_managed_instance_dir(&local, &roaming, "siege").unwrap();
+        let resolved = super::migrate_managed_instance_dir(&local, &roaming, "siege").unwrap();
 
         assert_eq!(resolved, local.join("instances/siege"));
         assert_eq!(
@@ -5435,7 +5469,7 @@ mod tests {
         fs::create_dir_all(&local_instance).unwrap();
         fs::create_dir_all(&legacy_instance).unwrap();
 
-        let resolved = super::resolve_managed_instance_dir(
+        let resolved = super::migrate_managed_instance_dir(
             &fixture.join("local"),
             &fixture.join("roaming"),
             "siege",
@@ -5464,7 +5498,7 @@ mod tests {
         fs::write(&local_root_file, b"local storage unavailable").unwrap();
         let legacy_instance = fixture.join("roaming/instances/siege");
 
-        let resolved = super::resolve_managed_instance_dir(
+        let resolved = super::migrate_managed_instance_dir(
             &local_root_file,
             &fixture.join("roaming"),
             "siege",

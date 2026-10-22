@@ -974,23 +974,22 @@ fn ensure_game_directory_isolated(
         }
     }
 
-    let app_data = app
+    let local_data = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| error.to_string())?;
+    let roaming_data = app
         .path()
         .app_data_dir()
         .map_err(|error| error.to_string())?;
-    let managed_root = app_data.join("instances");
-    let managed_root_for_comparison = managed_root
-        .canonicalize()
-        .or_else(|_| app_data.canonicalize().map(|path| path.join("instances")))
-        .unwrap_or_else(|_| managed_root.clone());
     for other in catalog.series.iter().filter(|other| other.id != series_id) {
-        let managed = managed_root.join(&other.id);
+        let managed = resolve_managed_instance_dir(&local_data, &roaming_data, &other.id)?;
         // Incluir también rutas aún no creadas: un directorio elegido como padre
         // de una futura instancia administrada podría mezclar o borrar su pack.
         let path = if managed.is_dir() {
             valid_game_dir(&managed)?
         } else {
-            managed_root_for_comparison.join(&other.id)
+            managed
         };
         other_directories.push((other.id.clone(), path));
     }
@@ -1023,11 +1022,56 @@ fn managed_game_dir(app: &AppHandle, series_id: &str) -> Result<PathBuf, String>
     if !catalog.series.iter().any(|series| series.id == series_id) {
         return Err("La serie solicitada no existe en el catálogo".into());
     }
-    let root = app
+    let local_data = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| error.to_string())?;
+    let roaming_data = app
         .path()
         .app_data_dir()
         .map_err(|error| error.to_string())?;
-    Ok(root.join("instances").join(series_id))
+    resolve_managed_instance_dir(&local_data, &roaming_data, series_id)
+}
+
+fn resolve_managed_instance_dir(
+    local_app_data: &Path,
+    legacy_roaming_app_data: &Path,
+    series_id: &str,
+) -> Result<PathBuf, String> {
+    let local = local_app_data.join("instances").join(series_id);
+    if local.is_dir() {
+        return Ok(local);
+    }
+    if local.exists() {
+        return Err(format!(
+            "La ruta administrada de {series_id} existe y no es una carpeta: {}",
+            local.display()
+        ));
+    }
+
+    let legacy = legacy_roaming_app_data.join("instances").join(series_id);
+    if !legacy.is_dir() {
+        return Ok(local);
+    }
+    if find_running_minecraft_pid(&legacy).is_some() {
+        return Ok(legacy);
+    }
+
+    let parent = local
+        .parent()
+        .ok_or_else(|| "No se pudo resolver la carpeta local de instancias".to_string())?;
+    // Roaming AppData is not suitable for large Minecraft instances on Windows.
+    // Move existing installs locally on the same volume; if Windows cannot move
+    // an open/locked instance, keep using its original directory without deleting it.
+    if fs::create_dir_all(parent).is_err() {
+        return Ok(legacy);
+    }
+    match fs::rename(&legacy, &local) {
+        Ok(()) => Ok(local),
+        Err(_) if local.is_dir() => Ok(local),
+        Err(_) if legacy.is_dir() => Ok(legacy),
+        Err(_) => Ok(local),
+    }
 }
 
 fn expected_profile_id(series: &Series) -> Option<String> {
@@ -1113,7 +1157,7 @@ fn append_install_log(
 ) -> Result<(), String> {
     let app_data = app
         .path()
-        .app_data_dir()
+        .app_local_data_dir()
         .map_err(|error| format!("No se pudo ubicar el registro local: {error}"))?;
     let path = app_data.join("logs").join("launcher.log");
     append_install_log_at(&path, series_id, stage, message)
@@ -3356,6 +3400,10 @@ fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
         .into_owned();
     let app_data_dir = app
         .path()
+        .app_local_data_dir()
+        .map_err(|error| error.to_string())?;
+    let roaming_app_data_dir = app
+        .path()
         .app_data_dir()
         .map_err(|error| error.to_string())?;
     let log_file = app_data_dir
@@ -3386,7 +3434,8 @@ fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
         if detected.compatible {
             detected
         } else {
-            let active_dir = app_data_dir.join("instances").join(&active);
+            let active_dir =
+                resolve_managed_instance_dir(&app_data_dir, &roaming_app_data_dir, &active)?;
             get_installed_jvm_runtimes(&active_dir)
                 .into_iter()
                 .filter_map(|component| get_executable_path(&component, &active_dir))
@@ -3398,7 +3447,8 @@ fn make_bootstrap(app: &AppHandle) -> Result<Bootstrap, String> {
     let mut managed_game_directories = BTreeMap::new();
     let mut installed_profiles = BTreeMap::new();
     for series in &catalog.series {
-        let game_dir = app_data_dir.join("instances").join(&series.id);
+        let game_dir =
+            resolve_managed_instance_dir(&app_data_dir, &roaming_app_data_dir, &series.id)?;
         managed_game_directories.insert(series.id.clone(), game_dir.to_string_lossy().into_owned());
         if let Some(profile_id) = expected_profile_id(series) {
             let profile_file = game_dir
@@ -3507,11 +3557,21 @@ async fn get_bootstrap(app: AppHandle) -> Result<Bootstrap, String> {
 fn get_launcher_logs(app: AppHandle, series_id: String) -> Result<String, String> {
     let path = app
         .path()
-        .app_data_dir()
+        .app_local_data_dir()
         .map_err(|error| error.to_string())?
         .join("logs")
         .join("launcher.log");
-    let launcher_log = read_install_log_at(&path)?;
+    let launcher_log = if path.exists() {
+        read_install_log_at(&path)?
+    } else {
+        let legacy_path = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| error.to_string())?
+            .join("logs")
+            .join("launcher.log");
+        read_install_log_at(&legacy_path)?
+    };
     let mut sections = vec![format!("=== EternalCraft Launcher ===\n{launcher_log}")];
     if let Some(game_directory) = resolve_series_game_directory(&app, &series_id)? {
         let game_log_path = game_directory.join("logs").join("latest.log");
@@ -4095,14 +4155,7 @@ fn launch_minecraft_sync(app: AppHandle, series_id: String) -> Result<MinecraftS
         detect_java()
     };
     if !java.compatible && settings.java_executable.is_none() {
-        let app_data = app.path().app_data_dir().map_err(|error| error.to_string())?;
-        let runtime_root = if settings.managed_installs.get(&series_id).map(String::as_str)
-            == expected_profile_id(&series).as_deref()
-        {
-            app_data.join("instances").join(&series_id)
-        } else {
-            game_dir.clone()
-        };
+        let runtime_root = game_dir.clone();
         java = get_installed_jvm_runtimes(&runtime_root)
             .into_iter()
             .filter_map(|component| get_executable_path(&component, &runtime_root))
@@ -5334,6 +5387,93 @@ mod tests {
     fn game_directory_requires_an_existing_directory() {
         assert!(valid_game_dir(Path::new("/path/that/does/not/exist/eternalcraft")).is_err());
         assert!(valid_game_dir(Path::new(env!("CARGO_MANIFEST_DIR"))).is_ok());
+    }
+
+    #[test]
+    fn managed_instance_moves_from_roaming_to_local_data_without_copying() {
+        use std::fs;
+
+        let fixture = std::env::temp_dir().join(format!(
+            "eternalcraft-instance-migration-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let local = fixture.join("local");
+        let roaming = fixture.join("roaming");
+        let legacy_instance = roaming.join("instances/siege");
+        fs::create_dir_all(legacy_instance.join("mods/personales")).unwrap();
+        fs::write(legacy_instance.join("mods/personales/custom.jar"), b"user mod").unwrap();
+
+        let resolved = super::resolve_managed_instance_dir(&local, &roaming, "siege").unwrap();
+
+        assert_eq!(resolved, local.join("instances/siege"));
+        assert_eq!(
+            fs::read(resolved.join("mods/personales/custom.jar")).unwrap(),
+            b"user mod"
+        );
+        assert!(!legacy_instance.exists());
+        fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
+    fn managed_instance_prefers_existing_local_data_and_preserves_legacy_directory() {
+        use std::fs;
+
+        let fixture = std::env::temp_dir().join(format!(
+            "eternalcraft-instance-preference-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let local_instance = fixture.join("local/instances/siege");
+        let legacy_instance = fixture.join("roaming/instances/siege");
+        fs::create_dir_all(&local_instance).unwrap();
+        fs::create_dir_all(&legacy_instance).unwrap();
+
+        let resolved = super::resolve_managed_instance_dir(
+            &fixture.join("local"),
+            &fixture.join("roaming"),
+            "siege",
+        )
+        .unwrap();
+
+        assert_eq!(resolved, local_instance);
+        assert!(legacy_instance.is_dir());
+        fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
+    fn managed_instance_keeps_legacy_path_when_local_storage_is_unavailable() {
+        use std::fs;
+
+        let fixture = std::env::temp_dir().join(format!(
+            "eternalcraft-instance-fallback-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let local_root_file = fixture.join("local");
+        fs::create_dir_all(fixture.join("roaming/instances/siege")).unwrap();
+        fs::write(&local_root_file, b"local storage unavailable").unwrap();
+        let legacy_instance = fixture.join("roaming/instances/siege");
+
+        let resolved = super::resolve_managed_instance_dir(
+            &local_root_file,
+            &fixture.join("roaming"),
+            "siege",
+        )
+        .unwrap();
+
+        assert_eq!(resolved, legacy_instance);
+        assert!(legacy_instance.is_dir());
+        fs::remove_dir_all(fixture).unwrap();
     }
 
     #[test]

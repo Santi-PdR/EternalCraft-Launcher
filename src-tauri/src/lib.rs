@@ -51,6 +51,8 @@ const MAX_FORGE_MOD_METADATA_BYTES: u64 = 256 * 1024;
 const MAX_FORGE_MOD_ARCHIVE_ENTRIES: u16 = 50_000;
 const MAX_FORGE_MOD_CENTRAL_DIRECTORY_BYTES: u32 = 32 * 1024 * 1024;
 const FORGE_INSTALL_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+const FORGE_METADATA_ATTEMPTS: usize = 3;
+const FORGE_METADATA_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1122,6 +1124,41 @@ fn parse_sha1_sidecar(content: &str) -> Result<String, String> {
     Ok(value.to_ascii_lowercase())
 }
 
+fn retry_request<T, E>(
+    attempts: usize,
+    delay: Duration,
+    mut request: impl FnMut() -> Result<T, E>,
+) -> Result<T, E> {
+    let attempts = attempts.max(1);
+    let mut last_error = None;
+    for attempt in 0..attempts {
+        match request() {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt + 1 < attempts && !delay.is_zero() {
+                    thread::sleep(delay);
+                }
+            }
+        }
+    }
+    Err(last_error.expect("at least one request attempt is made"))
+}
+
+fn fetch_forge_checksum_sidecar(installer_url: &str) -> Result<String, String> {
+    let sidecar_url = format!("{installer_url}.sha1");
+    retry_request(
+        FORGE_METADATA_ATTEMPTS,
+        FORGE_METADATA_RETRY_DELAY,
+        || http::get_text(&sidecar_url).map_err(|error| error.to_string()),
+    )
+    .map_err(|error| {
+        format!(
+            "No se pudo descargar el checksum de Forge tras {FORGE_METADATA_ATTEMPTS} intentos: {error}"
+        )
+    })
+}
+
 struct AppInstallProgress {
     app: AppHandle,
     series_id: String,
@@ -1889,8 +1926,7 @@ fn install_forge_profile(
             &format!("Descargando el instalador Forge {forge_version}"),
         );
         let installer_url = installer_url(&full_forge_version);
-        let checksum =
-            http::get_text(&format!("{installer_url}.sha1")).map_err(|error| error.to_string())?;
+        let checksum = fetch_forge_checksum_sidecar(&installer_url)?;
         let checksum = parse_sha1_sidecar(&checksum)?;
         let installer_path = game_dir
             .join("versions")
@@ -5317,6 +5353,34 @@ mod tests {
     }
 
     #[test]
+    fn forge_metadata_retries_transient_failures_and_stops_after_success() {
+        let mut attempts = 0;
+        let result = super::retry_request(3, std::time::Duration::ZERO, || {
+            attempts += 1;
+            if attempts < 3 {
+                Err("temporary network failure")
+            } else {
+                Ok("valid checksum")
+            }
+        });
+
+        assert_eq!(result.unwrap(), "valid checksum");
+        assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn forge_metadata_retry_returns_the_last_error_after_attempt_limit() {
+        let mut attempts = 0;
+        let result = super::retry_request(2, std::time::Duration::ZERO, || {
+            attempts += 1;
+            Err::<(), _>(format!("network failure {attempts}"))
+        });
+
+        assert_eq!(result.unwrap_err(), "network failure 2");
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
     #[ignore = "descarga Minecraft/Forge/Java oficiales en un directorio temporal; nunca inicia Minecraft"]
     fn official_forge_install_smoke_test_without_launching_game() {
         struct QuietProgress;
@@ -5345,8 +5409,8 @@ mod tests {
 
         let forge_version = "1.20.1-47.4.10";
         let installer_url = installer_url(forge_version);
-        let checksum =
-            parse_sha1_sidecar(&http::get_text(&format!("{installer_url}.sha1")).unwrap()).unwrap();
+        let checksum = parse_sha1_sidecar(&fetch_forge_checksum_sidecar(&installer_url).unwrap())
+            .unwrap();
         let installer = game_dir.join("forge-installer.jar");
         execute_plan(
             &DownloadPlan {

@@ -506,6 +506,41 @@ const INSTALL_LOG_MAX_MESSAGE_BYTES: usize = 16 * 1024;
 static INSTALL_LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static SETTINGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+struct SettingsFileGuard {
+    _process_guard: std::sync::MutexGuard<'static, ()>,
+    _system_lock: fs::File,
+}
+
+fn settings_lock_path(settings_path: &Path) -> PathBuf {
+    settings_path.with_file_name("settings.lock")
+}
+
+fn lock_settings_file(settings_path: &Path) -> Result<SettingsFileGuard, String> {
+    let process_guard = SETTINGS_LOCK
+        .lock()
+        .map_err(|_| "El bloqueo de configuración local dejó de estar disponible".to_string())?;
+    let lock_path = settings_lock_path(settings_path);
+    let lock_parent = lock_path
+        .parent()
+        .ok_or_else(|| "No se pudo determinar la carpeta de configuración".to_string())?;
+    fs::create_dir_all(lock_parent)
+        .map_err(|error| format!("No se pudo preparar el bloqueo de configuración: {error}"))?;
+    let system_lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)
+        .map_err(|error| format!("No se pudo abrir el bloqueo de configuración: {error}"))?;
+    system_lock
+        .lock()
+        .map_err(|error| format!("No se pudo adquirir el bloqueo de configuración: {error}"))?;
+    Ok(SettingsFileGuard {
+        _process_guard: process_guard,
+        _system_lock: system_lock,
+    })
+}
+
 fn is_valid_theme(theme_id: &str) -> bool {
     matches!(
         theme_id,
@@ -800,11 +835,10 @@ fn read_settings_file(path: &Path) -> Result<(Settings, Option<PathBuf>), String
 }
 
 fn read_settings(app: &AppHandle) -> Result<Settings, String> {
-    let _guard = SETTINGS_LOCK
-        .lock()
-        .map_err(|_| "El bloqueo de configuración local dejó de estar disponible".to_string())?;
     let path = settings_path(app)?;
+    let _guard = lock_settings_file(&path)?;
     let (settings, backup) = read_settings_file(&path)?;
+    drop(_guard);
     if let Some(backup) = backup {
         let _ = append_install_log(
             app,
@@ -834,9 +868,7 @@ fn update_settings_file(
     path: &Path,
     update: impl FnOnce(&mut Settings) -> Result<bool, String>,
 ) -> Result<(Settings, Option<PathBuf>), String> {
-    let _guard = SETTINGS_LOCK
-        .lock()
-        .map_err(|_| "El bloqueo de configuración local dejó de estar disponible".to_string())?;
+    let _guard = lock_settings_file(path)?;
     let (mut settings, backup) = read_settings_file(path)?;
     if update(&mut settings)? {
         write_settings_file(path, &settings)?;
@@ -1245,6 +1277,35 @@ fn read_latest_jvm_fatal_log(game_directory: &Path) -> Result<Option<(String, St
 #[cfg(test)]
 mod settings_recovery_tests {
     use super::*;
+
+    #[test]
+    fn settings_file_lock_blocks_another_handle_and_releases_on_drop() {
+        let fixture = std::env::temp_dir().join(format!(
+            "eternalcraft-settings-lock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&fixture).unwrap();
+        let path = fixture.join("settings.json");
+        let first = lock_settings_file(&path).unwrap();
+        let second = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(settings_lock_path(&path))
+            .unwrap();
+
+        assert!(matches!(
+            second.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(first);
+        assert!(second.try_lock().is_ok());
+        drop(second);
+        fs::remove_dir_all(fixture).unwrap();
+    }
 
     #[test]
     fn concurrent_settings_updates_do_not_overwrite_each_other() {

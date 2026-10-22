@@ -506,6 +506,41 @@ const INSTALL_LOG_MAX_MESSAGE_BYTES: usize = 16 * 1024;
 static INSTALL_LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static SETTINGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+struct InstallLogGuard {
+    _process_guard: std::sync::MutexGuard<'static, ()>,
+    _system_lock: fs::File,
+}
+
+fn install_log_lock_path(path: &Path) -> PathBuf {
+    path.with_file_name("launcher.log.lock")
+}
+
+fn lock_install_log(path: &Path) -> Result<InstallLogGuard, String> {
+    let process_guard = INSTALL_LOG_LOCK
+        .lock()
+        .map_err(|_| "El bloqueo del registro local dejó de estar disponible".to_string())?;
+    let lock_path = install_log_lock_path(path);
+    let lock_parent = lock_path
+        .parent()
+        .ok_or_else(|| "La ruta del registro no contiene una carpeta".to_string())?;
+    fs::create_dir_all(lock_parent)
+        .map_err(|error| format!("No se pudo crear la carpeta del registro: {error}"))?;
+    let system_lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)
+        .map_err(|error| format!("No se pudo abrir el bloqueo del registro: {error}"))?;
+    system_lock
+        .lock()
+        .map_err(|error| format!("No se pudo adquirir el bloqueo del registro: {error}"))?;
+    Ok(InstallLogGuard {
+        _process_guard: process_guard,
+        _system_lock: system_lock,
+    })
+}
+
 struct SettingsFileGuard {
     _process_guard: std::sync::MutexGuard<'static, ()>,
     _system_lock: fs::File,
@@ -1116,14 +1151,12 @@ fn append_install_log_at(
     stage: &str,
     message: &str,
 ) -> Result<(), String> {
-    let _guard = INSTALL_LOG_LOCK
-        .lock()
-        .map_err(|_| "El bloqueo del registro local dejó de estar disponible".to_string())?;
     let parent = path
         .parent()
         .ok_or_else(|| "La ruta del registro no contiene una carpeta".to_string())?;
     fs::create_dir_all(parent)
         .map_err(|error| format!("No se pudo crear la carpeta del registro: {error}"))?;
+    let _guard = lock_install_log(path)?;
 
     let seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1155,6 +1188,7 @@ fn append_install_log_at(
 
 fn read_install_log_at(path: &Path) -> Result<String, String> {
     const DISPLAY_LIMIT: u64 = 256 * 1024;
+    let _guard = lock_install_log(path)?;
     read_log_tail(path, DISPLAY_LIMIT)
         .map(|content| content.unwrap_or_else(|| "Todavía no hay registros de instalación.".into()))
 }
@@ -1422,6 +1456,35 @@ mod settings_recovery_tests {
 #[cfg(test)]
 mod log_tests {
     use super::*;
+
+    #[test]
+    fn install_log_lock_blocks_another_handle_and_releases_on_drop() {
+        let fixture = std::env::temp_dir().join(format!(
+            "eternalcraft-log-lock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&fixture).unwrap();
+        let log = fixture.join("launcher.log");
+        let first = lock_install_log(&log).unwrap();
+        let second = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(install_log_lock_path(&log))
+            .unwrap();
+
+        assert!(matches!(
+            second.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(first);
+        assert!(second.try_lock().is_ok());
+        drop(second);
+        fs::remove_dir_all(fixture).unwrap();
+    }
 
     #[test]
     fn oversized_log_messages_are_truncated_before_writing() {

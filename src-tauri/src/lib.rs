@@ -2669,13 +2669,20 @@ fn running_minecraft_directories() -> Vec<(u32, PathBuf)> {
 }
 
 fn find_running_minecraft_pid(game_directory: &Path) -> Option<u32> {
+    find_running_minecraft_pid_in(game_directory, &running_minecraft_directories())
+}
+
+fn find_running_minecraft_pid_in(
+    game_directory: &Path,
+    running_directories: &[(u32, PathBuf)],
+) -> Option<u32> {
     let expected_directory = game_directory
         .canonicalize()
         .unwrap_or_else(|_| game_directory.to_path_buf());
-    running_minecraft_directories()
+    running_directories
         .into_iter()
         .find(|(_, directory)| paths_equal_for_process_check(directory, &expected_directory))
-        .map(|(pid, _)| pid)
+        .map(|(pid, _)| *pid)
 }
 
 fn detect_external_minecraft(app: &AppHandle) -> Result<Option<MinecraftStatus>, String> {
@@ -4424,6 +4431,10 @@ fn launch_minecraft_sync(app: AppHandle, series_id: String) -> Result<MinecraftS
         process_state.last_status = finished;
         let _ = append_install_log(&app, &previous_series, "Juego", &message);
     }
+    // Folder resolution, pack verification and Java probing can take time. Check
+    // external launchers again immediately before spawning to avoid racing a
+    // Minecraft process that started after the initial preflight check.
+    ensure_game_directory_not_running(&game_dir)?;
     let mut game_process = Command::new(&command.executable);
     hide_console_if_windows(&mut game_process);
     let child = game_process
@@ -4789,6 +4800,36 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn process_check_matches_only_the_same_game_directory() {
+        use std::path::PathBuf;
+
+        let game_dir = PathBuf::from("/games/eternalcraft/siege");
+        let running = vec![
+            (123, PathBuf::from("/games/other/modpack")),
+            (456, PathBuf::from("/games/eternalcraft/siege")),
+        ];
+
+        assert_eq!(super::find_running_minecraft_pid_in(&game_dir, &running), Some(456));
+        assert_eq!(
+            super::find_running_minecraft_pid_in(
+                &PathBuf::from("/games/eternalcraft/ghouls"),
+                &running
+            ),
+            None
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn process_check_normalizes_windows_separators_and_case() {
+        use std::path::PathBuf;
+
+        let game_dir = PathBuf::from(r"C:\Games\EternalCraft\SIEGE");
+        let running = vec![(789, PathBuf::from(r"c:/games/eternALcraft/siege"))];
+        assert_eq!(super::find_running_minecraft_pid_in(&game_dir, &running), Some(789));
+    }
+
     #[test]
     fn catalog_refresh_uses_a_short_retry_without_cache_and_a_five_minute_cache_ttl() {
         use std::time::{Duration, Instant};

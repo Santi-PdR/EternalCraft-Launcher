@@ -3296,38 +3296,65 @@ fn detect_java() -> JavaStatus {
         detail: "No se encontró una instalación de Java ejecutable. Se necesita Java 17 para Forge 1.20.1.".into() })
 }
 
+fn java_status_from_probe(
+    executable: String,
+    status_success: bool,
+    exit_code: Option<i32>,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> JavaStatus {
+    if !status_success {
+        return JavaStatus {
+            executable: Some(executable),
+            version: None,
+            major: None,
+            compatible: false,
+            detail: match exit_code {
+                Some(code) => format!("Java terminó con el código {code} al comprobar su versión"),
+                None => "Java terminó sin un código válido al comprobar su versión".into(),
+            },
+        };
+    }
+
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(stdout),
+        String::from_utf8_lossy(stderr)
+    );
+    if let Some((version, major)) = parse_java_major(&text) {
+        let compatible = java_is_compatible(major, &text);
+        JavaStatus {
+            executable: Some(executable),
+            version: Some(version),
+            major: Some(major),
+            compatible,
+            detail: if compatible {
+                "Java 17 de 64 bits seleccionado y compatible con Minecraft 1.20.1 / Forge".into()
+            } else {
+                java_incompatible_detail(major, &text)
+            },
+        }
+    } else {
+        JavaStatus {
+            executable: Some(executable),
+            version: None,
+            major: None,
+            compatible: false,
+            detail: "El archivo seleccionado no devolvió una versión Java válida".into(),
+        }
+    }
+}
+
 fn inspect_java(path: &Path) -> JavaStatus {
     let executable = path.to_string_lossy().into_owned();
     match java_version_output(path, JAVA_VERSION_PROBE_TIMEOUT) {
-        Ok(output) => {
-            let text = format!(
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            if let Some((version, major)) = parse_java_major(&text) {
-                let compatible = java_is_compatible(major, &text);
-                JavaStatus {
-                    executable: Some(executable),
-                    version: Some(version),
-                    major: Some(major),
-                    compatible,
-                    detail: if compatible {
-                        "Java 17 de 64 bits seleccionado y compatible con Minecraft 1.20.1 / Forge".into()
-                    } else {
-                        java_incompatible_detail(major, &text)
-                    },
-                }
-            } else {
-                JavaStatus {
-                    executable: Some(executable),
-                    version: None,
-                    major: None,
-                    compatible: false,
-                    detail: "El archivo seleccionado no devolvió una versión Java válida".into(),
-                }
-            }
-        }
+        Ok(output) => java_status_from_probe(
+            executable,
+            output.status.success(),
+            output.status.code(),
+            &output.stdout,
+            &output.stderr,
+        ),
         Err(error) => JavaStatus {
             executable: Some(executable),
             version: None,
@@ -5839,6 +5866,32 @@ mod tests {
         assert!(java_is_compatible(17, java_64_bit));
         assert!(!java_is_compatible(21, java_64_bit));
         assert!(java_incompatible_detail(17, java_32_bit).contains("32 bits"));
+    }
+
+    #[test]
+    fn selected_java_probe_must_exit_successfully_even_if_it_prints_a_valid_version() {
+        let valid_java_output = b"openjdk version \"17.0.15\"\nsun.arch.data.model = 64\nos.arch = amd64";
+        let failed = super::java_status_from_probe(
+            "java.exe".into(),
+            false,
+            Some(2),
+            valid_java_output,
+            b"",
+        );
+
+        assert!(!failed.compatible);
+        assert_eq!(failed.version, None);
+        assert!(failed.detail.contains("código 2"));
+
+        let successful = super::java_status_from_probe(
+            "java.exe".into(),
+            true,
+            Some(0),
+            valid_java_output,
+            b"",
+        );
+        assert!(successful.compatible);
+        assert_eq!(successful.major, Some(17));
     }
 
     #[cfg(windows)]

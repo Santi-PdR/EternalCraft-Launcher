@@ -2977,6 +2977,43 @@ fn parse_java_major(output: &str) -> Option<(String, u32)> {
     (!value.is_empty()).then(|| (value.to_string(), major))
 }
 
+fn parse_java_is_64_bit(output: &str) -> Option<bool> {
+    let mut architecture = None;
+    for line in output.lines() {
+        let Some((key, value)) = line.trim().split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim().to_ascii_lowercase();
+        if key == "sun.arch.data.model" {
+            if let Ok(bits) = value.parse::<u32>() {
+                return Some(bits >= 64);
+            }
+        }
+        if key == "os.arch" {
+            architecture = match value.as_str() {
+                "amd64" | "x86_64" | "x64" | "aarch64" | "arm64" | "ppc64" | "ppc64le"
+                | "s390x" => Some(true),
+                "x86" | "i386" | "i486" | "i586" | "i686" => Some(false),
+                _ => architecture,
+            };
+        }
+    }
+    architecture
+}
+
+fn java_is_compatible(major: u32, output: &str) -> bool {
+    major == 17 && parse_java_is_64_bit(output) != Some(false)
+}
+
+fn java_incompatible_detail(major: u32, output: &str) -> String {
+    if major == 17 && parse_java_is_64_bit(output) == Some(false) {
+        "Java 17 de 32 bits detectado; Minecraft requiere una JVM de 64 bits".into()
+    } else {
+        format!("Java {major} detectado; Forge 1.20.1 requiere Java 17 de 64 bits")
+    }
+}
+
 const JAVA_VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_JAVA_VERSION_OUTPUT_BYTES: usize = 16 * 1024;
 
@@ -3037,6 +3074,7 @@ fn java_version_output(path: &Path, timeout: Duration) -> Result<std::process::O
     let mut command = Command::new(path);
     hide_console_if_windows(&mut command);
     command
+        .arg("-XshowSettings:properties")
         .arg("-version")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -3233,16 +3271,16 @@ fn detect_java() -> JavaStatus {
                     String::from_utf8_lossy(&output.stderr)
                 );
                 if let Some((version, major)) = parse_java_major(&text) {
-                    let compatible = major == 17;
+                    let compatible = java_is_compatible(major, &text);
                     let status = JavaStatus {
                         executable: Some(normalized),
                         version: Some(version),
                         major: Some(major),
                         compatible,
                         detail: if compatible {
-                            "Java 17 detectado y compatible con Minecraft 1.20.1 / Forge".into()
+                            "Java 17 de 64 bits detectado y compatible con Minecraft 1.20.1 / Forge".into()
                         } else {
-                            format!("Java {major} detectado; Forge 1.20.1 requiere Java 17")
+                            java_incompatible_detail(major, &text)
                         },
                     };
                     if compatible {
@@ -3268,16 +3306,16 @@ fn inspect_java(path: &Path) -> JavaStatus {
                 String::from_utf8_lossy(&output.stderr)
             );
             if let Some((version, major)) = parse_java_major(&text) {
-                let compatible = major == 17;
+                let compatible = java_is_compatible(major, &text);
                 JavaStatus {
                     executable: Some(executable),
                     version: Some(version),
                     major: Some(major),
                     compatible,
                     detail: if compatible {
-                        "Java 17 seleccionado y compatible con Minecraft 1.20.1 / Forge".into()
+                        "Java 17 de 64 bits seleccionado y compatible con Minecraft 1.20.1 / Forge".into()
                     } else {
-                        format!("Java {major} seleccionado; Forge 1.20.1 requiere Java 17")
+                        java_incompatible_detail(major, &text)
                     },
                 }
             } else {
@@ -5786,6 +5824,21 @@ mod tests {
             ("21.0.3".into(), 21)
         );
         assert!(parse_java_major("not a java version").is_none());
+    }
+
+    #[test]
+    fn rejects_32_bit_java_17_and_accepts_64_bit_architectures() {
+        let java_32_bit = "openjdk version \"17.0.15\"\nsun.arch.data.model = 32\nos.arch = x86";
+        let java_64_bit = "openjdk version \"17.0.15\"\nsun.arch.data.model = 64\nos.arch = amd64";
+        let arm_64_bit = "openjdk version \"17.0.15\"\nos.arch = aarch64";
+
+        assert_eq!(parse_java_is_64_bit(java_32_bit), Some(false));
+        assert_eq!(parse_java_is_64_bit(java_64_bit), Some(true));
+        assert_eq!(parse_java_is_64_bit(arm_64_bit), Some(true));
+        assert!(!java_is_compatible(17, java_32_bit));
+        assert!(java_is_compatible(17, java_64_bit));
+        assert!(!java_is_compatible(21, java_64_bit));
+        assert!(java_incompatible_detail(17, java_32_bit).contains("32 bits"));
     }
 
     #[cfg(windows)]

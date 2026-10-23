@@ -3003,12 +3003,23 @@ fn parse_java_is_64_bit(output: &str) -> Option<bool> {
 }
 
 fn java_is_compatible(major: u32, output: &str) -> bool {
-    major == 17 && parse_java_is_64_bit(output) != Some(false)
+    major == 17 && parse_java_is_64_bit(output) == Some(true)
 }
 
 fn java_incompatible_detail(major: u32, output: &str) -> String {
-    if major == 17 && parse_java_is_64_bit(output) == Some(false) {
-        "Java 17 de 32 bits detectado; Minecraft requiere una JVM de 64 bits".into()
+    if major == 17 {
+        match parse_java_is_64_bit(output) {
+            Some(false) => {
+                "Java 17 de 32 bits detectado; Minecraft requiere una JVM de 64 bits".into()
+            }
+            None => {
+                "No se pudo verificar que Java 17 sea de 64 bits; selecciona una JVM compatible"
+                    .into()
+            }
+            Some(true) => {
+                format!("Java {major} detectado; Forge 1.20.1 requiere Java 17 de 64 bits")
+            }
+        }
     } else {
         format!("Java {major} detectado; Forge 1.20.1 requiere Java 17 de 64 bits")
     }
@@ -5858,14 +5869,19 @@ mod tests {
         let java_32_bit = "openjdk version \"17.0.15\"\nsun.arch.data.model = 32\nos.arch = x86";
         let java_64_bit = "openjdk version \"17.0.15\"\nsun.arch.data.model = 64\nos.arch = amd64";
         let arm_64_bit = "openjdk version \"17.0.15\"\nos.arch = aarch64";
+        let unknown_architecture = "openjdk version \"17.0.15\"";
 
         assert_eq!(parse_java_is_64_bit(java_32_bit), Some(false));
         assert_eq!(parse_java_is_64_bit(java_64_bit), Some(true));
         assert_eq!(parse_java_is_64_bit(arm_64_bit), Some(true));
         assert!(!java_is_compatible(17, java_32_bit));
         assert!(java_is_compatible(17, java_64_bit));
+        assert!(!java_is_compatible(17, unknown_architecture));
         assert!(!java_is_compatible(21, java_64_bit));
         assert!(java_incompatible_detail(17, java_32_bit).contains("32 bits"));
+        assert!(
+            java_incompatible_detail(17, unknown_architecture).contains("No se pudo verificar")
+        );
     }
 
     #[test]

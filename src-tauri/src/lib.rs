@@ -3150,7 +3150,7 @@ fn java_candidates() -> Vec<PathBuf> {
     candidates
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn append_java_candidates_under_install_root(root: &Path, candidates: &mut Vec<PathBuf>) {
     candidates.push(root.join("java.exe"));
     candidates.push(root.join("bin").join("java.exe"));

@@ -6,6 +6,8 @@ Native Minecraft launcher for EternalCraft, built with Tauri 2, Rust, Svelte and
 
 Requirements: Node.js 22.12+, Rust stable, and the Tauri system libraries for your operating system. On Fedora, install the Tauri Linux prerequisites (`webkit2gtk4.1-devel`, `openssl-devel`, `curl`, `wget`, `file`, `libappindicator-gtk3-devel`, `librsvg2-devel`, `libxdo-devel`, `patchelf`).
 
+See [the development workflow](docs/development-workflow.md) for Windows-first verification and the launcher-specific engineering checks.
+
 ```sh
 npm ci
 npm run tauri dev

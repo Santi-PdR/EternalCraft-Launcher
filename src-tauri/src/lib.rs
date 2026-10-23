@@ -3181,6 +3181,11 @@ fn windows_java_candidates() -> Vec<PathBuf> {
                 "Microsoft JDK",
                 "Amazon Corretto",
                 "Azul Systems",
+                "Azul Systems/Zulu",
+                "Zulu",
+                "GraalVM",
+                "IBM/Semeru",
+                "Semeru",
                 "BellSoft",
             ] {
                 installation_roots.push(program_files.join(vendor));
@@ -5783,17 +5788,22 @@ mod tests {
                 .as_nanos()
         ));
         let vendor_root = root.join("Eclipse Adoptium");
+        let zulu_root = root.join("Azul Systems/Zulu");
         let oracle_root = root.join("Oracle/Java/javapath");
         std::fs::create_dir_all(vendor_root.join("jdk-17/bin")).unwrap();
+        std::fs::create_dir_all(zulu_root.join("zulu-17/bin")).unwrap();
         std::fs::create_dir_all(&oracle_root).unwrap();
         std::fs::write(vendor_root.join("jdk-17/bin/java.exe"), b"fixture").unwrap();
+        std::fs::write(zulu_root.join("zulu-17/bin/java.exe"), b"fixture").unwrap();
         std::fs::write(oracle_root.join("java.exe"), b"fixture").unwrap();
 
         let mut candidates = Vec::new();
         super::append_java_candidates_under_install_root(&vendor_root, &mut candidates);
+        super::append_java_candidates_under_install_root(&zulu_root, &mut candidates);
         super::append_java_candidates_under_install_root(&oracle_root, &mut candidates);
 
         assert!(candidates.contains(&vendor_root.join("jdk-17/bin/java.exe")));
+        assert!(candidates.contains(&zulu_root.join("zulu-17/bin/java.exe")));
         assert!(candidates.contains(&oracle_root.join("java.exe")));
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -1,5 +1,3 @@
-/home/Santipdr/.bashrc: line 47: /tmp/eternalcraft-cargo/env: No such file or directory
-/home/Santipdr/.bash_profile: line 18: /tmp/eternalcraft-cargo/env: No such file or directory
 # Development workflow
 
 This launcher is a native Tauri 2 application. Keep changes grounded in the current Rust, Svelte and TypeScript implementation; tools used during development are not runtime dependencies.

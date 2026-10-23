@@ -3169,36 +3169,48 @@ fn append_java_candidates_under_install_root(root: &Path, candidates: &mut Vec<P
 
 #[cfg(windows)]
 fn windows_java_candidates() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
+    let program_files_roots = ["ProgramFiles", "ProgramFiles(x86)"]
+        .into_iter()
+        .filter_map(env::var_os)
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    let local_app_data = env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    windows_java_candidates_from_roots(&program_files_roots, local_app_data.as_deref())
+}
+
+#[cfg(any(windows, test))]
+fn windows_java_candidates_from_roots(
+    program_files_roots: &[PathBuf],
+    local_app_data: Option<&Path>,
+) -> Vec<PathBuf> {
     let mut installation_roots = Vec::new();
-    for variable in ["ProgramFiles", "ProgramFiles(x86)"] {
-        if let Some(program_files) = env::var_os(variable).map(PathBuf::from) {
-            installation_roots.push(program_files.join("Common Files/Oracle/Java/javapath"));
-            for vendor in [
-                "Java",
-                "Eclipse Adoptium",
-                "Microsoft",
-                "Microsoft JDK",
-                "Amazon Corretto",
-                "Azul Systems",
-                "Azul Systems/Zulu",
-                "Zulu",
-                "GraalVM",
-                "IBM/Semeru",
-                "Semeru",
-                "BellSoft",
-            ] {
-                installation_roots.push(program_files.join(vendor));
-            }
+    for program_files in program_files_roots {
+        installation_roots.push(program_files.join("Common Files/Oracle/Java/javapath"));
+        for vendor in [
+            "Java",
+            "Eclipse Adoptium",
+            "Microsoft",
+            "Microsoft JDK",
+            "Amazon Corretto",
+            "Azul Systems",
+            "Azul Systems/Zulu",
+            "Zulu",
+            "GraalVM",
+            "IBM/Semeru",
+            "Semeru",
+            "BellSoft",
+        ] {
+            installation_roots.push(program_files.join(vendor));
         }
     }
-    if let Some(local_app_data) = env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+    if let Some(local_app_data) = local_app_data {
         installation_roots.push(local_app_data.join("Programs/Java"));
         installation_roots.push(local_app_data.join("Programs/Eclipse Adoptium"));
         installation_roots.push(local_app_data.join("Programs/Microsoft"));
         installation_roots.push(local_app_data.join("Microsoft/WinGet/Links"));
     }
 
+    let mut candidates = Vec::new();
     for root in installation_roots {
         append_java_candidates_under_install_root(&root, &mut candidates);
     }
@@ -5787,24 +5799,29 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let vendor_root = root.join("Eclipse Adoptium");
-        let zulu_root = root.join("Azul Systems/Zulu");
-        let oracle_root = root.join("Oracle/Java/javapath");
+        let local_app_data = root.join("LocalAppData");
+        let vendor_root = root.join("Program Files/Eclipse Adoptium");
+        let zulu_root = root.join("Program Files/Azul Systems/Zulu");
+        let oracle_root = root.join("Program Files/Common Files/Oracle/Java/javapath");
+        let winget_root = local_app_data.join("Microsoft/WinGet/Links");
         std::fs::create_dir_all(vendor_root.join("jdk-17/bin")).unwrap();
         std::fs::create_dir_all(zulu_root.join("zulu-17/bin")).unwrap();
         std::fs::create_dir_all(&oracle_root).unwrap();
+        std::fs::create_dir_all(&winget_root).unwrap();
         std::fs::write(vendor_root.join("jdk-17/bin/java.exe"), b"fixture").unwrap();
         std::fs::write(zulu_root.join("zulu-17/bin/java.exe"), b"fixture").unwrap();
         std::fs::write(oracle_root.join("java.exe"), b"fixture").unwrap();
+        std::fs::write(winget_root.join("java.exe"), b"fixture").unwrap();
 
-        let mut candidates = Vec::new();
-        super::append_java_candidates_under_install_root(&vendor_root, &mut candidates);
-        super::append_java_candidates_under_install_root(&zulu_root, &mut candidates);
-        super::append_java_candidates_under_install_root(&oracle_root, &mut candidates);
+        let candidates = super::windows_java_candidates_from_roots(
+            &[root.join("Program Files")],
+            Some(&local_app_data),
+        );
 
         assert!(candidates.contains(&vendor_root.join("jdk-17/bin/java.exe")));
         assert!(candidates.contains(&zulu_root.join("zulu-17/bin/java.exe")));
         assert!(candidates.contains(&oracle_root.join("java.exe")));
+        assert!(candidates.contains(&winget_root.join("java.exe")));
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -1,0 +1,74 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "EternalCraft Launcher",
+  "version": "0.1.75",
+  "identifier": "com.eternalcraft.launcher",
+  "mainBinaryName": "eternalcraft-launcher",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "EternalCraft Launcher",
+        "width": 1360,
+        "height": 900,
+        "minWidth": 560,
+        "minHeight": 680,
+        "center": true,
+        "decorations": true,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$APPCONFIG/appearance/**"
+        ]
+      },
+      "csp": "default-src 'self'; img-src 'self' asset: data: https://xforgeassets002.xboxlive.com https://images.steamusercontent.com https://www.l4d.com https://shared.fastly.steamstatic.com; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "category": "Game",
+    "shortDescription": "Launcher oficial de EternalCraft",
+    "linux": {
+      "deb": {
+        "desktopTemplate": "linux/eternalcraft.desktop.hbs",
+        "depends": [
+          "libdbus-1-3"
+        ]
+      },
+      "rpm": {
+        "desktopTemplate": "linux/eternalcraft.desktop.hbs",
+        "depends": [
+          "dbus-libs"
+        ]
+      }
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "targets": "all"
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEREQzZCMDVBMDIzM0I2ODYKUldTR3RqTUNXckRHM2FlUmlISFE5TXhWTE0wQllkYmg5Zm9NRzNTbDVBRDRZNDdBYnRteVFoWi8K",
+      "endpoints": [
+        "https://raw.githubusercontent.com/Santi-PdR/EternalCraft-Launcher/launcher-updates/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

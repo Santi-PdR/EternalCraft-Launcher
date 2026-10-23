@@ -2552,11 +2552,13 @@ fn ensure_series_not_running(app: &AppHandle, series_id: &str) -> Result<(), Str
     Ok(())
 }
 
+fn running_game_directory_error(pid: u32) -> String {
+    format!("Minecraft de esta instancia (PID {pid}) sigue ejecutándose. Ciérralo antes de continuar.")
+}
+
 fn ensure_game_directory_not_running(game_directory: &Path) -> Result<(), String> {
     if let Some(pid) = find_running_minecraft_pid(game_directory) {
-        return Err(format!(
-            "Minecraft de esta instancia (PID {pid}) sigue ejecutándose. Ciérralo antes de cambiar sus mods o actualizar el pack."
-        ));
+        return Err(running_game_directory_error(pid));
     }
     Ok(())
 }
@@ -4800,6 +4802,15 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn running_instance_error_is_action_neutral() {
+        let message = super::running_game_directory_error(123);
+
+        assert!(message.contains("PID 123"));
+        assert!(message.contains("Ciérralo antes de continuar"));
+        assert!(!message.contains("mods"));
+    }
+
     #[test]
     fn process_check_matches_only_the_same_game_directory() {
         use std::path::PathBuf;

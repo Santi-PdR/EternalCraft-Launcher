@@ -1787,6 +1787,10 @@ mod tests {
                 }
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // Accepted Windows sockets inherit the listener's
+                        // nonblocking mode; the per-connection worker expects a
+                        // blocking stream while reading the HTTP request.
+                        stream.set_nonblocking(false).unwrap();
                         let active = Arc::clone(&server_active);
                         let peak = Arc::clone(&server_peak);
                         let contents = server_contents.clone();

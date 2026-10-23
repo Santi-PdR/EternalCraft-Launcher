@@ -3139,11 +3139,63 @@ fn java_candidates() -> Vec<PathBuf> {
                 .map(|dir| dir.join(if cfg!(windows) { "java.exe" } else { "java" })),
         );
     }
+    #[cfg(windows)]
+    candidates.extend(windows_java_candidates());
     #[cfg(target_os = "linux")]
     for root in ["/usr/lib/jvm", "/usr/java"] {
         if let Ok(entries) = fs::read_dir(root) {
             candidates.extend(entries.flatten().map(|entry| entry.path().join("bin/java")));
         }
+    }
+    candidates
+}
+
+#[cfg(windows)]
+fn append_java_candidates_under_install_root(root: &Path, candidates: &mut Vec<PathBuf>) {
+    candidates.push(root.join("java.exe"));
+    candidates.push(root.join("bin").join("java.exe"));
+    candidates.push(root.join("javapath").join("java.exe"));
+
+    if let Ok(entries) = fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let installation = entry.path();
+            if installation.is_dir() {
+                candidates.push(installation.join("bin").join("java.exe"));
+                candidates.push(installation.join("jre").join("bin").join("java.exe"));
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn windows_java_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let mut installation_roots = Vec::new();
+    for variable in ["ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(program_files) = env::var_os(variable).map(PathBuf::from) {
+            installation_roots.push(program_files.join("Common Files/Oracle/Java/javapath"));
+            for vendor in [
+                "Java",
+                "Eclipse Adoptium",
+                "Microsoft",
+                "Microsoft JDK",
+                "Amazon Corretto",
+                "Azul Systems",
+                "BellSoft",
+            ] {
+                installation_roots.push(program_files.join(vendor));
+            }
+        }
+    }
+    if let Some(local_app_data) = env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+        installation_roots.push(local_app_data.join("Programs/Java"));
+        installation_roots.push(local_app_data.join("Programs/Eclipse Adoptium"));
+        installation_roots.push(local_app_data.join("Programs/Microsoft"));
+        installation_roots.push(local_app_data.join("Microsoft/WinGet/Links"));
+    }
+
+    for root in installation_roots {
+        append_java_candidates_under_install_root(&root, &mut candidates);
     }
     candidates
 }
@@ -5717,6 +5769,33 @@ mod tests {
             ("21.0.3".into(), 21)
         );
         assert!(parse_java_major("not a java version").is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_java_discovery_includes_standard_jdk_and_oracle_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "eternalcraft-java-paths-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let vendor_root = root.join("Eclipse Adoptium");
+        let oracle_root = root.join("Oracle/Java/javapath");
+        std::fs::create_dir_all(vendor_root.join("jdk-17/bin")).unwrap();
+        std::fs::create_dir_all(&oracle_root).unwrap();
+        std::fs::write(vendor_root.join("jdk-17/bin/java.exe"), b"fixture").unwrap();
+        std::fs::write(oracle_root.join("java.exe"), b"fixture").unwrap();
+
+        let mut candidates = Vec::new();
+        super::append_java_candidates_under_install_root(&vendor_root, &mut candidates);
+        super::append_java_candidates_under_install_root(&oracle_root, &mut candidates);
+
+        assert!(candidates.contains(&vendor_root.join("jdk-17/bin/java.exe")));
+        assert!(candidates.contains(&oracle_root.join("java.exe")));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
